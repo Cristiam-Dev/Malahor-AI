@@ -1,0 +1,7 @@
+src/
+product/
+docs/source/
+.sandbox/
+.gitignore
+tsconfig.json
+pnpm-workspace.yaml

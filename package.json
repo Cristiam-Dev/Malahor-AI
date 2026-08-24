@@ -1,0 +1,26 @@
+{
+  "name": "malahor-ai",
+  "version": "0.0.0",
+  "description": "CLI local para potenciar agentes de IA con memoria persistente, OpenCode, Graphify, SDD, Obsidian y Vikunja.",
+  "type": "module",
+  "bin": {
+    "malahor-ai": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build src/cli/index.ts --outdir dist --target=node && bun build src/mnemo/index.ts --outdir dist/mnemo --target=node",
+    "dev": "bun run src/cli/index.ts",
+    "dev:dry-run": "bun run src/cli/index.ts install --dry-run --yes",
+    "dev:sandbox": "bun run build && MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode node dist/index.js install --yes",
+    "doctor:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts doctor",
+    "sandbox:reset": "rm -rf .sandbox"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@9.0.0"
+}
