@@ -29,6 +29,27 @@ export function injectMnemoConfig(paths: MalahorPaths, dryRun: boolean): OpenCod
   return next;
 }
 
+export function removeMnemoConfig(paths: MalahorPaths, dryRun: boolean): OpenCodeConfig {
+  const current = readOpenCodeConfig(paths.opencodeConfig);
+  const next: OpenCodeConfig = { ...current };
+
+  if (current.mcp) {
+    const remainingMcp = { ...current.mcp };
+    delete remainingMcp.mnemo;
+    if (Object.keys(remainingMcp).length > 0) {
+      next.mcp = remainingMcp;
+    } else {
+      delete next.mcp;
+    }
+  }
+
+  if (!dryRun && fs.existsSync(paths.opencodeConfig)) {
+    fs.writeFileSync(paths.opencodeConfig, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  }
+
+  return next;
+}
+
 export function readOpenCodeConfig(filePath: string): OpenCodeConfig {
   if (!fs.existsSync(filePath)) {
     return { $schema: "https://opencode.ai/config.json" };

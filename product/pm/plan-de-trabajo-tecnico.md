@@ -31,7 +31,7 @@ Objetivo: estabilizar soporte de diagnostico y ciclos de vida.
 | ID | Tarea | Estado |
 |---|---|---|
 | T-14 | Implementar `doctor` | Completado |
-| T-15 | Implementar `uninstall` | Pendiente |
+| T-15 | Implementar `uninstall` | Completado |
 | T-16 | Implementar `update` | Pendiente |
 | T-17 | Soporte Linux nativo | Pendiente |
 | T-18 | Soporte Mac | Pendiente |
