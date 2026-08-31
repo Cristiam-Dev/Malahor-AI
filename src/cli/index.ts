@@ -2,6 +2,7 @@
 import { runDoctor } from "./commands/doctor";
 import { runInstall } from "./commands/install";
 import { runUninstall } from "./commands/uninstall";
+import { runUpdate } from "./commands/update";
 
 interface ParsedArgs {
   command: string;
@@ -21,6 +22,9 @@ function main(argv: string[]): void {
         return;
       case "uninstall":
         runUninstall({ dryRun: parsed.flags.has("dry-run"), yes: parsed.flags.has("yes") });
+        return;
+      case "update":
+        runUpdate({ dryRun: parsed.flags.has("dry-run"), yes: parsed.flags.has("yes") });
         return;
       case "help":
       case "--help":
@@ -50,7 +54,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function printHelp(): void {
-  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  uninstall     Remove Malahor from OpenCode\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Non-interactive confirmation placeholder\n\nConfiguration:\n  MALAHOR_MODE          assistant | executor\n  MALAHOR_CONFIG        Path to config.jsonc\n  MALAHOR_HOME          Override ~/.malahor\n  MALAHOR_OPENCODE_DIR  Override ~/.config/opencode\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
+  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  uninstall     Remove Malahor from OpenCode\n  update        Refresh Malahor installation\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Non-interactive confirmation placeholder\n\nConfiguration:\n  MALAHOR_MODE          assistant | executor\n  MALAHOR_CONFIG        Path to config.jsonc\n  MALAHOR_HOME          Override ~/.malahor\n  MALAHOR_OPENCODE_DIR  Override ~/.config/opencode\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
 }
 
 main(process.argv.slice(2));

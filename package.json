@@ -18,6 +18,7 @@
     "dev:sandbox": "bun run build && MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode node dist/index.js install --yes",
     "doctor:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts doctor",
     "uninstall:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts uninstall --yes",
+    "update:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts update --yes",
     "sandbox:reset": "rm -rf .sandbox"
   },
   "engines": {
