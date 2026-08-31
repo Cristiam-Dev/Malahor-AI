@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import { loadConfig } from "../core/config";
 import { detectEnvironment } from "../core/detector";
 import { readOpenCodeConfig } from "../core/injector";
-import { isSandbox, resolvePaths } from "../core/paths";
+import { isSandbox } from "../core/paths";
 
 interface CheckResult {
   name: string;
@@ -11,7 +12,8 @@ interface CheckResult {
 }
 
 export function runDoctor(): void {
-  const paths = resolvePaths();
+  const config = loadConfig();
+  const paths = config.paths;
   const detection = detectEnvironment(paths);
   const checks: CheckResult[] = [];
 
@@ -28,6 +30,8 @@ export function runDoctor(): void {
   checks.push({ name: "Graphify", ok: detection.commands.graphify, message: detection.commands.graphify ? "found" : "not found", critical: false });
 
   process.stdout.write(`\nmalahor-ai doctor\n=================\n`);
+  process.stdout.write(`Mode: ${config.mode}\n`);
+  process.stdout.write(`Config file: ${paths.configFile}\n`);
   process.stdout.write(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}\n\n`);
 
   for (const check of checks) {

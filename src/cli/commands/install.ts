@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backupFile } from "../core/backup";
+import { loadConfig } from "../core/config";
 import { detectEnvironment } from "../core/detector";
 import { injectMnemoConfig } from "../core/injector";
-import { isSandbox, resolvePaths } from "../core/paths";
+import { isSandbox } from "../core/paths";
 
 export interface InstallOptions {
   dryRun: boolean;
@@ -11,13 +12,16 @@ export interface InstallOptions {
 }
 
 export function runInstall(options: InstallOptions): void {
-  const paths = resolvePaths();
+  const config = loadConfig();
+  const paths = config.paths;
   const detection = detectEnvironment(paths);
   const assetsDir = path.resolve(paths.cwd, "assets");
   const mnemoBuild = path.resolve(paths.cwd, "dist", "mnemo", "index.js");
   const opencodeAsset = path.join(assetsDir, "opencode", "OPENCODE.md");
 
   printHeader("malahor-ai install");
+  printLine(`Mode: ${config.mode}`);
+  printLine(`Config file: ${paths.configFile}`);
   printLine(`Malahor home: ${paths.malahorHome}`);
   printLine(`OpenCode dir: ${paths.opencodeDir}`);
   printLine(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}`);
