@@ -60,6 +60,7 @@ export function runInstall(options: InstallOptions): void {
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
   printLine("Mnemo MCP: configured");
   printLine("OPENCODE.md: installed");
+  printLine(detection.commands.graphify ? "Graphify: found" : "Graphify: not found. Install with `pip install graphifyy`.");
   printLine("Next: run `malahor-ai doctor`");
 }
 

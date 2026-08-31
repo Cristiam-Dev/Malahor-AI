@@ -14,4 +14,4 @@ Como desarrollador, quiero que Malahor genere el mapa estructural del codigo fue
 
 ## Estado
 
-Pendiente.
+Completado.
