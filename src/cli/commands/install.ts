@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backupFile } from "../core/backup";
+import { copyAssets } from "../core/assets";
 import { loadConfig } from "../core/config";
 import { detectEnvironment } from "../core/detector";
 import { injectMnemoConfig } from "../core/injector";
+import { resolvePackagePaths } from "../core/package";
 import { isSandbox } from "../core/paths";
 
 export interface InstallOptions {
@@ -15,9 +17,8 @@ export function runInstall(options: InstallOptions): void {
   const config = loadConfig();
   const paths = config.paths;
   const detection = detectEnvironment(paths);
-  const assetsDir = path.resolve(paths.cwd, "assets");
-  const mnemoBuild = path.resolve(paths.cwd, "dist", "mnemo", "index.js");
-  const opencodeAsset = path.join(assetsDir, "opencode", "OPENCODE.md");
+  const packagePaths = resolvePackagePaths(paths.cwd);
+  const opencodeAsset = path.join(packagePaths.assetsDir, "opencode", "OPENCODE.md");
 
   printHeader("malahor-ai install");
   printLine(`Mode: ${config.mode}`);
@@ -31,7 +32,7 @@ export function runInstall(options: InstallOptions): void {
     throw new Error(`Node 22+ es requerido. Detectado: ${detection.nodeVersion}`);
   }
 
-  if (!options.dryRun && !fs.existsSync(mnemoBuild)) {
+  if (!options.dryRun && !fs.existsSync(packagePaths.mnemoBuild)) {
     throw new Error("No existe dist/mnemo/index.js. Ejecuta `bun run build` antes de instalar.");
   }
 
@@ -41,6 +42,7 @@ export function runInstall(options: InstallOptions): void {
 
   if (!options.dryRun) {
     fs.mkdirSync(paths.mnemoDir, { recursive: true });
+    fs.mkdirSync(paths.assetsDir, { recursive: true });
     fs.mkdirSync(paths.graphsDir, { recursive: true });
     fs.mkdirSync(paths.vaultDir, { recursive: true });
     fs.mkdirSync(paths.opencodeDir, { recursive: true });
@@ -50,14 +52,16 @@ export function runInstall(options: InstallOptions): void {
   const mdBackup = backupFile(paths.opencodeMd, paths.backupsDir, options.dryRun);
 
   if (!options.dryRun) {
-    fs.copyFileSync(mnemoBuild, paths.mnemoIndex);
+    fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
     fs.copyFileSync(opencodeAsset, paths.opencodeMd);
   }
 
+  copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
   injectMnemoConfig(paths, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
+  printLine(`Assets: ${options.dryRun ? "would install" : "installed"}`);
   printLine("Mnemo MCP: configured");
   printLine("OPENCODE.md: installed");
   printLine(detection.commands.graphify ? "Graphify: found" : "Graphify: not found. Install with `pip install graphifyy`.");

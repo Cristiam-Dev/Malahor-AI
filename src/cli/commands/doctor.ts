@@ -23,6 +23,7 @@ export function runDoctor(): void {
   checks.push({ name: "Malahor home", ok: fs.existsSync(paths.malahorHome), message: paths.malahorHome, critical: true });
   checks.push({ name: "Mnemo dir", ok: fs.existsSync(paths.mnemoDir), message: paths.mnemoDir, critical: true });
   checks.push({ name: "Mnemo index", ok: fs.existsSync(paths.mnemoIndex), message: paths.mnemoIndex, critical: true });
+  checks.push({ name: "Assets dir", ok: fs.existsSync(paths.assetsDir), message: paths.assetsDir, critical: true });
   checks.push({ name: "Graphs dir", ok: fs.existsSync(paths.graphsDir), message: paths.graphsDir, critical: true });
   checks.push({ name: "OpenCode config", ok: fs.existsSync(paths.opencodeConfig), message: paths.opencodeConfig, critical: true });
   checks.push({ name: "OPENCODE.md", ok: fs.existsSync(paths.opencodeMd), message: paths.opencodeMd, critical: true });
