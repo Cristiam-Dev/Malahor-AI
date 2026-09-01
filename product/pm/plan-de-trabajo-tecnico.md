@@ -44,7 +44,7 @@ Objetivo: entregar valor diferencial sobre orquestacion, SDD y calidad.
 | ID | Tarea | Estado |
 |---|---|---|
 | T-20 | Crear skills `sdd-*` | Completado |
-| T-21 | Crear skill `pattern-advisor` | Pendiente |
+| T-21 | Crear skill `pattern-advisor` | Completado |
 | T-22 | Crear skills de calidad | Pendiente |
 | T-23 | Crear skills git | Pendiente |
 | T-24 | Crear `vault-template` | Pendiente |
