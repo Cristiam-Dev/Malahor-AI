@@ -16,4 +16,4 @@ Como desarrollador asistido por IA, quiero que Malahor recuerde decisiones, bugs
 
 ## Estado
 
-Pendiente.
+Completado.

@@ -16,4 +16,4 @@ Como desarrollador que usa OpenCode en WSL, quiero instalar `malahor-ai` con un 
 
 ## Estado
 
-Pendiente.
+Completado.

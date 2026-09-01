@@ -15,4 +15,4 @@ Como desarrollador, quiero ejecutar `malahor-ai doctor` para saber si mi instala
 
 ## Estado
 
-Pendiente.
+Completado.
