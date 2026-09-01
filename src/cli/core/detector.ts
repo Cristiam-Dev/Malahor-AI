@@ -39,6 +39,11 @@ export function detectEnvironment(paths: MalahorPaths): DetectionResult {
 
 export function commandExists(command: string): boolean {
   try {
+    if (process.platform === "win32") {
+      execFileSync("where.exe", [command], { stdio: "ignore" });
+      return true;
+    }
+
     execFileSync("sh", ["-lc", `command -v ${shellQuote(command)}`], { stdio: "ignore" });
     return true;
   } catch {

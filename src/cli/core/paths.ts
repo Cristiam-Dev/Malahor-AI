@@ -17,29 +17,43 @@ export interface MalahorPaths {
   backupsDir: string;
 }
 
-export function resolvePaths(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): MalahorPaths {
-  const home = path.resolve(env.HOME ?? os.homedir());
-  const malahorHome = path.resolve(cwd, env.MALAHOR_HOME ?? path.join(home, ".malahor"));
-  const xdgConfigHome = path.resolve(cwd, env.XDG_CONFIG_HOME ?? path.join(home, ".config"));
-  const opencodeDir = path.resolve(cwd, env.MALAHOR_OPENCODE_DIR ?? path.join(xdgConfigHome, "opencode"));
+export function resolvePaths(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd(), platform: NodeJS.Platform = process.platform): MalahorPaths {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const home = pathApi.resolve(env.HOME ?? env.USERPROFILE ?? resolveWindowsHome(env) ?? os.homedir());
+  const malahorHome = pathApi.resolve(cwd, env.MALAHOR_HOME ?? pathApi.join(home, ".malahor"));
+  const defaultConfigHome = platform === "win32" ? env.APPDATA ?? pathApi.join(home, "AppData", "Roaming") : pathApi.join(home, ".config");
+  const xdgConfigHome = pathApi.resolve(cwd, env.XDG_CONFIG_HOME ?? defaultConfigHome);
+  const opencodeDir = pathApi.resolve(cwd, env.MALAHOR_OPENCODE_DIR ?? pathApi.join(xdgConfigHome, "opencode"));
 
   return {
     cwd,
     home,
     malahorHome,
-    mnemoDir: path.join(malahorHome, "mnemo"),
-    mnemoDb: path.join(malahorHome, "mnemo", "db.json"),
-    mnemoIndex: path.join(malahorHome, "mnemo", "index.js"),
-    graphsDir: path.join(malahorHome, "graphs"),
-    vaultDir: path.join(malahorHome, "vault"),
-    configFile: path.resolve(cwd, env.MALAHOR_CONFIG ?? path.join(malahorHome, "config.jsonc")),
+    mnemoDir: pathApi.join(malahorHome, "mnemo"),
+    mnemoDb: pathApi.join(malahorHome, "mnemo", "db.json"),
+    mnemoIndex: pathApi.join(malahorHome, "mnemo", "index.js"),
+    graphsDir: pathApi.join(malahorHome, "graphs"),
+    vaultDir: pathApi.join(malahorHome, "vault"),
+    configFile: pathApi.resolve(cwd, env.MALAHOR_CONFIG ?? pathApi.join(malahorHome, "config.jsonc")),
     opencodeDir,
-    opencodeConfig: path.join(opencodeDir, "opencode.jsonc"),
-    opencodeMd: path.join(opencodeDir, "OPENCODE.md"),
-    backupsDir: path.join(malahorHome, "backups"),
+    opencodeConfig: pathApi.join(opencodeDir, "opencode.jsonc"),
+    opencodeMd: pathApi.join(opencodeDir, "OPENCODE.md"),
+    backupsDir: pathApi.join(malahorHome, "backups"),
   };
 }
 
 export function isSandbox(paths: MalahorPaths): boolean {
-  return paths.malahorHome.includes(`${path.sep}.sandbox${path.sep}`) || paths.opencodeDir.includes(`${path.sep}.sandbox${path.sep}`);
+  return includesSandbox(paths.malahorHome) || includesSandbox(paths.opencodeDir);
+}
+
+function includesSandbox(value: string): boolean {
+  return value.replaceAll("\\", "/").includes("/.sandbox/");
+}
+
+function resolveWindowsHome(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.HOMEDRIVE && env.HOMEPATH) {
+    return `${env.HOMEDRIVE}${env.HOMEPATH}`;
+  }
+
+  return undefined;
 }

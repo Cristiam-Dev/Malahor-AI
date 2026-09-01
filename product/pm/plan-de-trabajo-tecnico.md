@@ -35,7 +35,7 @@ Objetivo: estabilizar soporte de diagnostico y ciclos de vida.
 | T-16 | Implementar `update` | Completado |
 | T-17 | Soporte Linux nativo | Completado |
 | T-18 | Soporte Mac | Completado |
-| T-19 | Soporte Windows PowerShell | Pendiente |
+| T-19 | Soporte Windows PowerShell | Completado |
 
 ## Fase 3 - Skills y assets
 
