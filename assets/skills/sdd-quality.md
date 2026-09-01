@@ -10,6 +10,13 @@ Ejecutar calidad antes de verificar el resultado final.
 4. Revisar riesgos para SonarQube: bugs, code smells, seguridad y cobertura.
 5. Si falla, volver a `sdd-apply`.
 
+## Skills Relacionados
+
+- `quality-tests`
+- `quality-coverage`
+- `quality-duplicates`
+- `quality-sonarqube`
+
 ## Salida
 
 - Comandos ejecutados.
