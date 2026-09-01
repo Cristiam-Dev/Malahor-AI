@@ -18,7 +18,7 @@ export function runDoctor(): void {
   const checks: CheckResult[] = [];
 
   checks.push({ name: "Node", ok: detection.nodeMajor >= 22, message: detection.nodeVersion, critical: true });
-  checks.push({ name: "Linux runtime", ok: detection.platform === "linux", message: `platform=${detection.platform} wsl=${String(detection.isWsl)}`, critical: true });
+  checks.push({ name: "Supported runtime", ok: detection.platform === "linux" || detection.platform === "darwin", message: `platform=${detection.platform} wsl=${String(detection.isWsl)}`, critical: true });
   checks.push({ name: "OpenCode command", ok: detection.commands.opencode, message: detection.commands.opencode ? "found" : "not found", critical: true });
   checks.push({ name: "Malahor home", ok: fs.existsSync(paths.malahorHome), message: paths.malahorHome, critical: true });
   checks.push({ name: "Mnemo dir", ok: fs.existsSync(paths.mnemoDir), message: paths.mnemoDir, critical: true });

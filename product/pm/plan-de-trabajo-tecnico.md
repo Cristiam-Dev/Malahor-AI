@@ -34,7 +34,7 @@ Objetivo: estabilizar soporte de diagnostico y ciclos de vida.
 | T-15 | Implementar `uninstall` | Completado |
 | T-16 | Implementar `update` | Completado |
 | T-17 | Soporte Linux nativo | Completado |
-| T-18 | Soporte Mac | Pendiente |
+| T-18 | Soporte Mac | Completado |
 | T-19 | Soporte Windows PowerShell | Pendiente |
 
 ## Fase 3 - Skills y assets
