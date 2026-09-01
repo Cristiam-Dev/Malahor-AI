@@ -33,7 +33,7 @@ Objetivo: estabilizar soporte de diagnostico y ciclos de vida.
 | T-14 | Implementar `doctor` | Completado |
 | T-15 | Implementar `uninstall` | Completado |
 | T-16 | Implementar `update` | Completado |
-| T-17 | Soporte Linux nativo | Pendiente |
+| T-17 | Soporte Linux nativo | Completado |
 | T-18 | Soporte Mac | Pendiente |
 | T-19 | Soporte Windows PowerShell | Pendiente |
 
