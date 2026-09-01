@@ -48,7 +48,7 @@ Objetivo: entregar valor diferencial sobre orquestacion, SDD y calidad.
 | T-22 | Crear skills de calidad | Completado |
 | T-23 | Crear skills git | Completado |
 | T-24 | Crear `vault-template` | Completado |
-| T-25 | Crear personas neutral y plantilla custom | Pendiente |
+| T-25 | Crear personas neutral y plantilla custom | Completado |
 
 ## Fase 4 - Publicacion
 
