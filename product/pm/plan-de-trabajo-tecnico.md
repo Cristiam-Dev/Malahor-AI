@@ -50,6 +50,30 @@ Objetivo: entregar valor diferencial sobre orquestacion, SDD y calidad.
 | T-24 | Crear `vault-template` | Completado |
 | T-25 | Crear personas neutral y plantilla custom | Completado |
 
+## Fase 3.5 - Specialty skills first-party
+
+Objetivo: asegurar que Malahor no dependa de skills externas instaladas en la maquina del usuario para especialidades tecnicas comunes.
+
+| ID | Tarea | Estado |
+|---|---|---|
+| T-26a | Definir catalogo first-party de specialty skills | Pendiente |
+| T-26b | Crear skill router y stack detector propios | Pendiente |
+| T-26c | Crear specialty skills backend/frontend/devops/diseno | Pendiente |
+| T-26d | Integrar specialty skills en assets instalados | Pendiente |
+| T-26e | Documentar politica de no dependencia de skills externas | Pendiente |
+
+## Fase 3.6 - Administracion de memoria Mnemo
+
+Objetivo: permitir administrar proyectos guardados en memoria sin editar manualmente `db.json`, con backups automaticos antes de operaciones destructivas.
+
+| ID | Tarea | Estado |
+|---|---|---|
+| T-26f | Definir comandos CLI de administracion de memoria | Pendiente |
+| T-26g | Implementar `memory list` e `inspect` | Pendiente |
+| T-26h | Implementar `memory backup`, `reset` y `restore` | Pendiente |
+| T-26i | Agregar confirmacion fuerte para borrados/restauraciones | Pendiente |
+| T-26j | Evaluar herramientas MCP seguras para administracion de memoria | Pendiente |
+
 ## Fase 4 - Publicacion
 
 Objetivo: publicar paquete npm publico y dejar repositorio GitHub listo.
