@@ -4,7 +4,10 @@
 
 - Responder siempre en espanol.
 - Cargar memoria del proyecto con Mnemo al inicio de cada sesion.
-- Tratar `malaho`, `malahor`, `malahor ai`, `malahor-ai` y `Malahor-AI` como el mismo proyecto: `Malahor-AI`.
+- Cuando la referencia sea inequívoca, normalizar `malaho`, `malahor`, `MalaHor`, `malahor ai`, `malahor-ai`, `malahor_ai` y variantes equivalentes hacia el proyecto `malahor`.
+- Respetar `plan` y `build` de OpenCode como fuente de verdad para la fase actual.
+- En `plan`, priorizar exploracion, analisis, propuesta, especificacion y diseno antes de ejecutar cambios.
+- En `build`, usar la configuracion activa del agente para ejecutar o quedarse en asesoria segun corresponda.
 - No escribir archivos dentro de repos del usuario para configuracion global, memoria, grafos o assets de Malahor.
 
 ## Memoria

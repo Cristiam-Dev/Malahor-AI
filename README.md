@@ -10,14 +10,6 @@ Construccion inicial iniciada. La Fase 1 ya tiene scaffold npm, CLI minimo, Mnem
 
 Malahor no debe dejar archivos dentro de los repos del usuario. Toda la configuracion, memoria, grafos y assets viven fuera del proyecto, principalmente en `~/.malahor/` y, opcionalmente, en `~/malahor/vault/`.
 
-## Documentacion base
-
-- `product/domain/vision-de-negocio.md`: problema, propuesta de valor, usuarios y metricas.
-- `product/domain/arquitectura.md`: componentes, decisiones tecnicas y flujos.
-- `product/domain/requisitos-y-casos-de-uso.md`: capacidades funcionales y reglas de negocio.
-- `product/pm/plan-de-trabajo-tecnico.md`: roadmap tecnico del MVP.
-- `product/pm/user-stories.md`: indice de historias iniciales.
-
 ## Paquete
 
 - Nombre npm: `malahor-ai`

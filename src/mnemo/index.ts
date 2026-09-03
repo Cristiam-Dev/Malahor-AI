@@ -64,6 +64,18 @@ function handleMessage(message: RpcMessage): void {
           ],
         });
         return;
+      case "ping":
+        respond(message.id, {});
+        return;
+      case "resources/list":
+        respond(message.id, { resources: [] });
+        return;
+      case "resources/templates/list":
+        respond(message.id, { resourceTemplates: [] });
+        return;
+      case "prompts/list":
+        respond(message.id, { prompts: [] });
+        return;
       default:
         respondError(message.id, -32601, `Method not found: ${message.method}`);
     }

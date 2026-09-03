@@ -50,8 +50,12 @@ export function loadDb(filePath = dbPath()): MnemoDb {
 
   const parsed = JSON.parse(raw) as Partial<MnemoDb>;
   return {
-    observations: Array.isArray(parsed.observations) ? parsed.observations : [],
-    sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+    observations: Array.isArray(parsed.observations)
+      ? parsed.observations.map((observation) => normalizeLoadedObservation(observation as Observation))
+      : [],
+    sessions: Array.isArray(parsed.sessions)
+      ? parsed.sessions.map((session) => normalizeLoadedSession(session as SessionSummary))
+      : [],
     nextId: typeof parsed.nextId === "number" ? parsed.nextId : 1,
   };
 }
@@ -142,7 +146,26 @@ export function listProjects(): Array<{ project: string; observations: number; l
 }
 
 export function normalizeProject(project: string): string {
-  const value = project.trim().toLowerCase().replace(/[\s_]+/g, "-");
-  if (["malaho", "malahor", "malahor-ai", "malahorai"].includes(value)) return "Malahor-AI";
-  return project.trim();
+  const trimmed = project.trim();
+  const value = projectLookupKey(trimmed);
+
+  if (["malaho", "malahor", "malahor-ai", "malahorai"].includes(value)) return "malahor";
+  return trimmed;
+}
+
+function projectLookupKey(project: string): string {
+  return project
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function normalizeLoadedObservation(observation: Observation): Observation {
+  return { ...observation, project: normalizeProject(observation.project) };
+}
+
+function normalizeLoadedSession(session: SessionSummary): SessionSummary {
+  return { ...session, project: normalizeProject(session.project) };
 }

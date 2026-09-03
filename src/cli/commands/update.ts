@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { backupFile } from "../core/backup";
 import { copyAssets } from "../core/assets";
-import { loadConfig } from "../core/config";
+import { formatBuildAutonomy, formatModelSelection, loadConfig } from "../core/config";
 import { detectEnvironment } from "../core/detector";
-import { injectMnemoConfig } from "../core/injector";
+import { syncOpenCodeConfig } from "../core/injector";
 import { resolvePackagePaths } from "../core/package";
 import { isSandbox } from "../core/paths";
 
@@ -25,6 +25,9 @@ export function runUpdate(options: UpdateOptions): void {
   printLine(`Config file: ${paths.configFile}`);
   printLine(`Malahor home: ${paths.malahorHome}`);
   printLine(`OpenCode dir: ${paths.opencodeDir}`);
+  printLine(`Plan model: ${formatModelSelection(config.models.planning)}`);
+  printLine(`Build model: ${formatModelSelection(config.models.execution)}`);
+  printLine(`Build autonomy: ${formatBuildAutonomy(config.autonomy.build)}`);
   printLine(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}`);
   printLine(`Dry-run: ${options.dryRun ? "yes" : "no"}`);
 
@@ -57,12 +60,23 @@ export function runUpdate(options: UpdateOptions): void {
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
-  injectMnemoConfig(paths, options.dryRun);
+  syncOpenCodeConfig(
+    paths,
+    {
+      planningModel: config.models.planning,
+      executionModel: config.models.execution,
+      buildAutonomy: config.autonomy.build,
+    },
+    options.dryRun,
+  );
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(`Mnemo MCP: ${options.dryRun ? "would refresh" : "refreshed"}`);
+  printLine(config.models.planning ? `OpenCode plan agent: ${options.dryRun ? "would sync" : "synced"}` : "OpenCode plan agent: unchanged");
+  printLine(config.models.execution ? `OpenCode build agent: ${options.dryRun ? "would sync" : "synced"}` : "OpenCode build agent: unchanged");
+  printLine(config.autonomy.build ? `OpenCode build autonomy: ${options.dryRun ? "would sync" : "synced"}` : "OpenCode build autonomy: unchanged");
   printLine(`OPENCODE.md: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine("Local data: kept");
   printLine("Next: run `malahor-ai doctor`");
