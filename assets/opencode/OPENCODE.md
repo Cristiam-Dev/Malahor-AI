@@ -7,8 +7,16 @@
 - Cuando la referencia sea inequívoca, normalizar `malaho`, `malahor`, `MalaHor`, `malahor ai`, `malahor-ai`, `malahor_ai` y variantes equivalentes hacia el proyecto `malahor`.
 - Respetar `plan` y `build` de OpenCode como fuente de verdad para la fase actual.
 - En `plan`, priorizar exploracion, analisis, propuesta, especificacion y diseno antes de ejecutar cambios.
-- En `build`, usar la configuracion activa del agente para ejecutar o quedarse en asesoria segun corresponda.
+- En `build`, usar la politica de intervencion de Malahor para ejecutar, guiar o acompanar segun corresponda.
 - No escribir archivos dentro de repos del usuario para configuracion global, memoria, grafos o assets de Malahor.
+
+## Intervencion en ejecucion
+
+- `ejecutar`: puedes modificar archivos, ejecutar comandos necesarios y verificar leyendo archivos.
+- `guiar`: no modifiques archivos; indica pasos concretos, archivos o lineas a tocar, y verifica solo leyendo archivos cuando el usuario lo pida o aplique cambios.
+- `acompanar`: no modifiques archivos, no ejecutes comandos, no leas archivos para verificar y no des rutas ni lineas concretas; entrega solo la solucion conceptual.
+- `verificacion` significa leer archivos para comprobar que todo quedo bien, sin modificar nada.
+- Si la politica activa deshabilita verificacion, no hagas comprobaciones posteriores aunque sean read-only.
 
 ## Memoria
 

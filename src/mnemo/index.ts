@@ -16,24 +16,14 @@ process.stdin.on("data", (chunk: Buffer) => {
 
 function readMessages(): void {
   while (buffer.length > 0) {
-    const headerEnd = buffer.indexOf("\r\n\r\n");
-    if (headerEnd === -1) return;
+    const lineEnd = buffer.indexOf("\n");
+    if (lineEnd === -1) return;
 
-    const header = buffer.subarray(0, headerEnd).toString("utf8");
-    const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
-    if (!lengthMatch) {
-      buffer = Buffer.alloc(0);
-      return;
-    }
+    const line = buffer.subarray(0, lineEnd).toString("utf8").replace(/\r$/, "");
+    buffer = buffer.subarray(lineEnd + 1);
 
-    const length = Number(lengthMatch[1]);
-    const bodyStart = headerEnd + 4;
-    const bodyEnd = bodyStart + length;
-    if (buffer.length < bodyEnd) return;
-
-    const body = buffer.subarray(bodyStart, bodyEnd).toString("utf8");
-    buffer = buffer.subarray(bodyEnd);
-    handleMessage(JSON.parse(body) as RpcMessage);
+    if (!line.trim()) continue;
+    handleMessage(JSON.parse(line) as RpcMessage);
   }
 }
 
@@ -93,6 +83,5 @@ function respondError(id: RpcMessage["id"], code: number, message: string): void
 }
 
 function writeMessage(message: unknown): void {
-  const body = JSON.stringify(message);
-  process.stdout.write(`Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`);
+  process.stdout.write(`${JSON.stringify(message)}\n`);
 }

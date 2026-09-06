@@ -10,13 +10,13 @@ interface ParsedArgs {
   flags: Set<string>;
 }
 
-function main(argv: string[]): void {
+async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
 
   try {
     switch (parsed.command) {
       case "install":
-        runInstall({ dryRun: parsed.flags.has("dry-run"), yes: parsed.flags.has("yes") });
+        await runInstall({ dryRun: parsed.flags.has("dry-run"), yes: parsed.flags.has("yes") });
         return;
       case "doctor":
         runDoctor();
@@ -58,7 +58,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function printHelp(): void {
-  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  graph         Generate external code graph\n  uninstall     Remove Malahor from OpenCode\n  update        Refresh Malahor installation\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Non-interactive confirmation placeholder\n\nConfiguration:\n  MALAHOR_MODE          assistant | executor\n  MALAHOR_CONFIG        Path to config.jsonc\n  MALAHOR_HOME          Override ~/.malahor\n  MALAHOR_OPENCODE_DIR  Override ~/.config/opencode\n\nConfig file keys:\n  models.planning.model      provider/model\n  models.planning.variant    optional variant\n  models.execution.model     provider/model\n  models.execution.variant   optional variant\n  autonomy.build             advise | execute\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
+  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  graph         Generate external code graph\n  uninstall     Remove Malahor from OpenCode\n  update        Refresh Malahor installation\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Use defaults without prompts\n\nConfiguration:\n  MALAHOR_MODE                    assistant | executor\n  MALAHOR_CONFIG                  Path to config.jsonc\n  MALAHOR_HOME                    Override ~/.malahor\n  MALAHOR_OPENCODE_DIR            Override ~/.config/opencode\n  MALAHOR_EXECUTION_INTERVENTION  ejecutar | guiar | acompanar\n  MALAHOR_EXECUTION_VERIFICATION  true | false\n\nConfig file keys:\n  execution.intervention      ejecutar | guiar | acompanar\n  execution.verification      boolean read-only verification\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
 }
 
-main(process.argv.slice(2));
+void main(process.argv.slice(2));

@@ -1,52 +1,39 @@
 import fs from "node:fs";
+import path from "node:path";
 
 import { type MalahorPaths, resolvePaths } from "./paths";
 import { stripJsonComments } from "./injector";
 
 export type MalahorMode = "assistant" | "executor";
-export type MalahorBuildAutonomy = "advise" | "execute";
+export type MalahorIntervention = "ejecutar" | "guiar" | "acompanar";
 
-export interface MalahorModelSelection {
-  model: string;
-  variant?: string;
+export interface MalahorExecutionPolicy {
+  intervention: MalahorIntervention;
+  verification: boolean;
 }
 
 export interface MalahorConfig {
   mode: MalahorMode;
   paths: MalahorPaths;
-  models: {
-    planning?: MalahorModelSelection;
-    execution?: MalahorModelSelection;
-  };
-  autonomy: {
-    build?: MalahorBuildAutonomy;
-  };
+  execution: MalahorExecutionPolicy;
 }
 
 interface ConfigFile {
   mode?: unknown;
-  models?: unknown;
-  autonomy?: unknown;
+  execution?: unknown;
   paths?: unknown;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): MalahorConfig {
   const defaultPaths = resolvePaths(env, cwd);
   const fileConfig = readConfigFile(defaultPaths.configFile);
-  const modelsConfig = readOptionalObject(fileConfig.models, "models");
-  const autonomyConfig = readOptionalObject(fileConfig.autonomy, "autonomy");
+  const executionConfig = readOptionalObject(fileConfig.execution, "execution");
   const paths = resolvePaths({ ...resolvePathEnv(env, fileConfig), MALAHOR_CONFIG: defaultPaths.configFile }, cwd);
 
   return {
     mode: resolveMode(env.MALAHOR_MODE ?? fileConfig.mode),
     paths,
-    models: {
-      planning: readModelSelection(modelsConfig?.planning, "models.planning"),
-      execution: readModelSelection(modelsConfig?.execution, "models.execution"),
-    },
-    autonomy: {
-      build: readBuildAutonomy(autonomyConfig?.build),
-    },
+    execution: resolveExecutionPolicy(env, executionConfig),
   };
 }
 
@@ -62,13 +49,24 @@ export function resolveMode(value: unknown = process.env.MALAHOR_MODE): MalahorM
   throw new Error(`Modo Malahor invalido: ${String(value)}. Usa "assistant" o "executor".`);
 }
 
-export function formatModelSelection(value?: MalahorModelSelection): string {
-  if (!value) return "not configured";
-  return value.variant ? `${value.model} (${value.variant})` : value.model;
+export function formatExecutionPolicy(value: MalahorExecutionPolicy): string {
+  return `${value.intervention}, verification=${value.verification ? "enabled" : "disabled"}`;
 }
 
-export function formatBuildAutonomy(value?: MalahorBuildAutonomy): string {
-  return value ?? "not configured";
+export function saveExecutionPolicy(config: MalahorConfig, dryRun: boolean): boolean {
+  const current = readConfigFile(config.paths.configFile);
+  const next: ConfigFile = {
+    ...current,
+    mode: current.mode ?? config.mode,
+    execution: config.execution,
+  };
+
+  if (!dryRun) {
+    fs.mkdirSync(path.dirname(config.paths.configFile), { recursive: true });
+    fs.writeFileSync(config.paths.configFile, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  }
+
+  return true;
 }
 
 function readConfigFile(filePath: string): ConfigFile {
@@ -101,34 +99,32 @@ function resolvePathEnv(env: NodeJS.ProcessEnv, config: ConfigFile): NodeJS.Proc
   };
 }
 
-function readBuildAutonomy(value: unknown): MalahorBuildAutonomy | undefined {
+function resolveExecutionPolicy(env: NodeJS.ProcessEnv, config: Record<string, unknown> | undefined): MalahorExecutionPolicy {
+  const intervention = readIntervention(
+    env.MALAHOR_EXECUTION_INTERVENTION ?? config?.intervention,
+    "execution.intervention",
+  );
+  const verification = readOptionalBoolean(
+    env.MALAHOR_EXECUTION_VERIFICATION ?? config?.verification,
+    "execution.verification",
+  );
+
+  return {
+    intervention,
+    verification: intervention === "acompanar" ? false : verification ?? true,
+  };
+}
+
+function readIntervention(value: unknown, key: string): MalahorIntervention {
   if (value === undefined || value === null || value === "") {
-    return undefined;
+    return "guiar";
   }
 
-  if (value === "advise" || value === "execute") {
+  if (value === "ejecutar" || value === "guiar" || value === "acompanar") {
     return value;
   }
 
-  throw new Error(`La configuracion autonomy.build debe ser "advise" o "execute".`);
-}
-
-function readModelSelection(value: unknown, key: string): MalahorModelSelection | undefined {
-  if (value === undefined || value === null || value === "") {
-    return undefined;
-  }
-
-  if (typeof value === "string") {
-    return { model: value };
-  }
-
-  const config = readOptionalObject(value, key);
-  if (!config) return undefined;
-
-  const model = readRequiredString(config.model, `${key}.model`);
-  const variant = readOptionalString(config.variant, `${key}.variant`);
-
-  return variant ? { model, variant } : { model };
+  throw new Error(`La configuracion ${key} debe ser "ejecutar", "guiar" o "acompanar".`);
 }
 
 function readOptionalObject(value: unknown, key: string): Record<string, unknown> | undefined {
@@ -143,12 +139,6 @@ function readOptionalObject(value: unknown, key: string): Record<string, unknown
   throw new Error(`La configuracion ${key} debe ser un objeto.`);
 }
 
-function readRequiredString(value: unknown, key: string): string {
-  const parsed = readOptionalString(value, key);
-  if (parsed) return parsed;
-  throw new Error(`La configuracion ${key} es obligatoria.`);
-}
-
 function readOptionalString(value: unknown, key: string): string | undefined {
   if (value === undefined || value === null || value === "") {
     return undefined;
@@ -159,4 +149,19 @@ function readOptionalString(value: unknown, key: string): string | undefined {
   }
 
   throw new Error(`La configuracion ${key} debe ser un string.`);
+}
+
+function readOptionalBoolean(value: unknown, key: string): boolean | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (value === "true") return true;
+  if (value === "false") return false;
+
+  throw new Error(`La configuracion ${key} debe ser boolean.`);
 }

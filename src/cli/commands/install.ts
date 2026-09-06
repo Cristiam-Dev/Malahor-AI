@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { backupFile } from "../core/backup";
 import { copyAssets } from "../core/assets";
-import { formatBuildAutonomy, formatModelSelection, loadConfig } from "../core/config";
+import { formatExecutionPolicy, loadConfig, saveExecutionPolicy } from "../core/config";
 import { detectEnvironment } from "../core/detector";
+import { promptExecutionPolicy } from "../core/execution-policy";
 import { syncOpenCodeConfig } from "../core/injector";
 import { resolvePackagePaths } from "../core/package";
 import { isSandbox } from "../core/paths";
@@ -13,8 +14,9 @@ export interface InstallOptions {
   yes: boolean;
 }
 
-export function runInstall(options: InstallOptions): void {
+export async function runInstall(options: InstallOptions): Promise<void> {
   const config = loadConfig();
+  config.execution = await promptExecutionPolicy(config.execution, options.yes);
   const paths = config.paths;
   const detection = detectEnvironment(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
@@ -25,9 +27,7 @@ export function runInstall(options: InstallOptions): void {
   printLine(`Config file: ${paths.configFile}`);
   printLine(`Malahor home: ${paths.malahorHome}`);
   printLine(`OpenCode dir: ${paths.opencodeDir}`);
-  printLine(`Plan model: ${formatModelSelection(config.models.planning)}`);
-  printLine(`Build model: ${formatModelSelection(config.models.execution)}`);
-  printLine(`Build autonomy: ${formatBuildAutonomy(config.autonomy.build)}`);
+  printLine(`Execution policy: ${formatExecutionPolicy(config.execution)}`);
   printLine(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}`);
   printLine(`Dry-run: ${options.dryRun ? "yes" : "no"}`);
 
@@ -60,23 +60,15 @@ export function runInstall(options: InstallOptions): void {
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
-  syncOpenCodeConfig(
-    paths,
-    {
-      planningModel: config.models.planning,
-      executionModel: config.models.execution,
-      buildAutonomy: config.autonomy.build,
-    },
-    options.dryRun,
-  );
+  saveExecutionPolicy(config, options.dryRun);
+  syncOpenCodeConfig(paths, { execution: config.execution }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would install" : "installed"}`);
+  printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
   printLine("Mnemo MCP: configured");
-  printLine(config.models.planning ? `OpenCode plan agent: ${options.dryRun ? "would sync" : "synced"}` : "OpenCode plan agent: unchanged");
-  printLine(config.models.execution ? `OpenCode build agent: ${options.dryRun ? "would sync" : "synced"}` : "OpenCode build agent: unchanged");
-  printLine(config.autonomy.build ? `OpenCode build autonomy: ${options.dryRun ? "would sync" : "synced"}` : "OpenCode build autonomy: unchanged");
+  printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"}`);
   printLine("OPENCODE.md: installed");
   printLine(detection.commands.graphify ? "Graphify: found" : "Graphify: not found. Install with `pip install graphifyy`.");
   printLine("Next: run `malahor-ai doctor`");

@@ -1,18 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { MalahorExecutionPolicy, MalahorIntervention } from "./config";
 import type { MalahorPaths } from "./paths";
 
-export type OpenCodeBuildAutonomy = "advise" | "execute";
-
-export interface OpenCodeModelSelection {
-  model: string;
-  variant?: string;
-}
-
 export interface SyncOpenCodeConfigOptions {
-  planningModel?: OpenCodeModelSelection;
-  executionModel?: OpenCodeModelSelection;
-  buildAutonomy?: OpenCodeBuildAutonomy;
+  execution: MalahorExecutionPolicy;
 }
 
 export interface OpenCodeConfig {
@@ -22,8 +14,6 @@ export interface OpenCodeConfig {
 }
 
 interface OpenCodeAgentConfig extends Record<string, unknown> {
-  model?: string;
-  variant?: string;
   permission?: Record<string, unknown>;
   options?: Record<string, unknown>;
 }
@@ -98,40 +88,22 @@ export function readOpenCodeConfig(filePath: string): OpenCodeConfig {
 
 function syncAgents(current: Record<string, unknown> | undefined, options: SyncOpenCodeConfigOptions): Record<string, unknown> | undefined {
   const next = { ...(current ?? {}) };
-  let touched = current !== undefined;
+  next.build = applyBuildAgentConfig(asAgentConfig(current?.build), options.execution);
 
-  if (options.planningModel) {
-    next.plan = applyModelSelection(asAgentConfig(current?.plan), options.planningModel);
-    touched = true;
-  }
-
-  if (options.executionModel || options.buildAutonomy) {
-    next.build = applyBuildAgentConfig(asAgentConfig(current?.build), options.executionModel, options.buildAutonomy);
-    touched = true;
-  }
-
-  return touched ? next : undefined;
+  return next;
 }
 
-function applyBuildAgentConfig(
-  current: OpenCodeAgentConfig | undefined,
-  model: OpenCodeModelSelection | undefined,
-  autonomy: OpenCodeBuildAutonomy | undefined,
-): OpenCodeAgentConfig {
-  const next = model ? applyModelSelection(current, model) : { ...(current ?? {}) };
+function applyBuildAgentConfig(current: OpenCodeAgentConfig | undefined, execution: MalahorExecutionPolicy): OpenCodeAgentConfig {
+  const next = { ...(current ?? {}) };
 
-  if (!autonomy) {
-    return next;
-  }
-
-  if (autonomy === "advise") {
+  if (execution.intervention === "guiar" || execution.intervention === "acompanar") {
     next.permission = {
       ...(asRecord(next.permission) ?? {}),
       edit: "deny",
       bash: "deny",
       task: "deny",
     };
-  } else if (currentBuildAutonomy(next) === "advise") {
+  } else if (currentIntervention(next) === "guiar" || currentIntervention(next) === "acompanar") {
     const permission = { ...(asRecord(next.permission) ?? {}) };
 
     if (permission.edit === "deny") delete permission.edit;
@@ -149,31 +121,17 @@ function applyBuildAgentConfig(
     ...(asRecord(next.options) ?? {}),
     malahor: {
       ...(malahorOptions(next) ?? {}),
-      buildAutonomy: autonomy,
+      execution,
     },
   };
 
   return next;
 }
 
-function applyModelSelection(current: OpenCodeAgentConfig | undefined, model: OpenCodeModelSelection): OpenCodeAgentConfig {
-  const next: OpenCodeAgentConfig = {
-    ...(current ?? {}),
-    model: model.model,
-  };
-
-  if (model.variant) {
-    next.variant = model.variant;
-  } else {
-    delete next.variant;
-  }
-
-  return next;
-}
-
-function currentBuildAutonomy(agent: OpenCodeAgentConfig): OpenCodeBuildAutonomy | undefined {
-  const value = malahorOptions(agent)?.buildAutonomy;
-  return value === "advise" || value === "execute" ? value : undefined;
+function currentIntervention(agent: OpenCodeAgentConfig): MalahorIntervention | undefined {
+  const execution = asRecord(malahorOptions(agent)?.execution);
+  const value = execution?.intervention;
+  return value === "ejecutar" || value === "guiar" || value === "acompanar" ? value : undefined;
 }
 
 function malahorOptions(agent: OpenCodeAgentConfig): Record<string, unknown> | undefined {
