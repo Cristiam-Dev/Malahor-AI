@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { loadConfig } from "../cli/core/config";
+import { resolveCanonicalProjectKey } from "../cli/core/project";
 import { sanitizeMemoryContent } from "./sanitizer";
 
 export type ObservationType = "decision" | "bug" | "pattern" | "architecture" | "learning" | "general";
@@ -146,20 +148,7 @@ export function listProjects(): Array<{ project: string; observations: number; l
 }
 
 export function normalizeProject(project: string): string {
-  const trimmed = project.trim();
-  const value = projectLookupKey(trimmed);
-
-  if (["malaho", "malahor", "malahor-ai", "malahorai"].includes(value)) return "malahor";
-  return trimmed;
-}
-
-function projectLookupKey(project: string): string {
-  return project
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return resolveCanonicalProjectKey(project, loadConfig().projects.aliases);
 }
 
 function normalizeLoadedObservation(observation: Observation): Observation {

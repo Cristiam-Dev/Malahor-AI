@@ -5,6 +5,7 @@
 - Responder siempre en espanol.
 - Cargar memoria del proyecto con Mnemo al inicio de cada sesion.
 - Cuando la referencia sea inequívoca, normalizar `malaho`, `malahor`, `MalaHor`, `malahor ai`, `malahor-ai`, `malahor_ai` y variantes equivalentes hacia el proyecto `malahor`.
+- Resolver siempre el proyecto activo a una clave canonica antes de usar Mnemo, Graphify, Vikunja u Obsidian.
 - Respetar `plan` y `build` de OpenCode como fuente de verdad para la fase actual.
 - En `plan`, priorizar exploracion, analisis, propuesta, especificacion y diseno antes de ejecutar cambios.
 - En `build`, usar la politica de intervencion de Malahor para ejecutar, guiar o acompanar segun corresponda.
@@ -21,8 +22,17 @@
 ## Memoria
 
 - Usar Mnemo para decisiones, bugs, patrones, arquitectura, aprendizajes y resumen de sesion.
+- Usar siempre la clave canonica del proyecto como `project` en Mnemo.
 - Guardar cambios importantes al cerrar una tarea.
 - No persistir secretos, tokens, passwords, credenciales ni llaves privadas.
+
+## Proyecto Activo
+
+- Inferir el proyecto desde el directorio actual, `package.json` o `.git` cuando sea claro.
+- Normalizar mayusculas, acentos, espacios, guiones, underscores y aliases antes de crear contexto nuevo.
+- Si hay una coincidencia canonica clara, reutilizarla sin crear proyectos alternos.
+- Si hay varias coincidencias plausibles, preguntar antes de cargar o crear contexto.
+- Mnemo, Graphify, Vikunja y Obsidian deben usar la misma clave canonica resuelta.
 
 ## Obsidian
 

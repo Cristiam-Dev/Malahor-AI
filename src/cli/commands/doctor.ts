@@ -3,6 +3,7 @@ import { formatExecutionPolicy, loadConfig, type MalahorExecutionPolicy } from "
 import { detectEnvironment } from "../core/detector";
 import { readOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
 import { isSandbox } from "../core/paths";
+import { resolveProject } from "../core/project";
 
 interface CheckResult {
   name: string;
@@ -14,6 +15,7 @@ interface CheckResult {
 export function runDoctor(): void {
   const config = loadConfig();
   const paths = config.paths;
+  const project = resolveProject(paths.cwd, config.projects.aliases);
   const detection = detectEnvironment(paths);
   const checks: CheckResult[] = [];
 
@@ -35,6 +37,10 @@ export function runDoctor(): void {
   process.stdout.write(`Mode: ${config.mode}\n`);
   process.stdout.write(`Config file: ${paths.configFile}\n`);
   process.stdout.write(`Execution policy: ${formatExecutionPolicy(config.execution)}\n`);
+  process.stdout.write(`Project: ${project.name}\n`);
+  process.stdout.write(`Project root: ${project.root}\n`);
+  process.stdout.write(`Canonical key: ${project.canonicalKey}\n`);
+  process.stdout.write(`Project aliases: ${project.aliases.length > 0 ? project.aliases.join(", ") : "none"}\n`);
   process.stdout.write(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}\n\n`);
 
   for (const check of checks) {

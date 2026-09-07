@@ -10,12 +10,14 @@ export interface GraphOptions {
 export function runGraph(options: GraphOptions): void {
   const config = loadConfig();
   const paths = config.paths;
-  const project = resolveProject(paths.cwd);
+  const project = resolveProject(paths.cwd, config.projects.aliases);
   const result = runGraphify(paths, project, options);
 
   printHeader("malahor-ai graph");
   printLine(`Mode: ${config.mode}`);
   printLine(`Project: ${project.name}`);
+  printLine(`Project root: ${project.root}`);
+  printLine(`Canonical key: ${project.canonicalKey}`);
   printLine(`Graph key: ${project.graphKey}`);
   printLine(`Config file: ${paths.configFile}`);
   printLine(`Malahor home: ${paths.malahorHome}`);
