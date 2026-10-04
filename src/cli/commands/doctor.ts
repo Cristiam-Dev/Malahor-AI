@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { formatExecutionPolicy, loadConfig, type MalahorExecutionPolicy } from "../core/config";
+import { levelForProject } from "../core/context";
 import { detectEnvironment } from "../core/detector";
 import { readOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
 import { isSandbox } from "../core/paths";
@@ -40,6 +41,7 @@ export function runDoctor(): void {
   process.stdout.write(`Project: ${project.name}\n`);
   process.stdout.write(`Project root: ${project.root}\n`);
   process.stdout.write(`Canonical key: ${project.canonicalKey}\n`);
+  process.stdout.write(`Project context: ${levelForProject(paths.projectsFile, project.canonicalKey)}\n`);
   process.stdout.write(`Project aliases: ${project.aliases.length > 0 ? project.aliases.join(", ") : "none"}\n`);
   process.stdout.write(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}\n\n`);
 

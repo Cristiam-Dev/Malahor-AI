@@ -19,8 +19,10 @@ export function backupFile(source: string, backupsDir: string, dryRun: boolean):
   const destination = path.join(backupsDir, `${path.basename(source)}.${timestamp()}.bak`);
 
   if (!dryRun) {
-    fs.mkdirSync(backupsDir, { recursive: true });
+    fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
     fs.copyFileSync(source, destination);
+    fs.chmodSync(backupsDir, 0o700);
+    fs.chmodSync(destination, 0o600);
   }
 
   return { source, destination, created: true };

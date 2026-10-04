@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 import { runDoctor } from "./commands/doctor";
 import { runGraph } from "./commands/graph";
+import { runContext } from "./commands/context";
 import { runInstall } from "./commands/install";
+import { runMemory } from "./commands/memory";
+import { runObsidian } from "./commands/obsidian";
 import { runUninstall } from "./commands/uninstall";
 import { runUpdate } from "./commands/update";
 
 interface ParsedArgs {
   command: string;
+  args: string[];
   flags: Set<string>;
+  options: Record<string, string>;
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -23,6 +28,33 @@ async function main(argv: string[]): Promise<void> {
         return;
       case "graph":
         runGraph({ dryRun: parsed.flags.has("dry-run") });
+        return;
+      case "memory":
+        runMemory({
+          action: parsed.args[0] ?? "help",
+          args: parsed.args.slice(1),
+          all: parsed.flags.has("all"),
+          confirm: parsed.options.confirm,
+          dryRun: parsed.flags.has("dry-run"),
+          yes: parsed.flags.has("yes"),
+        });
+        return;
+      case "context":
+        runContext({
+          action: parsed.args[0] ?? "help",
+          args: parsed.args.slice(1),
+          dryRun: parsed.flags.has("dry-run"),
+          project: parsed.options.project,
+        });
+        return;
+      case "obsidian":
+        await runObsidian({
+          action: parsed.args[0] ?? "help",
+          args: parsed.args.slice(1),
+          dryRun: parsed.flags.has("dry-run"),
+          mode: parsed.options.mode,
+          yes: parsed.flags.has("yes"),
+        });
         return;
       case "uninstall":
         runUninstall({ dryRun: parsed.flags.has("dry-run"), yes: parsed.flags.has("yes") });
@@ -49,16 +81,32 @@ async function main(argv: string[]): Promise<void> {
 function parseArgs(argv: string[]): ParsedArgs {
   const [command = "help", ...rest] = argv;
   const flags = new Set<string>();
+  const options: Record<string, string> = {};
+  const args: string[] = [];
 
-  for (const arg of rest) {
-    if (arg.startsWith("--")) flags.add(arg.slice(2));
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+
+    if (arg.startsWith("--")) {
+      const key = arg.slice(2);
+      flags.add(key);
+
+      if ((key === "confirm" || key === "mode" || key === "project") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
+        options[key] = rest[index + 1];
+        index += 1;
+      }
+
+      continue;
+    }
+
+    args.push(arg);
   }
 
-  return { command, flags };
+  return { command, args, flags, options };
 }
 
 function printHelp(): void {
-  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  graph         Generate external code graph\n  uninstall     Remove Malahor from OpenCode\n  update        Refresh Malahor installation\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Use defaults without prompts\n\nConfiguration:\n  MALAHOR_MODE                    assistant | executor\n  MALAHOR_CONFIG                  Path to config.jsonc\n  MALAHOR_HOME                    Override ~/.malahor\n  MALAHOR_OPENCODE_DIR            Override ~/.config/opencode\n  MALAHOR_EXECUTION_INTERVENTION  ejecutar | guiar | acompanar\n  MALAHOR_EXECUTION_VERIFICATION  true | false\n\nConfig file keys:\n  execution.intervention      ejecutar | guiar | acompanar\n  execution.verification      boolean read-only verification\n  projects.aliases            map canonical project to aliases\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
+  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  graph         Generate external code graph\n  context       Configure project context level\n  memory        Administer Mnemo memory\n  obsidian      Configure Obsidian MCP bridge\n  uninstall     Remove Malahor from OpenCode\n  update        Refresh Malahor installation\n\nContext commands:\n  context status [--project <key>]\n  context set mnemo|mnemo+graphify|mnemo+graphify+obsidian [--project <key>] [--dry-run]\n  context obsidian on|off [--project <key>] [--dry-run]\n  context graphify on|off [--project <key>] [--dry-run]\n\nMemory commands:\n  memory list\n  memory inspect <project>\n  memory backup [--dry-run]\n  memory reset <project> --yes --confirm <project>\n  memory reset --all --yes --confirm ALL\n  memory restore <backup-file> --yes --confirm RESTORE\n\nObsidian commands:\n  obsidian status [--mode wsl-windows|windows-local]\n  obsidian guide [--mode wsl-windows|windows-local]\n  obsidian setup [--dry-run] [--yes] [--mode wsl-windows|windows-local]\n  obsidian verify [--mode wsl-windows|windows-local]\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Use defaults without prompts\n\nConfiguration:\n  MALAHOR_MODE                    assistant | executor\n  MALAHOR_CONFIG                  Path to config.jsonc\n  MALAHOR_HOME                    Override ~/.malahor\n  MALAHOR_OPENCODE_DIR            Override ~/.config/opencode\n  MALAHOR_EXECUTION_INTERVENTION  ejecutar | guiar | acompanar\n  MALAHOR_EXECUTION_VERIFICATION  true | false\n\nConfig file keys:\n  execution.intervention      ejecutar | guiar | acompanar\n  execution.verification      boolean read-only verification\n  projects.aliases            map canonical project to aliases\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
 }
 
 void main(process.argv.slice(2));

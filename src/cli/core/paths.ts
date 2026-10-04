@@ -10,6 +10,9 @@ export interface MalahorPaths {
   mnemoIndex: string;
   assetsDir: string;
   graphsDir: string;
+  scriptsDir: string;
+  secretsDir: string;
+  projectsFile: string;
   vaultDir: string;
   configFile: string;
   opencodeDir: string;
@@ -35,6 +38,9 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env, cwd = process
     mnemoIndex: pathApi.join(malahorHome, "mnemo", "index.js"),
     assetsDir: pathApi.join(malahorHome, "assets"),
     graphsDir: pathApi.join(malahorHome, "graphs"),
+    scriptsDir: pathApi.join(malahorHome, "scripts"),
+    secretsDir: pathApi.join(malahorHome, "secrets"),
+    projectsFile: pathApi.join(malahorHome, "projects.json"),
     vaultDir: pathApi.join(malahorHome, "vault"),
     configFile: pathApi.resolve(cwd, env.MALAHOR_CONFIG ?? pathApi.join(malahorHome, "config.jsonc")),
     opencodeDir,

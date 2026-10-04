@@ -63,8 +63,14 @@ export function loadDb(filePath = dbPath()): MnemoDb {
 }
 
 export function saveDb(db: MnemoDb, filePath = dbPath()): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(db, null, 2)}\n`, "utf8");
+  const dir = path.dirname(filePath);
+  const tempPath = path.join(dir, `${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  fs.writeFileSync(tempPath, `${JSON.stringify(db, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(tempPath, filePath);
+  fs.chmodSync(filePath, 0o600);
 }
 
 export function saveObservation(input: SaveObservationInput): Observation {
@@ -118,8 +124,8 @@ export function getObservation(id: number): Observation | null {
   return loadDb().observations.find((observation) => observation.id === id) ?? null;
 }
 
-export function contextForProject(project: string, limit = 8): { latestSession: SessionSummary | null; observations: Observation[] } {
-  const db = loadDb();
+export function contextForProject(project: string, limit = 8, filePath = dbPath()): { latestSession: SessionSummary | null; observations: Observation[] } {
+  const db = loadDb(filePath);
   const normalizedProject = normalizeProject(project);
   const sessions = db.sessions
     .filter((session) => session.project === normalizedProject)
@@ -132,10 +138,10 @@ export function contextForProject(project: string, limit = 8): { latestSession: 
   return { latestSession: sessions[0] ?? null, observations };
 }
 
-export function listProjects(): Array<{ project: string; observations: number; latest: string }> {
+export function listProjects(filePath = dbPath()): Array<{ project: string; observations: number; latest: string }> {
   const counts = new Map<string, { observations: number; latest: string }>();
 
-  for (const observation of loadDb().observations) {
+  for (const observation of loadDb(filePath).observations) {
     const current = counts.get(observation.project) ?? { observations: 0, latest: observation.created_at };
     current.observations += 1;
     if (observation.created_at > current.latest) current.latest = observation.created_at;
