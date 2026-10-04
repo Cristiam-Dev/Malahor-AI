@@ -14,6 +14,7 @@ import {
 } from "../core/context";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import type { ProjectAliases } from "../core/project";
+import { detectStack } from "../core/stack";
 import { artifactPaths, resolveObsidianMode } from "./obsidian";
 
 export interface ContextOptions {
@@ -38,6 +39,10 @@ export function runContext(options: ContextOptions): void {
       assertArgCount(options.args, 0, "Uso: malahor-ai context status [--project <key>]");
       printStatus(paths, config.projects.aliases, options.project);
       return;
+    case "detect":
+      assertArgCount(options.args, 0, "Uso: malahor-ai context detect [--project <key>]");
+      printDetect(paths, config.projects.aliases, options.project);
+      return;
     case "set":
       assertArgCount(options.args, 1, "Uso: malahor-ai context set mnemo|mnemo+graphify|mnemo+graphify+obsidian [--project <key>] [--dry-run]");
       printSet(paths, config.projects.aliases, options);
@@ -56,7 +61,7 @@ export function runContext(options: ContextOptions): void {
       printContextHelp();
       return;
     default:
-      throw new Error(`Comando context invalido: ${action}. Usa status, set, obsidian o graphify.`);
+      throw new Error(`Comando context invalido: ${action}. Usa status, detect, set, obsidian o graphify.`);
   }
 }
 
@@ -72,6 +77,24 @@ function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: str
   printLine(`- Graphify: ${graphifyEnabled(level) ? "enabled" : "disabled"}`);
   printLine(`- Obsidian: ${obsidianEnabled(level) ? "enabled" : "disabled"}`);
   printLine(`- Obsidian bridge: ${bridgeLabel(paths)}`);
+}
+
+function printDetect(paths: MalahorPaths, aliases: ProjectAliases, override: string | undefined): void {
+  const target = resolveContextTarget(paths, aliases, override);
+  const root = target.root || paths.cwd;
+  const detection = detectStack(root);
+
+  printLine("Stack detect:");
+  printLine(`- Project: ${target.name}`);
+  printLine(`- Root: ${root}`);
+  if (detection.signals.length === 0) {
+    printLine("- Signals: none");
+  } else {
+    for (const item of detection.signals) {
+      printLine(`- ${item.signal} (${item.evidence})`);
+    }
+  }
+  printLine(`Suggested skills: ${detection.skills.length > 0 ? detection.skills.join(", ") : "none"}`);
 }
 
 function printSet(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
@@ -150,6 +173,7 @@ function printContextHelp(): void {
   process.stdout.write(`
 Usage:
   malahor-ai context status [--project <key>]
+  malahor-ai context detect [--project <key>]
   malahor-ai context set <nivel> [--project <key>] [--dry-run]
   malahor-ai context obsidian on|off [--project <key>] [--dry-run]
   malahor-ai context graphify on|off [--project <key>] [--dry-run]
@@ -163,6 +187,10 @@ Reglas:
   Mnemo siempre esta activo.
   Obsidian on requiere Graphify; Obsidian off lo deja en mnemo+graphify.
   Graphify off deshabilita tambien Obsidian.
+
+Detect:
+  context detect lee manifiestos del proyecto (package.json, pom.xml, pyproject.toml,
+  go.mod, Dockerfile, workflows) y sugiere skills de especialidad first-party.
 `);
 }
 

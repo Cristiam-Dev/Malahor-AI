@@ -45,6 +45,14 @@
 - Activar o desactivar Obsidian por proyecto con `malahor-ai context obsidian on|off`, sin pedir rutas markdown genericas.
 - No pedir al usuario rutas de vaults ni rutas markdown para contexto; Obsidian se opera siempre via Obsidian MCP.
 
+## Skills
+
+- Las skills first-party de Malahor viven en `~/.malahor/assets/skills`.
+- Antes de tareas tecnicas de especialidad, ejecutar `malahor-ai context detect` y cargar la skill sugerida siguiendo el router `specialty.md`.
+- Preferir siempre las skills first-party de Malahor antes que skills externas instaladas en la maquina.
+- Las skills externas son complementarias y opcionales; Malahor no depende de ellas para operar.
+- No crear skills nuevas sin pedido explicito del usuario.
+
 ## Proyecto Activo
 
 - Inferir el proyecto desde el directorio actual, `package.json` o `.git` cuando sea claro.
@@ -61,6 +69,11 @@
 - No buscar ni modificar vaults por filesystem directo.
 - No usar lectura de markdown externo generico como flujo separado; si el contexto documental markdown debe operarse, usar Obsidian MCP.
 - Si Obsidian MCP no esta disponible, informar la limitacion.
+- Contrato lectura/escritura del Obsidian MCP: `obsidian_get_file_contents` puede devolver el contenido codificado como string JSON (envuelto en comillas, con `\n` literales); `obsidian_put_content` y `obsidian_append_content` escriben contenido crudo.
+- Decodificar SIEMPRE la salida de `obsidian_get_file_contents` (JSON.parse) antes de leerla o editarla; nunca reescribir en el vault texto tal como llega del GET.
+- Si el contenido leido empieza con comilla doble o contiene `\n` literales, tratarlo como codificado y decodificarlo primero.
+- Verificar despues de cada escritura con un nuevo GET decodificado: el disco debe quedar en markdown limpio, sin comilla inicial ni `\n` literales.
+- `obsidian_delete_file` puede fallar con error 40400 pero borrar igual; tras borrar, listar el directorio para confirmar el estado real.
 
 ## Vikunja
 

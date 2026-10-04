@@ -108,3 +108,13 @@ Niveles soportados:
 - `mnemo+graphify+obsidian`: suma Obsidian MCP para documentacion humana.
 
 Reglas: Mnemo siempre esta activo; Obsidian requiere Graphify; Graphify off deshabilita tambien Obsidian. Con `--project <key>` se opera sobre otro proyecto sin cambiar el directorio actual, y `--dry-run` muestra el cambio sin escribir.
+
+## Skills first-party
+
+Malahor incluye skills de especialidad propias en `assets/skills/`: backend, frontend, devops, diseno e integracion de IA, con un router (`specialty.md`) que selecciona la skill correcta segun el stack detectado:
+
+```bash
+malahor-ai context detect
+```
+
+El detector lee manifiestos del proyecto (`package.json`, `pom.xml`, `pyproject.toml`, `go.mod`, `Dockerfile`, workflows) y sugiere las skills aplicables. Malahor no depende de skills externas instaladas en la maquina: las externas son complementarias y opcionales.
