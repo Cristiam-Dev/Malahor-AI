@@ -7,36 +7,41 @@ CLI local que potencia agentes de IA —OpenCode primero— con memoria persiste
 - Node.js 22 o superior
 - OpenCode instalado (primer agente soportado)
 - WSL/Ubuntu como entorno principal; soporte para Linux nativo, macOS y Windows
-- Opcional: Python + Graphify para el mapa de codigo (`pip install graphifyy`)
+- Opcional: Python 3 para el mapa de codigo (`malahor-ai graphify install` crea un venv aislado, sin instalar global)
 - Opcional: Obsidian con el plugin "Local REST API" para documentacion
 
 ## Instalacion
 
+La via recomendada no requiere consola: abre OpenCode y escribe `instala malahor`. El agente ejecuta el bootstrap agent-safe completo (instalacion, validaciones y Graphify opcional) y solo te pedira confirmar si algo toca configuracion.
+
+Si prefieres terminal, una sola linea:
+
 ```bash
-npm install -g malahor-ai
+npm install -g malahor-ai && malahor-ai install --bootstrap --yes
 ```
 
 ## Quickstart
 
 ```bash
-malahor-ai install --yes
+malahor-ai install --bootstrap --yes
 malahor-ai doctor
 ```
 
-`install` configura OpenCode, instala los assets de Malahor, pregunta el nivel de intervencion (`ejecutar`, `guiar` o `acompanar`) y deja todo listo. `doctor` diagnostica la instalacion y muestra el proyecto activo y su nivel de contexto.
+`install` configura OpenCode, instala los assets de Malahor y **aplica la politica de intervencion al final, solo tras validar** que Mnemo, comandos, compaction y recuperacion de contexto funcionan: si algo falla, el agente nunca queda bloqueado. `doctor --self-heal` repara instalaciones rotas y migra permisos antiguos. La politica activa vive en `opencode.jsonc`; tras cambiarla, abre una sesion nueva de OpenCode.
 
 ## Comandos
 
 | Comando | Descripcion |
 |---|---|
-| `malahor-ai install` | Instala Malahor en OpenCode |
-| `malahor-ai doctor` | Diagnostica la instalacion actual |
+| `malahor-ai install` | Instala Malahor en OpenCode (`--bootstrap`, `--with-graphify`, `--policy-after <nivel>`) |
+| `malahor-ai doctor` | Diagnostica la instalacion; `--self-heal` repara y migra permisos legacy |
 | `malahor-ai graph` | Genera mapa de codigo con Graphify, fuera del repo |
+| `malahor-ai graphify` | `status` / `install` / `verify`: venv aislado en `~/.malahor/tools/graphify` |
 | `malahor-ai context` | Nivel de contexto por proyecto y deteccion de stack |
 | `malahor-ai memory` | Administra la memoria Mnemo |
 | `malahor-ai obsidian` | Configura el puente Obsidian MCP |
-| `malahor-ai update` | Refresca instalacion y assets |
-| `malahor-ai uninstall` | Remueve Malahor de OpenCode |
+| `malahor-ai update` | Refresca instalacion, assets y formato de politica |
+| `malahor-ai uninstall` | Remueve Malahor de OpenCode, incluidos los bloqueos que escribio |
 
 ## Conceptos
 
@@ -44,7 +49,8 @@ malahor-ai doctor
 - **Contexto por proyecto**: niveles `mnemo`, `mnemo+graphify` (default) y `mnemo+graphify+obsidian`, guardados en `~/.malahor/projects.json` por clave canonica.
 - **Graphify**: contexto tecnico del codigo, escrito siempre fuera del repo, en `~/.malahor/graphs/<proyecto>`.
 - **Obsidian (opcional)**: documentacion humana via Obsidian MCP; nunca por filesystem directo. Soporta OpenCode en WSL con Obsidian en Windows y Windows nativo.
-- **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, elegida en la instalacion y reconfigurable.
+- **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, aplicada al final de la instalacion. `guiar` y `acompanar` usan una lista blanca de comandos (no un bloqueo total): el agente conserva siempre la ruta de diagnostico y autorreparacion, y `install`/`update` solo piden confirmacion al usuario.
+- **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta, instala Graphify sin romper nada si falla y valida todo antes de tocar permisos.
 - **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
 
 ## Principio central
@@ -92,9 +98,12 @@ malahor-ai memory restore <backup> --yes --confirm RESTORE
 
 ## Troubleshooting
 
-- `doctor` reporta fallos criticos: ejecuta `malahor-ai install` tras corregir el prerequisito.
-- Graphify no encontrado: `pip install graphifyy`.
+- El agente no puede editar ni ejecutar (instalacion o politica rotas): escribe `repara malahor` o `/malahor-reparar` en OpenCode; funciona aunque el agente este bloqueado porque la capsula corre con permisos del cliente.
+- `doctor` reporta fallos criticos: `malahor-ai doctor --self-heal` y luego `malahor-ai install --bootstrap --yes`.
+- Permisos legacy con bloqueo total (versiones previas a 4.10): `doctor --self-heal` los migra a la lista blanca agent-safe.
+- Graphify no encontrado: `malahor-ai graphify install` (venv aislado). Es opcional; su ausencia no rompe nada.
 - Obsidian no conecta desde WSL: permite los puertos 27123 y 27124 en el Firewall de Windows y verifica el plugin "Local REST API".
+- Cambiaste de politica y no surte efecto: abre una sesion nueva de OpenCode (o cambia de agente con Tab) para recargar `opencode.jsonc`.
 - Para probar sin tocar el entorno real: scripts sandbox de la seccion Desarrollo.
 
 ## Desarrollo

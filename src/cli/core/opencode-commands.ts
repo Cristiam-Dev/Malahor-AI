@@ -3,7 +3,14 @@ import path from "node:path";
 
 import type { MalahorPaths } from "./paths";
 
-export const MALAHOR_COMMAND_FILES = ["recuperar-contexto.md", "guardar-contexto.md", "compactar-seguro.md"] as const;
+export const MALAHOR_COMMAND_FILES = [
+  "recuperar-contexto.md",
+  "guardar-contexto.md",
+  "compactar-seguro.md",
+  "malahor-bootstrap.md",
+  "malahor-doctor.md",
+  "malahor-reparar.md",
+] as const;
 
 export function syncOpenCodeCommands(sourceDir: string, paths: MalahorPaths, dryRun: boolean): { source: string; destination: string; files: number } {
   const destination = path.join(paths.opencodeDir, "commands");

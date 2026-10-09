@@ -1,17 +1,24 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { backupFile } from "../core/backup";
 import { copyAssets } from "../core/assets";
-import { formatExecutionPolicy, loadConfig } from "../core/config";
-import { detectEnvironment } from "../core/detector";
+import { formatExecutionPolicy, loadConfig, saveExecutionPolicy, type MalahorExecutionPolicy } from "../core/config";
+import { detectEnvironment, type DetectionResult } from "../core/detector";
+import { parseExecutionLevel } from "../core/execution-policy";
+import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { syncOpenCodeConfig } from "../core/injector";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
-import { resolvePackagePaths } from "../core/package";
-import { isSandbox } from "../core/paths";
+import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
+import { isSandbox, type MalahorPaths } from "../core/paths";
+import { validateInstallation } from "../core/validate";
 
 export interface UpdateOptions {
   dryRun: boolean;
   yes: boolean;
+  bootstrap: boolean;
+  withGraphify: boolean;
+  policyAfter: string | undefined;
 }
 
 export function runUpdate(options: UpdateOptions): void {
@@ -27,7 +34,7 @@ export function runUpdate(options: UpdateOptions): void {
   printLine(`Config file: ${paths.configFile}`);
   printLine(`Malahor home: ${paths.malahorHome}`);
   printLine(`OpenCode dir: ${paths.opencodeDir}`);
-  printLine(`Execution policy: ${formatExecutionPolicy(config.execution)}`);
+  printLine(`Bootstrap: ${options.bootstrap ? "yes" : "no"}`);
   printLine(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}`);
   printLine(`Dry-run: ${options.dryRun ? "yes" : "no"}`);
 
@@ -35,9 +42,7 @@ export function runUpdate(options: UpdateOptions): void {
     throw new Error(`Node 22+ es requerido. Detectado: ${detection.nodeVersion}`);
   }
 
-  if (!options.dryRun && !fs.existsSync(packagePaths.mnemoBuild)) {
-    throw new Error("No existe dist/mnemo/index.js. Ejecuta `bun run build` antes de actualizar.");
-  }
+  ensureBuild(packagePaths, detection, options);
 
   if (!fs.existsSync(opencodeAsset)) {
     throw new Error("No existe assets/opencode/OPENCODE.md.");
@@ -61,17 +66,95 @@ export function runUpdate(options: UpdateOptions): void {
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
   const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
-  syncOpenCodeConfig(paths, { execution: config.execution }, options.dryRun);
+
+  syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
   printLine(`Mnemo MCP: ${options.dryRun ? "would refresh" : "refreshed"}`);
-  printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"}`);
   printLine(`OPENCODE.md: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine("Local data: kept");
-  printLine("Next: run `malahor-ai doctor`");
+
+  runGraphifyStep(paths, options);
+  validateBeforePolicy(paths, packagePaths, options);
+
+  // Migracion garantizada: cualquier update reescribe el formato de politica vigente,
+  // incluyendo legacy deny -> whitelist agent-safe.
+  const execution = resolveFinalPolicy(config.execution, options);
+  saveExecutionPolicy({ ...config, execution }, options.dryRun);
+  syncOpenCodeConfig(paths, { execution }, options.dryRun);
+
+  printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
+  printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"} (${formatExecutionPolicy(execution)})`);
+  printLine("Validation: passed (politica aplicada al final)");
+  printLine("Next: run `malahor-ai doctor`. Si la politica cambio, abre una sesion nueva de OpenCode para recargarla.");
+}
+
+function ensureBuild(packagePaths: MalahorPackagePaths, detection: DetectionResult, options: UpdateOptions): void {
+  if (fs.existsSync(packagePaths.mnemoBuild)) return;
+
+  const canAutoBuild = detection.commands.bun && fs.existsSync(path.join(packagePaths.root, "src"));
+
+  if (options.bootstrap && canAutoBuild && !options.dryRun) {
+    printLine("Bootstrap: dist/ no existe; corriendo `bun run build` automaticamente...");
+    execFileSync("bun", ["run", "build"], { cwd: packagePaths.root, stdio: "inherit" });
+    if (fs.existsSync(packagePaths.mnemoBuild)) return;
+    throw new Error("`bun run build` no genero dist/mnemo/index.js. Corre el build manualmente y revisa errores.");
+  }
+
+  if (options.dryRun) return;
+
+  throw new Error("No existe dist/mnemo/index.js. Ejecuta `bun run build` antes de actualizar (o usa `update --bootstrap` con bun disponible).");
+}
+
+function runGraphifyStep(paths: MalahorPaths, options: UpdateOptions): void {
+  const already = findGraphifyCommand(paths);
+  if (already) {
+    printLine(`Graphify: found (${already === "graphify" || already === "graphifyy" ? "sistema" : "venv aislado"}: ${already})`);
+    return;
+  }
+
+  if (!options.withGraphify && !options.bootstrap) {
+    printLine("Graphify: not found (opcional; `malahor-ai graphify install`).");
+    return;
+  }
+
+  const result = installGraphifyVenv(paths, options.dryRun);
+  if (result.ok) {
+    printLine(`Graphify: ${options.dryRun ? "would install in venv" : "installed in isolated venv"} (${result.command})`);
+  } else {
+    printLine("Graphify: degraded (no bloquea la actualizacion)");
+    printLine(`  Motivo: ${result.error}`);
+    printLine("  Reparacion: `malahor-ai graphify install` cuando Python este disponible.");
+  }
+}
+
+function validateBeforePolicy(paths: MalahorPaths, packagePaths: MalahorPackagePaths, options: UpdateOptions): void {
+  if (options.dryRun) {
+    printLine("Validation: skipped in dry-run");
+    return;
+  }
+
+  const problems = validateInstallation(paths, packagePaths);
+  if (problems.length > 0) {
+    printLine("Validation: FAILED (no se aplico politica de intervencion; el agente queda desbloqueado)");
+    for (const problem of problems) {
+      printLine(`  - ${problem}`);
+    }
+    printLine("Reparacion: `malahor-ai doctor --self-heal`.");
+    throw new Error(`La actualizacion no paso validacion (${problems.length} problemas). La politica no fue aplicada a proposito.`);
+  }
+}
+
+function resolveFinalPolicy(stored: MalahorExecutionPolicy, options: UpdateOptions): MalahorExecutionPolicy {
+  if (options.policyAfter !== undefined) {
+    const intervention = parseExecutionLevel(options.policyAfter, stored.intervention);
+    return { intervention, verification: intervention === "acompanar" ? false : stored.verification };
+  }
+
+  return stored;
 }
 
 function printHeader(value: string): void {

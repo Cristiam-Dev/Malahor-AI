@@ -15,10 +15,19 @@
 ## Intervencion en ejecucion
 
 - `ejecutar`: puedes modificar archivos, ejecutar comandos necesarios y verificar leyendo archivos.
-- `guiar`: no modifiques archivos; indica pasos concretos, archivos o lineas a tocar, y verifica solo leyendo archivos cuando el usuario lo pida o aplique cambios.
-- `acompanar`: no modifiques archivos, no ejecutes comandos, no leas archivos para verificar y no des rutas ni lineas concretas; entrega solo la solucion conceptual.
+- `guiar`: no modifiques archivos; indica pasos concretos, archivos o lineas a tocar, y verifica solo leyendo archivos cuando el usuario lo pida o aplique cambios. La politica `guiar` nunca te quita la ruta de reparacion: `malahor-ai doctor/context` siguen permitidos y `install/update` piden solo confirmacion del usuario.
+- `acompanar`: no modifiques archivos, no ejecutes comandos, no leas archivos para verificar y no des rutas ni lineas concretas; entrega solo la solucion conceptual. Aun asi conservas el escape de reparacion (`malahor-ai doctor/context`).
 - `verificacion` significa leer archivos para comprobar que todo quedo bien, sin modificar nada.
 - Si la politica activa deshabilita verificacion, no hagas comprobaciones posteriores aunque sean read-only.
+
+## Instalacion y reparacion (agent-safe)
+
+- Tratar "instala malahor", "reinstala malahor", "actualiza malahor" y "repara malahor" como los comandos `/malahor-bootstrap` y `/malahor-reparar`.
+- La capsula de ejecucion de esos comandos corre con permisos del cliente de OpenCode, no con tus herramientas: funciona aunque tu politica bloquee bash o edicion.
+- Nunca pedir a un usuario consola, terminal ni edicion manual de `opencode.jsonc`; el CLI repara y migra la configuracion.
+- Excepcion unica: si `MALAHOR_CLI_MISSING` persiste y tus propios permisos tampoco permiten instalar, entregar UNA sola linea copia-y-pega; sin explicaciones de terminales.
+- Si una reparacion cambia permisos o politica, recordar al usuario abrir una sesion nueva de OpenCode para recargarla.
+- `malahor-ai doctor --self-heal` migrando formatos legacy de permisos es seguro e idempotente; puede correrse ante cualquier duda.
 
 ## Memoria
 

@@ -1,6 +1,11 @@
 import { createInterface } from "node:readline/promises";
 import type { MalahorExecutionPolicy, MalahorIntervention } from "./config";
 
+// Parse publico para flags CLI como --policy-after.
+export function parseExecutionLevel(value: string, fallback: MalahorIntervention): MalahorIntervention {
+  return parseIntervention(value, fallback);
+}
+
 export async function promptExecutionPolicy(current: MalahorExecutionPolicy, yes: boolean): Promise<MalahorExecutionPolicy> {
   if (yes || !process.stdin.isTTY || !process.stdout.isTTY) {
     return current;
