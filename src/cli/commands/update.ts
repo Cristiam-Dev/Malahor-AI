@@ -5,6 +5,7 @@ import { copyAssets } from "../core/assets";
 import { formatExecutionPolicy, loadConfig } from "../core/config";
 import { detectEnvironment } from "../core/detector";
 import { syncOpenCodeConfig } from "../core/injector";
+import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { resolvePackagePaths } from "../core/package";
 import { isSandbox } from "../core/paths";
 
@@ -19,6 +20,7 @@ export function runUpdate(options: UpdateOptions): void {
   const detection = detectEnvironment(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
   const opencodeAsset = path.join(packagePaths.assetsDir, "opencode", "OPENCODE.md");
+  const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
 
   printHeader("malahor-ai update");
   printLine(`Mode: ${config.mode}`);
@@ -58,11 +60,13 @@ export function runUpdate(options: UpdateOptions): void {
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
+  const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
   syncOpenCodeConfig(paths, { execution: config.execution }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
+  printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
   printLine(`Mnemo MCP: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"}`);
   printLine(`OPENCODE.md: ${options.dryRun ? "would refresh" : "refreshed"}`);

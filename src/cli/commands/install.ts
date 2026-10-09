@@ -6,6 +6,7 @@ import { formatExecutionPolicy, loadConfig, saveExecutionPolicy } from "../core/
 import { detectEnvironment } from "../core/detector";
 import { promptExecutionPolicy } from "../core/execution-policy";
 import { syncOpenCodeConfig } from "../core/injector";
+import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { resolvePackagePaths } from "../core/package";
 import { isSandbox } from "../core/paths";
 
@@ -21,6 +22,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   const detection = detectEnvironment(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
   const opencodeAsset = path.join(packagePaths.assetsDir, "opencode", "OPENCODE.md");
+  const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
 
   printHeader("malahor-ai install");
   printLine(`Mode: ${config.mode}`);
@@ -60,12 +62,14 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
+  const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
   saveExecutionPolicy(config, options.dryRun);
   syncOpenCodeConfig(paths, { execution: config.execution }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would install" : "installed"}`);
+  printLine(`OpenCode commands: ${options.dryRun ? "would install" : "installed"} ${commands.files} in ${commands.destination}`);
   printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
   printLine("Mnemo MCP: configured");
   printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"}`);

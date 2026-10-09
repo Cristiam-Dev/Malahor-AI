@@ -26,6 +26,8 @@ Guia de especialidad para trabajo de frontend: interfaces web, SPAs y experienci
 - Accesibilidad: semantica correcta, foco visible, contraste suficiente, labels en controles, textos alternativos.
 - Rendimiento: listas virtualizadas o paginadas, evitar trabajo en cada tecleo, dividir bundles cuando pesen.
 - Responsive: fluido antes que fijo; tocar y leer en pantallas pequenas.
+- Frameworks: respetar convenciones del framework detectado (Angular signals/standalone, React Server Components/Client Components, Vue/Nuxt composables, Svelte stores/runes segun version).
+- Datos: separar estado de servidor de estado de UI; cachear y revalidar datos remotos con una estrategia clara.
 
 ## Anti-Patrones
 

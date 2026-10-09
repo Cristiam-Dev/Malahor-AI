@@ -25,7 +25,17 @@
 - Usar Mnemo para decisiones, bugs, patrones, arquitectura, aprendizajes y resumen de sesion.
 - Usar siempre la clave canonica del proyecto como `project` en Mnemo.
 - Guardar cambios importantes al cerrar una tarea.
+- Si el usuario dice `guardar contexto`, ejecutar el protocolo de `/guardar-contexto`: resumir objetivo, estado, decisiones, archivos, validaciones, bloqueos y proximo paso; guardar con `mem_session_summary` y solo mostrar confirmacion breve.
 - No persistir secretos, tokens, passwords, credenciales ni llaves privadas.
+
+## Recuperacion y compactacion de contexto
+
+- Si el usuario dice `recuperar contexto`, tratarlo como `/recuperar-contexto`: generar una capsula breve usando `malahor-ai context recover`, Mnemo y lecturas dirigidas segun el nivel del proyecto.
+- Mantener la capsula de recuperacion por debajo de ~1500 tokens: objetivo, estado actual, decisiones, archivos relevantes, siguiente paso y riesgos.
+- No llenar la ventana con memoria completa, resultados largos de herramientas ni archivos completos salvo que sean imprescindibles.
+- Antes de una compactacion manual o de una tarea larga, ejecutar `/guardar-contexto` o guardar un `mem_session_summary` equivalente.
+- Si el usuario dice `compactar seguro`, guardar memoria primero, confirmar el proximo paso y luego compactar solo si el mecanismo disponible es seguro; si no, confiar en la compactacion automatica de OpenCode.
+- Despues de compactar o al retomar una sesion, recuperar contexto antes de continuar con cambios.
 
 ## Graphify
 
@@ -49,8 +59,13 @@
 
 - Las skills first-party de Malahor viven en `~/.malahor/assets/skills`.
 - Antes de tareas tecnicas de especialidad, ejecutar `malahor-ai context detect` y cargar la skill sugerida siguiendo el router `specialty.md`.
+- Para tareas de programacion, usar `programming.md` como router profundo y cargar skills especificas por tecnologia/practica (`programming/frontend/angular`, `programming/backend/spring-boot`, `programming/architecture/hexagonal-architecture`, `programming/devops/docker`, etc.).
+- Flujo recomendado: `specialty-*` para orientacion general, luego `programming/*` para reglas concretas del stack.
+- Las skills `programming/*` incluyen secciones de version/compatibilidad y referencias oficiales o canonicas; si el proyecto usa otra version, validar contra el manifiesto real antes de aplicar una recomendacion.
 - Preferir siempre las skills first-party de Malahor antes que skills externas instaladas en la maquina.
 - Las skills externas son complementarias y opcionales; Malahor no depende de ellas para operar.
+- No incorporar skills externas al catalogo first-party sin auditoria previa: inventario, escaneo estatico, decision de viabilidad y reescritura segura.
+- Las reescrituras first-party deben ser markdown en espanol, deterministas y sin scripts ejecutables por defecto.
 - No crear skills nuevas sin pedido explicito del usuario.
 
 ## Proyecto Activo
@@ -85,6 +100,15 @@
 
 - Antes de editar, leer el contexto del proyecto.
 - Para cambios tecnicos, orientarse con Mnemo y Graphify antes de leer archivos raw amplios.
+- Para cambios no triviales (features nuevas, refactors amplios, cambios de arquitectura, integraciones o migraciones con riesgo de regresion), seguir el flujo SDD completo: cargar la skill `sdd` de `~/.malahor/assets/skills/` y ejecutar sus fases; `sdd-quality` antes de `sdd-verify`; si calidad falla, volver a `sdd-apply`; archivar el resultado en Mnemo.
 - Preferir cambios pequenos y verificables.
 - Para pruebas de Malahor, usar sandbox con `MALAHOR_HOME` y `MALAHOR_OPENCODE_DIR`.
 - No tocar el entorno real si existe un sandbox activo.
+
+## Commits
+
+- No ejecutar `git add`, `git commit`, `commit --amend`, `push`, `reset` ni `checkout` salvo orden explicita del usuario.
+- Al proponer texto de commit, usar la skill `git-commit-text` si esta disponible.
+- Preferencia del usuario para mensajes de commit: titulo en espanol con icono referente al inicio, seguido de Conventional Commit (`✨ feat(scope): ...`, `🐛 fix(scope): ...`, etc.).
+- Si el cuerpo aporta contexto, razon o impacto, escribirlo como lista con viñetas `-`, una idea por linea.
+- No agregar atribucion de IA ni ruido ceremonial.

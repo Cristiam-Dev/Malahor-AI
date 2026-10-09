@@ -26,6 +26,8 @@ Guia de especialidad para trabajo de diseno: UI/UX, branding, sitios web y mater
 - Espaciado: ritmo consistente; mas espacio alrededor de lo importante.
 - Consistencia: componentes, estados y vocabulario coherentes en todo el flujo.
 - Accesibilidad: texto alternativo, foco, contraste y no depender solo del color.
+- Movimiento: animaciones con proposito (orientacion, feedback o continuidad), no decoracion costosa; respetar `prefers-reduced-motion`.
+- Sistema: definir tokens y componentes antes de crear pantallas parecidas con pequenas variaciones.
 
 ## Anti-Patrones
 

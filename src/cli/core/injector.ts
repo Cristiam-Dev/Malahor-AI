@@ -11,6 +11,7 @@ export interface OpenCodeConfig {
   [key: string]: unknown;
   mcp?: Record<string, unknown>;
   agent?: Record<string, unknown>;
+  compaction?: Record<string, unknown>;
 }
 
 interface OpenCodeAgentConfig extends Record<string, unknown> {
@@ -30,6 +31,7 @@ export function syncOpenCodeConfig(paths: MalahorPaths, options: SyncOpenCodeCon
         enabled: true,
       },
     },
+    compaction: syncCompaction(asRecord(current.compaction)),
   };
 
   const syncedAgents = syncAgents(asRecord(current.agent), options);
@@ -91,6 +93,22 @@ function syncAgents(current: Record<string, unknown> | undefined, options: SyncO
   next.build = applyBuildAgentConfig(asAgentConfig(current?.build), options.execution);
 
   return next;
+}
+
+function syncCompaction(current: Record<string, unknown> | undefined): Record<string, unknown> {
+  const keep = asRecord(current?.keep);
+  const keepTokens = typeof keep?.tokens === "number" ? keep.tokens : 15000;
+  const buffer = typeof current?.buffer === "number" ? current.buffer : 25000;
+
+  return {
+    ...(current ?? {}),
+    auto: typeof current?.auto === "boolean" ? current.auto : true,
+    keep: {
+      ...(keep ?? {}),
+      tokens: keepTokens,
+    },
+    buffer,
+  };
 }
 
 function applyBuildAgentConfig(current: OpenCodeAgentConfig | undefined, execution: MalahorExecutionPolicy): OpenCodeAgentConfig {

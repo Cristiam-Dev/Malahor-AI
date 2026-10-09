@@ -1,120 +1,115 @@
 # malahor-ai
 
-CLI neutro de IA para desarrolladores. Se instala globalmente y potencia agentes como OpenCode, Claude Code, Cursor y Codex con memoria persistente, mapa estructural del codigo, orquestacion por subagentes, SDD y controles de calidad.
+CLI local que potencia agentes de IA —OpenCode primero— con memoria persistente, contexto por proyecto, mapa estructural del codigo, skills de especialidad propias, SDD y controles de calidad. Todo vive fuera de tus repos.
 
-## Estado
+## Requisitos
 
-Construccion inicial iniciada. La Fase 1 ya tiene scaffold npm, CLI minimo, Mnemo MCP, instalador OpenCode y sandbox de desarrollo para no tocar el entorno manual actual.
+- Node.js 22 o superior
+- OpenCode instalado (primer agente soportado)
+- WSL/Ubuntu como entorno principal; soporte para Linux nativo, macOS y Windows
+- Opcional: Python + Graphify para el mapa de codigo (`pip install graphifyy`)
+- Opcional: Obsidian con el plugin "Local REST API" para documentacion
+
+## Instalacion
+
+```bash
+npm install -g malahor-ai
+```
+
+## Quickstart
+
+```bash
+malahor-ai install --yes
+malahor-ai doctor
+```
+
+`install` configura OpenCode, instala los assets de Malahor, pregunta el nivel de intervencion (`ejecutar`, `guiar` o `acompanar`) y deja todo listo. `doctor` diagnostica la instalacion y muestra el proyecto activo y su nivel de contexto.
+
+## Comandos
+
+| Comando | Descripcion |
+|---|---|
+| `malahor-ai install` | Instala Malahor en OpenCode |
+| `malahor-ai doctor` | Diagnostica la instalacion actual |
+| `malahor-ai graph` | Genera mapa de codigo con Graphify, fuera del repo |
+| `malahor-ai context` | Nivel de contexto por proyecto y deteccion de stack |
+| `malahor-ai memory` | Administra la memoria Mnemo |
+| `malahor-ai obsidian` | Configura el puente Obsidian MCP |
+| `malahor-ai update` | Refresca instalacion y assets |
+| `malahor-ai uninstall` | Remueve Malahor de OpenCode |
+
+## Conceptos
+
+- **Memoria (Mnemo)**: decisiones, bugs, patrones, arquitectura y resumen de sesion por proyecto, guardados en `~/.malahor/mnemo/`.
+- **Contexto por proyecto**: niveles `mnemo`, `mnemo+graphify` (default) y `mnemo+graphify+obsidian`, guardados en `~/.malahor/projects.json` por clave canonica.
+- **Graphify**: contexto tecnico del codigo, escrito siempre fuera del repo, en `~/.malahor/graphs/<proyecto>`.
+- **Obsidian (opcional)**: documentacion humana via Obsidian MCP; nunca por filesystem directo. Soporta OpenCode en WSL con Obsidian en Windows y Windows nativo.
+- **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, elegida en la instalacion y reconfigurable.
+- **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
 
 ## Principio central
 
-Malahor no debe dejar archivos dentro de los repos del usuario. Toda la configuracion, memoria, grafos, backups y assets viven fuera del proyecto, principalmente en `~/.malahor/`.
+Malahor no deja archivos dentro de tus repos. Configuracion, memoria, grafos, backups y assets viven en `~/.malahor/`.
 
-## Paquete
-
-- Nombre npm: `malahor-ai`
-- Distribucion: npm publico
-- Lenguaje: TypeScript
-- CLI: Bun compilado
-- Memory server: Node 22 LTS + MCP + JSON storage
-
-## Desarrollo seguro
-
-Para probar sin sobrescribir `~/.malahor` ni `~/.config/opencode` reales:
+## Ejemplos
 
 ```bash
-bun run dev:sandbox
+# Ver el nivel de contexto del proyecto y el stack detectado
+malahor-ai context status
+malahor-ai context detect
+
+# Recuperar o guardar una capsula corta de contexto
+malahor-ai context recover
+malahor-ai context save "objetivo, estado, decisiones y proximo paso"
+
+# Activar Obsidian solo para este proyecto
+malahor-ai context obsidian on
+
+# Revisar la memoria del proyecto
+malahor-ai memory list
+malahor-ai memory inspect <proyecto>
+
+# Configurar el puente Obsidian (modo automatico: wsl-windows o windows-local)
+malahor-ai obsidian status
+malahor-ai obsidian guide
+malahor-ai obsidian setup
 ```
 
-Esto usa rutas aisladas dentro del repo:
+En OpenCode, Malahor instala comandos slash equivalentes:
 
-```text
-.sandbox/home/.malahor
-.sandbox/home/.config/opencode
-```
+- `/recuperar-contexto`
+- `/guardar-contexto`
+- `/compactar-seguro`
 
-Para diagnosticar el sandbox:
-
-```bash
-bun run doctor:sandbox
-```
-
-Para limpiar el sandbox:
-
-```bash
-bun run sandbox:reset
-```
-
-El entorno real solo debe tocarse cuando el flujo sandbox ya este validado.
-
-## Comandos actuales
-
-```bash
-bun run build
-bun run src/cli/index.ts install --dry-run --yes
-bun run src/cli/index.ts doctor
-bun run src/cli/index.ts memory list
-bun run src/cli/index.ts memory inspect malahor
-bun run src/cli/index.ts memory backup --dry-run
-bun run src/cli/index.ts memory reset malahor --dry-run
-bun run src/cli/index.ts memory restore path/to/db.json.backup.bak --dry-run
-bun run src/cli/index.ts obsidian status
-MALAHOR_OBSIDIAN_API_KEY=... bun run src/cli/index.ts obsidian setup --yes
-```
+Tambien puedes escribir “recuperar contexto” o “guardar contexto” y el agente debe aplicar el mismo protocolo.
 
 Los comandos destructivos de memoria requieren confirmacion fuerte:
 
 ```bash
-malahor-ai memory reset <project> --yes --confirm <project>
-malahor-ai memory reset --all --yes --confirm ALL
-malahor-ai memory restore <backup-file> --yes --confirm RESTORE
+malahor-ai memory reset <proyecto> --yes --confirm <proyecto>
+malahor-ai memory restore <backup> --yes --confirm RESTORE
 ```
 
-`restore` solo acepta backups dentro de `~/.malahor/backups`.
+## Troubleshooting
 
-Para integrar Obsidian con OpenCode, en dos escenarios:
+- `doctor` reporta fallos criticos: ejecuta `malahor-ai install` tras corregir el prerequisito.
+- Graphify no encontrado: `pip install graphifyy`.
+- Obsidian no conecta desde WSL: permite los puertos 27123 y 27124 en el Firewall de Windows y verifica el plugin "Local REST API".
+- Para probar sin tocar el entorno real: scripts sandbox de la seccion Desarrollo.
+
+## Desarrollo
 
 ```bash
-malahor-ai obsidian status
-malahor-ai obsidian guide
-malahor-ai obsidian setup
-malahor-ai obsidian verify
+bun install        # dependencias
+bun run build      # compila a dist/
+bun run dev:sandbox      # instalacion en rutas aisladas .sandbox/
+bun run doctor:sandbox   # diagnostico del sandbox
+bun run context:sandbox  # contexto del sandbox
+bun run sandbox:reset    # limpiar sandbox
 ```
 
-Modos soportados (deteccion automatica, override con `--mode`):
+El sandbox usa `.sandbox/home/.malahor` y `.sandbox/home/.config/opencode` para no tocar `~/.malahor` ni `~/.config/opencode` reales.
 
-- `wsl-windows`: OpenCode en WSL + Obsidian en Windows. Genera `~/.malahor/scripts/mcp-obsidian.sh` y guarda la API key en `~/.malahor/secrets/obsidian.env`.
-- `windows-local`: OpenCode y Obsidian nativos en Windows. Genera `%USERPROFILE%\.malahor\scripts\mcp-obsidian.ps1` y guarda la API key en `%USERPROFILE%\.malahor\secrets\obsidian.ps1`.
+## Licencia
 
-El setup registra el MCP `obsidian` en OpenCode y fuerza `permission.external_directory = "deny"`.
-
-## Contexto por proyecto
-
-Cada proyecto define un nivel de contexto guardado fuera del repo en `~/.malahor/projects.json`, con la clave canonica como llave:
-
-```bash
-malahor-ai context status
-malahor-ai context set mnemo+graphify+obsidian
-malahor-ai context obsidian on
-malahor-ai context obsidian off
-malahor-ai context graphify on
-malahor-ai context graphify off
-```
-
-Niveles soportados:
-
-- `mnemo`: solo memoria Mnemo.
-- `mnemo+graphify`: Mnemo + Graphify (default para proyectos nuevos).
-- `mnemo+graphify+obsidian`: suma Obsidian MCP para documentacion humana.
-
-Reglas: Mnemo siempre esta activo; Obsidian requiere Graphify; Graphify off deshabilita tambien Obsidian. Con `--project <key>` se opera sobre otro proyecto sin cambiar el directorio actual, y `--dry-run` muestra el cambio sin escribir.
-
-## Skills first-party
-
-Malahor incluye skills de especialidad propias en `assets/skills/`: backend, frontend, devops, diseno e integracion de IA, con un router (`specialty.md`) que selecciona la skill correcta segun el stack detectado:
-
-```bash
-malahor-ai context detect
-```
-
-El detector lee manifiestos del proyecto (`package.json`, `pom.xml`, `pyproject.toml`, `go.mod`, `Dockerfile`, workflows) y sugiere las skills aplicables. Malahor no depende de skills externas instaladas en la maquina: las externas son complementarias y opcionales.
+MIT. Ver `LICENSE`.

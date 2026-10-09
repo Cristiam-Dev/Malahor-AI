@@ -26,6 +26,8 @@ Guia de especialidad para trabajo de devops e infraestructura: CI/CD, contenedor
 - Secretos: siempre via gestor de secretos del sistema; nunca en repos ni logs.
 - Observabilidad: salud, logs estructurados y metricas minimas disponibles.
 - Infraestructura como codigo cuando el entorno se repite; manual solo para lo unico.
+- Supply chain: fijar versiones criticas, revisar scripts de instalacion, no ejecutar instaladores remotos sin auditoria, y validar el contenido del paquete antes de publicar.
+- Release: separar build, test, pack y publish; publicar solo artefactos esperados y verificar el paquete (`npm pack --dry-run`, checksums o listado de archivos).
 
 ## Anti-Patrones
 

@@ -44,6 +44,7 @@ async function main(argv: string[]): Promise<void> {
           action: parsed.args[0] ?? "help",
           args: parsed.args.slice(1),
           dryRun: parsed.flags.has("dry-run"),
+          limit: parsed.options.limit,
           project: parsed.options.project,
         });
         return;
@@ -91,7 +92,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       const key = arg.slice(2);
       flags.add(key);
 
-      if ((key === "confirm" || key === "mode" || key === "project") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
+      if ((key === "confirm" || key === "mode" || key === "project" || key === "limit") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
         options[key] = rest[index + 1];
         index += 1;
       }
@@ -106,7 +107,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function printHelp(): void {
-  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  graph         Generate external code graph\n  context       Configure project context and detect stack\n  memory        Administer Mnemo memory\n  obsidian      Configure Obsidian MCP bridge\n  uninstall     Remove Malahor from OpenCode\n  update        Refresh Malahor installation\n\nContext commands:\n  context status [--project <key>]\n  context detect [--project <key>]\n  context set mnemo|mnemo+graphify|mnemo+graphify+obsidian [--project <key>] [--dry-run]\n  context obsidian on|off [--project <key>] [--dry-run]\n  context graphify on|off [--project <key>] [--dry-run]\n\nMemory commands:\n  memory list\n  memory inspect <project>\n  memory backup [--dry-run]\n  memory reset <project> --yes --confirm <project>\n  memory reset --all --yes --confirm ALL\n  memory restore <backup-file> --yes --confirm RESTORE\n\nObsidian commands:\n  obsidian status [--mode wsl-windows|windows-local]\n  obsidian guide [--mode wsl-windows|windows-local]\n  obsidian setup [--dry-run] [--yes] [--mode wsl-windows|windows-local]\n  obsidian verify [--mode wsl-windows|windows-local]\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Use defaults without prompts\n\nConfiguration:\n  MALAHOR_MODE                    assistant | executor\n  MALAHOR_CONFIG                  Path to config.jsonc\n  MALAHOR_HOME                    Override ~/.malahor\n  MALAHOR_OPENCODE_DIR            Override ~/.config/opencode\n  MALAHOR_EXECUTION_INTERVENTION  ejecutar | guiar | acompanar\n  MALAHOR_EXECUTION_VERIFICATION  true | false\n\nConfig file keys:\n  execution.intervention      ejecutar | guiar | acompanar\n  execution.verification      boolean read-only verification\n  projects.aliases            map canonical project to aliases\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
+  process.stdout.write(`malahor-ai\n\nCommands:\n  install       Install Malahor for OpenCode\n  doctor        Diagnose current installation\n  graph         Generate external code graph\n  context       Configure project context and detect stack\n  memory        Administer Mnemo memory\n  obsidian      Configure Obsidian MCP bridge\n  uninstall     Remove Malahor from OpenCode\n  update        Refresh Malahor installation\n\nContext commands:\n  context status [--project <key>]\n  context detect [--project <key>]\n  context recover [--project <key>] [--limit <n>]\n  context capsule [--project <key>] [--limit <n>]\n  context save [summary...] [--project <key>]\n  context set mnemo|mnemo+graphify|mnemo+graphify+obsidian [--project <key>] [--dry-run]\n  context obsidian on|off [--project <key>] [--dry-run]\n  context graphify on|off [--project <key>] [--dry-run]\n\nMemory commands:\n  memory list\n  memory inspect <project>\n  memory backup [--dry-run]\n  memory reset <project> --yes --confirm <project>\n  memory reset --all --yes --confirm ALL\n  memory restore <backup-file> --yes --confirm RESTORE\n\nObsidian commands:\n  obsidian status [--mode wsl-windows|windows-local]\n  obsidian guide [--mode wsl-windows|windows-local]\n  obsidian setup [--dry-run] [--yes] [--mode wsl-windows|windows-local]\n  obsidian verify [--mode wsl-windows|windows-local]\n\nFlags:\n  --dry-run     Show actions without writing files\n  --yes         Use defaults without prompts\n\nConfiguration:\n  MALAHOR_MODE                    assistant | executor\n  MALAHOR_CONFIG                  Path to config.jsonc\n  MALAHOR_HOME                    Override ~/.malahor\n  MALAHOR_OPENCODE_DIR            Override ~/.config/opencode\n  MALAHOR_EXECUTION_INTERVENTION  ejecutar | guiar | acompanar\n  MALAHOR_EXECUTION_VERIFICATION  true | false\n\nConfig file keys:\n  execution.intervention      ejecutar | guiar | acompanar\n  execution.verification      boolean read-only verification\n  projects.aliases            map canonical project to aliases\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
 }
 
 void main(process.argv.slice(2));

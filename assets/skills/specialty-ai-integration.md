@@ -26,6 +26,8 @@ Guia de especialidad para integrar IA en proyectos existentes o nuevos: RAG, LLM
 - Seguridad: no enviar datos personales o secretos sin consentimiento y redaccion.
 - Costos: limites por usuario/sesion, cacheo de respuestas repetibles, modelos pequenos cuando basten.
 - Observabilidad: registrar latencia, tokens, errores y calidad muestreada.
+- MCP: tratar cada servidor como dependencia externa; revisar permisos, comandos, secretos, rutas y operaciones destructivas antes de habilitarlo.
+- Evaluacion: crear ejemplos representativos y casos adversos antes de confiar en una mejora de prompt o retrieval.
 
 ## Anti-Patrones
 

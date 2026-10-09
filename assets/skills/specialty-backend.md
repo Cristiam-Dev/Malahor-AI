@@ -26,6 +26,8 @@ Guia de especialidad para trabajo de backend: APIs, servicios, persistencia y da
 - Persistencia: transacciones donde la atomicidad importa, indices para las consultas reales, migraciones versionadas.
 - Secretos: solo via entorno o gestor de secretos; nunca en codigo, configs commiteadas ni logs.
 - Logs: eventos clave con contexto, sin datos sensibles.
+- Spring Boot/Java: usar constructor injection, DTOs para contratos externos, validacion con Bean Validation, `@Transactional` solo donde hay unidad atomica, y tests de slice/integracion cuando toque persistencia o seguridad.
+- Seguridad de APIs: autorizar por recurso, no solo por rol global; auditar cambios de auth, tokens, cookies, CSRF/CORS y permisos.
 
 ## Anti-Patrones
 

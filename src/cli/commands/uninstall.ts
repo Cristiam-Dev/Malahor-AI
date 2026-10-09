@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { backupFile } from "../core/backup";
 import { loadConfig } from "../core/config";
 import { removeMnemoConfig } from "../core/injector";
+import { removeOpenCodeCommands } from "../core/opencode-commands";
 import { isSandbox } from "../core/paths";
 
 export interface UninstallOptions {
@@ -25,6 +26,7 @@ export function runUninstall(options: UninstallOptions): void {
   const mdBackup = backupFile(paths.opencodeMd, paths.backupsDir, options.dryRun);
 
   removeMnemoConfig(paths, options.dryRun);
+  const removedCommands = removeOpenCodeCommands(paths, options.dryRun);
 
   if (!options.dryRun && fs.existsSync(paths.opencodeMd)) {
     fs.unlinkSync(paths.opencodeMd);
@@ -33,6 +35,7 @@ export function runUninstall(options: UninstallOptions): void {
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
   printLine(`Mnemo MCP: ${options.dryRun ? "would remove from OpenCode config" : "removed from OpenCode config"}`);
+  printLine(`OpenCode commands: ${options.dryRun ? "would remove" : "removed"} ${removedCommands}`);
   printLine(`OPENCODE.md: ${options.dryRun ? "would remove" : "removed"}`);
   printLine("Local data: kept");
 }
