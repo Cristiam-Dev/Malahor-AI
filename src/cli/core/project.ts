@@ -43,6 +43,20 @@ export function resolveCanonicalProjectKey(project: string, aliases: ProjectAlia
   return toCanonicalKey(project);
 }
 
+export function resolveCanonicalProjectScope(scope: string, aliases: ProjectAliases = {}): string {
+  const segments = scope
+    .split(/[\\/]+/)
+    .map(projectLookupKey)
+    .filter(Boolean);
+
+  if (segments.length === 0) {
+    return "project";
+  }
+
+  const [root, ...rest] = segments;
+  return [resolveCanonicalProjectKey(root, aliases), ...rest].join("/");
+}
+
 export function projectLookupKey(project: string): string {
   return project
     .trim()

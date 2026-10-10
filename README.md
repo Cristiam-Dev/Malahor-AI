@@ -45,7 +45,8 @@ malahor-ai doctor
 
 ## Conceptos
 
-- **Memoria (Mnemo)**: decisiones, bugs, patrones, arquitectura y resumen de sesion por proyecto, guardados en `~/.malahor/mnemo/`.
+- **Memoria (Mnemo)**: decisiones, bugs, patrones, arquitectura y resumen de sesion en scopes `empresa/proyecto/modulo/feature`, guardados en `~/.malahor/mnemo/`. La recuperacion hereda padres y `global`; `mem_brief` entiende solicitudes naturales y busca recuerdos relacionados en otros scopes.
+- **Administracion segura de memoria**: el agente puede inspeccionar, respaldar, mover/reclasificar, borrar y restaurar memoria via MCP con preview + confirmacion (`mem_inspect_project`, `mem_backup`, `mem_move_preview`/`mem_move`, `mem_delete_project_preview`/`mem_delete_project`, `mem_restore_preview`/`mem_restore`).
 - **Contexto por proyecto**: niveles `mnemo`, `mnemo+graphify` (default) y `mnemo+graphify+obsidian`, guardados en `~/.malahor/projects.json` por clave canonica.
 - **Graphify**: contexto tecnico del codigo, escrito siempre fuera del repo, en `~/.malahor/graphs/<proyecto>`.
 - **Obsidian (opcional)**: documentacion humana via Obsidian MCP; nunca por filesystem directo. Soporta OpenCode en WSL con Obsidian en Windows y Windows nativo.
@@ -87,7 +88,7 @@ En OpenCode, Malahor instala comandos slash equivalentes:
 - `/guardar-contexto`
 - `/compactar-seguro`
 
-Tambien puedes escribir “recuperar contexto” o “guardar contexto” y el agente debe aplicar el mismo protocolo.
+Tambien puedes escribir “recuperar contexto” o “guardar contexto” y el agente debe aplicar el mismo protocolo. Para trabajar en una asignacion grande, describe el proyecto/modulo/feature en lenguaje natural; el agente consulta Mnemo por MCP y no necesitas escribir scopes ni usar comandos CLI.
 
 Los comandos destructivos de memoria requieren confirmacion fuerte:
 

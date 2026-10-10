@@ -15,7 +15,8 @@ import {
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import type { ProjectAliases } from "../core/project";
 import { detectStack } from "../core/stack";
-import { loadDb, saveDb, type Observation, type SessionSummary } from "../../mnemo/db";
+import { loadDb, saveDb } from "../../mnemo/db";
+import { contextForProject } from "../../mnemo/context";
 import { sanitizeMemoryContent } from "../../mnemo/sanitizer";
 import { artifactPaths, resolveObsidianMode } from "./obsidian";
 
@@ -113,7 +114,7 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   const root = target.root || paths.cwd;
   const level = levelForProject(paths.projectsFile, target.canonicalKey);
   const detection = detectStack(root);
-  const memory = readMemoryContext(paths.mnemoDb, target.canonicalKey, limit);
+  const memory = contextForProject(target.canonicalKey, limit, paths.mnemoDb);
 
   printLine("Context Capsule:");
   printLine(`- Project: ${target.name}`);
@@ -122,6 +123,7 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   printLine(`- Context level: ${level}`);
   printLine(`- Stack signals: ${detection.signals.length > 0 ? detection.signals.map((item) => item.signal).join(", ") : "none"}`);
   printLine(`- Suggested skills: ${detection.skills.length > 0 ? detection.skills.join(", ") : "none"}`);
+  printLine(`- Memory scopes: ${memory.scopeChain.join(" → ")}`);
   printLine("");
   printLine("Latest session:");
   printLine(memory.latestSession ? `- ${compactText(memory.latestSession.summary, 900)}` : "- none");
@@ -131,7 +133,7 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
     printLine("- none");
   } else {
     for (const observation of memory.observations) {
-      printLine(`- #${observation.id} [${observation.type}] ${observation.title}: ${compactText(observation.content, 520)}`);
+      printLine(`- #${observation.id} [${observation.project}] [${observation.type}] ${observation.title}: ${compactText(observation.content, 520)}`);
     }
   }
   printLine("");
@@ -230,19 +232,6 @@ function parseLimit(value: string | undefined): number {
   const parsed = Number(value);
   if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 20) return parsed;
   throw new Error("--limit debe ser un entero entre 1 y 20.");
-}
-
-function readMemoryContext(filePath: string, canonicalKey: string, limit: number): { latestSession: SessionSummary | null; observations: Observation[] } {
-  const db = loadDb(filePath);
-  const sessions = db.sessions
-    .filter((session) => session.project === canonicalKey)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
-  const observations = db.observations
-    .filter((observation) => observation.project === canonicalKey)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    .slice(0, limit);
-
-  return { latestSession: sessions[0] ?? null, observations };
 }
 
 function compactText(value: string, maxChars: number): string {

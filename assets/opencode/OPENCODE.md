@@ -32,9 +32,17 @@
 ## Memoria
 
 - Usar Mnemo para decisiones, bugs, patrones, arquitectura, aprendizajes y resumen de sesion.
-- Usar siempre la clave canonica del proyecto como `project` en Mnemo.
+- La memoria admite scopes jerarquicos `empresa/proyecto/modulo/feature`; los segmentos se infieren del workspace y de lo que pide el usuario. No pedirle que escriba claves tecnicas ni use comandos de consola.
+- Si el usuario pide trabajar/retomar un proyecto, modulo o asignacion, o reutilizar trabajo anterior, llamar `mem_brief` con su peticion en lenguaje natural, el proyecto del workspace y el scope inferido cuando se pueda. El agente realiza esta llamada; no presentar `malahor-ai memory` como flujo normal.
+- `mem_brief` devuelve contexto heredado (scope actual, padres y global) y memorias relacionadas encontradas en otros scopes. Usar las relacionadas como referencias; no mover ni duplicar recuerdos sin una peticion explicita.
+- Si el scope de trabajo es nuevo, inferirlo de la asignacion y guardarlo como hijo del proyecto/modulo correspondiente. No confundir el scope de una memoria antigua reutilizada con el scope activo nuevo.
+- Si Mnemo devuelve varias sugerencias igualmente plausibles, hacer una sola pregunta aclaratoria; si hay una coincidencia clara, continuar sin friccion.
+- `mem_context` recupera automaticamente el scope solicitado, sus ancestros y `global`; respetar el limite y priorizar los scopes mas especificos.
+- Al guardar, usar el scope activo resuelto para la tarea, no necesariamente la raiz del repositorio. Mantener claves existentes de un solo segmento para compatibilidad.
+- Si el usuario pide borrar memoria de Mnemo, usar primero `mem_delete_project_preview` y mostrar impacto (observaciones, sesiones, hijos no borrados y texto exacto de confirmacion). Solo despues de una confirmacion explicita del usuario llamar `mem_delete_project` con el `confirm` exacto. No borrar `global` salvo que el usuario escriba exactamente `DELETE GLOBAL`.
+- Para administrar memoria desde el harness: usar `mem_inspect_project` para revisar scopes, `mem_backup` antes de operaciones riesgosas, `mem_move_preview`/`mem_move` para reclasificar observaciones y `mem_restore_preview`/`mem_restore` para restaurar backups. Toda operacion destructiva o de restauracion requiere mostrar preview e insertar la confirmacion exacta que devuelva la herramienta.
 - Guardar cambios importantes al cerrar una tarea.
-- Si el usuario dice `guardar contexto`, ejecutar el protocolo de `/guardar-contexto`: resumir objetivo, estado, decisiones, archivos, validaciones, bloqueos y proximo paso; guardar con `mem_session_summary` y solo mostrar confirmacion breve.
+- Si el usuario dice `guardar contexto`, ejecutar el protocolo de `/guardar-contexto`: resumir objetivo, estado, decisiones, archivos, validaciones, bloqueos y proximo paso; guardar con `mem_session_summary` en el scope activo de la tarea (o en la raiz del proyecto si no hay uno) y solo mostrar confirmacion breve.
 - No persistir secretos, tokens, passwords, credenciales ni llaves privadas.
 
 ## Recuperacion y compactacion de contexto

@@ -4,7 +4,8 @@ import { backupFile } from "../core/backup";
 import { loadConfig } from "../core/config";
 import { isSandbox } from "../core/paths";
 import { sanitizeMemoryContent } from "../../mnemo/sanitizer";
-import { contextForProject, listProjects, loadDb, normalizeProject, saveDb, type MnemoDb, type Observation, type ObservationType, type SessionSummary } from "../../mnemo/db";
+import { listProjects, loadDb, normalizeProject, saveDb, type MnemoDb, type Observation, type ObservationType, type SessionSummary } from "../../mnemo/db";
+import { contextForProject } from "../../mnemo/context";
 
 export interface MemoryOptions {
   action: string;
@@ -77,6 +78,7 @@ function printProjectContext(project: string | undefined, dbPath: string): void 
   const context = contextForProject(canonicalProject, 8, dbPath);
 
   printLine(`Project: ${canonicalProject}`);
+  printLine(`Scopes: ${context.scopeChain.join(" -> ")}`);
   printLine(context.latestSession ? `Latest session: ${context.latestSession.created_at}` : "Latest session: none");
   if (context.latestSession) {
     printLine(`Summary: ${oneLine(redact(context.latestSession.summary), 180)}`);

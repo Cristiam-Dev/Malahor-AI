@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../cli/core/config";
-import { resolveCanonicalProjectKey } from "../cli/core/project";
+import { resolveCanonicalProjectScope, type ProjectAliases } from "../cli/core/project";
 import { sanitizeMemoryContent } from "./sanitizer";
 
 export type ObservationType = "decision" | "bug" | "pattern" | "architecture" | "learning" | "general";
@@ -51,12 +51,13 @@ export function loadDb(filePath = dbPath()): MnemoDb {
   if (!raw.trim()) return { observations: [], sessions: [], nextId: 1 };
 
   const parsed = JSON.parse(raw) as Partial<MnemoDb>;
+  const aliases = loadConfig().projects.aliases;
   return {
     observations: Array.isArray(parsed.observations)
-      ? parsed.observations.map((observation) => normalizeLoadedObservation(observation as Observation))
+      ? parsed.observations.map((observation) => normalizeLoadedObservation(observation as Observation, aliases))
       : [],
     sessions: Array.isArray(parsed.sessions)
-      ? parsed.sessions.map((session) => normalizeLoadedSession(session as SessionSummary))
+      ? parsed.sessions.map((session) => normalizeLoadedSession(session as SessionSummary, aliases))
       : [],
     nextId: typeof parsed.nextId === "number" ? parsed.nextId : 1,
   };
@@ -124,28 +125,21 @@ export function getObservation(id: number): Observation | null {
   return loadDb().observations.find((observation) => observation.id === id) ?? null;
 }
 
-export function contextForProject(project: string, limit = 8, filePath = dbPath()): { latestSession: SessionSummary | null; observations: Observation[] } {
-  const db = loadDb(filePath);
-  const normalizedProject = normalizeProject(project);
-  const sessions = db.sessions
-    .filter((session) => session.project === normalizedProject)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
-  const observations = db.observations
-    .filter((observation) => observation.project === normalizedProject)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    .slice(0, limit);
-
-  return { latestSession: sessions[0] ?? null, observations };
-}
-
 export function listProjects(filePath = dbPath()): Array<{ project: string; observations: number; latest: string }> {
   const counts = new Map<string, { observations: number; latest: string }>();
+  const db = loadDb(filePath);
 
-  for (const observation of loadDb(filePath).observations) {
+  for (const observation of db.observations) {
     const current = counts.get(observation.project) ?? { observations: 0, latest: observation.created_at };
     current.observations += 1;
     if (observation.created_at > current.latest) current.latest = observation.created_at;
     counts.set(observation.project, current);
+  }
+
+  for (const session of db.sessions) {
+    const current = counts.get(session.project) ?? { observations: 0, latest: session.created_at };
+    if (session.created_at > current.latest) current.latest = session.created_at;
+    counts.set(session.project, current);
   }
 
   return Array.from(counts.entries())
@@ -154,13 +148,13 @@ export function listProjects(filePath = dbPath()): Array<{ project: string; obse
 }
 
 export function normalizeProject(project: string): string {
-  return resolveCanonicalProjectKey(project, loadConfig().projects.aliases);
+  return resolveCanonicalProjectScope(project, loadConfig().projects.aliases);
 }
 
-function normalizeLoadedObservation(observation: Observation): Observation {
-  return { ...observation, project: normalizeProject(observation.project) };
+function normalizeLoadedObservation(observation: Observation, aliases: ProjectAliases): Observation {
+  return { ...observation, project: resolveCanonicalProjectScope(observation.project, aliases) };
 }
 
-function normalizeLoadedSession(session: SessionSummary): SessionSummary {
-  return { ...session, project: normalizeProject(session.project) };
+function normalizeLoadedSession(session: SessionSummary, aliases: ProjectAliases): SessionSummary {
+  return { ...session, project: resolveCanonicalProjectScope(session.project, aliases) };
 }

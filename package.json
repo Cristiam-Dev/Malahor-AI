@@ -30,6 +30,7 @@
   },
   "scripts": {
     "build": "bun build src/cli/index.ts --outdir dist --target=node && bun build src/mnemo/index.ts --outdir dist/mnemo --target=node",
+    "test": "bun test",
     "prepack": "bun run build",
     "dev": "bun run src/cli/index.ts",
     "dev:dry-run": "bun run src/cli/index.ts install --dry-run --yes",
