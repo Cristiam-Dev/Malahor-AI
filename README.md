@@ -37,6 +37,7 @@ malahor-ai doctor
 | `malahor-ai doctor` | Diagnostica la instalacion; `--self-heal` repara y migra permisos legacy |
 | `malahor-ai graph` | Genera mapa de codigo con Graphify, fuera del repo |
 | `malahor-ai graphify` | `status` / `install` / `verify`: venv aislado en `~/.malahor/tools/graphify` |
+| `malahor-ai hooks` | Guardrails cross-harness para git, secretos, memoria, instalacion y calidad |
 | `malahor-ai context` | Nivel de contexto por proyecto y deteccion de stack |
 | `malahor-ai memory` | Administra la memoria Mnemo |
 | `malahor-ai obsidian` | Configura el puente Obsidian MCP |
@@ -52,6 +53,7 @@ malahor-ai doctor
 - **Obsidian (opcional)**: documentacion humana via Obsidian MCP; nunca por filesystem directo. Soporta OpenCode en WSL con Obsidian en Windows y Windows nativo.
 - **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, aplicada al final de la instalacion. `guiar` y `acompanar` usan una lista blanca de comandos (no un bloqueo total): el agente conserva siempre la ruta de diagnostico y autorreparacion, y `install`/`update` solo piden confirmacion al usuario.
 - **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta, instala Graphify sin romper nada si falla y valida todo antes de tocar permisos.
+- **Hooks cross-harness**: reglas internas de Malahor independientes de OpenCode para bloquear secretos, git destructivo, memoria destructiva sin preview, politica insegura y pushes sin checks. Se invocan por CLI (`malahor-ai hooks check ...`) o MCP (`malahor_hook_check`).
 - **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
 
 ## Principio central
@@ -75,6 +77,11 @@ malahor-ai context obsidian on
 # Revisar la memoria del proyecto
 malahor-ai memory list
 malahor-ai memory inspect <proyecto>
+
+# Guardrails antes de acciones sensibles (portable a cualquier harness)
+malahor-ai hooks check git.commit.before
+malahor-ai hooks check git.push.before --profile release --confirm CHECKS_OK
+malahor-ai hooks check git.reset.before --command "git reset --hard"
 
 # Configurar el puente Obsidian (modo automatico: wsl-windows o windows-local)
 malahor-ai obsidian status

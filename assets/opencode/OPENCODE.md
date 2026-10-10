@@ -29,6 +29,16 @@
 - Si una reparacion cambia permisos o politica, recordar al usuario abrir una sesion nueva de OpenCode para recargarla.
 - `malahor-ai doctor --self-heal` migrando formatos legacy de permisos es seguro e idempotente; puede correrse ante cualquier duda.
 
+## Hooks y guardrails cross-harness
+
+- Las reglas criticas viven en Malahor, no en OpenCode: antes de acciones sensibles usar `malahor-ai hooks check <event>` o la tool MCP `malahor_hook_check`.
+- Antes de `git commit`, `git push`, `git reset`, `git checkout`, `git rebase`, stage de archivos sensibles, cambios destructivos de memoria, install/update de politica o escrituras fuera de rol, ejecutar el hook correspondiente.
+- Si un hook devuelve `DENY`, no ejecutar la accion; mostrar el motivo y el `Fix` exacto.
+- Si devuelve `ASK`, pedir confirmacion/evidencia humana antes de continuar; para push usar `CHECKS_OK` solo si tests/build relevantes ya pasaron.
+- Eventos git base: `git.commit.before`, `git.push.before`, `git.reset.before`, `git.checkout.before`, `git.rebase.before`, `file.stage.before`.
+- Eventos Malahor base: `memory.delete.apply`, `memory.move.apply`, `memory.restore.apply`, `install.beforePolicy`, `update.preflight`, `obsidian.write.before`, `graphify.generate.before`.
+- Nunca saltarse hooks con el argumento de que el harness no los soporta; el CLI/MCP de Malahor son el adaptador portable.
+
 ## Memoria
 
 - Usar Mnemo para decisiones, bugs, patrones, arquitectura, aprendizajes y resumen de sesion.
@@ -125,6 +135,7 @@
 ## Commits
 
 - No ejecutar `git add`, `git commit`, `commit --amend`, `push`, `reset` ni `checkout` salvo orden explicita del usuario.
+- Antes de `git commit` ejecutar `malahor-ai hooks check git.commit.before --command "<comando previsto>"`; antes de `git push` ejecutar `malahor-ai hooks check git.push.before --profile release` y continuar solo si no hay DENY/ASK pendiente.
 - Al proponer texto de commit, usar la skill `git-commit-text` si esta disponible.
 - Preferencia del usuario para mensajes de commit: titulo en espanol con icono referente al inicio, seguido de Conventional Commit (`✨ feat(scope): ...`, `🐛 fix(scope): ...`, etc.).
 - Si el cuerpo aporta contexto, razon o impacto, escribirlo como lista con viñetas `-`, una idea por linea.

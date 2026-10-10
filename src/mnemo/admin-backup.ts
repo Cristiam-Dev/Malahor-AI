@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backupFile, type BackupResult } from "../cli/core/backup";
+import { assertHooksAllowed } from "../cli/core/hooks/engine";
+import { resolvePaths } from "../cli/core/paths";
 import { dbPath, loadDb, saveDb, type MnemoDb } from "./db";
 
 export interface MemoryRestorePreview {
@@ -38,9 +40,25 @@ export function previewMemoryRestore(backupPath: string, filePath = dbPath()): M
 
 export function restoreMemoryBackup(backupPath: string, confirm: string, filePath = dbPath()): MemoryRestoreResult {
   const preview = previewMemoryRestore(backupPath, filePath);
+
   if (confirm !== preview.requiresConfirmation) {
     throw new Error("Confirmacion invalida. Para restaurar, confirm debe ser: RESTORE");
   }
+
+  assertHooksAllowed({
+    event: "memory.restore.apply",
+    harness: "mcp",
+    profile: "standard",
+    cwd: process.cwd(),
+    projectRoot: process.cwd(),
+    malahorHome: resolvePaths().malahorHome,
+    confirmation: confirm,
+    destructive: true,
+    metadata: {
+      previewToken: `restore:${preview.backup}:${preview.observations}:${preview.sessions}`,
+      requiresConfirmation: preview.requiresConfirmation,
+    },
+  });
 
   const restored = loadRestoreDbStrict(preview.backup);
   const currentBackup = backupFile(filePath, backupsDirForDb(filePath), false);

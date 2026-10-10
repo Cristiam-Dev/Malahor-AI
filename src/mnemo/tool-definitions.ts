@@ -167,4 +167,20 @@ export const toolDefinitions = [
       required: ["id", "targetProject", "confirm"],
     },
   },
+  {
+    name: "malahor_hook_check",
+    description: "Ejecuta guardrails cross-harness de Malahor antes de acciones sensibles (git, memoria, instalacion, archivos, secretos). Usar antes de commit/push/reset/push --force, writes de Obsidian o acciones destructivas.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        event: { type: "string", description: "Evento hook, por ejemplo git.commit.before, git.push.before, memory.delete.apply, install.beforePolicy." },
+        profile: { type: "string", description: "off|light|standard|strict|release. Default standard." },
+        command: { type: "string", description: "Comando shell que se planea ejecutar, si aplica." },
+        paths: { type: "array", items: { type: "string" }, description: "Archivos objetivo a revisar." },
+        confirm: { type: "string", description: "Confirmacion/evidencia fuerte, por ejemplo CHECKS_OK." },
+        metadata: { type: "object", description: "Metadatos del evento (previewToken, requiresConfirmation, writesMalahorData, etc.)." },
+      },
+      required: ["event"],
+    },
+  },
 ];

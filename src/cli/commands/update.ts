@@ -7,6 +7,7 @@ import { formatExecutionPolicy, loadConfig, saveExecutionPolicy, type MalahorExe
 import { detectEnvironment, type DetectionResult } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
+import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
@@ -83,6 +84,18 @@ export function runUpdate(options: UpdateOptions): void {
   // Migracion garantizada: cualquier update reescribe el formato de politica vigente,
   // incluyendo legacy deny -> whitelist agent-safe.
   const execution = resolveFinalPolicy(config.execution, options);
+  assertHooksAllowed({
+    event: "install.beforePolicy",
+    harness: "cli",
+    profile: "release",
+    cwd: paths.cwd,
+    projectRoot: packagePaths.root,
+    malahorHome: paths.malahorHome,
+    metadata: {
+      appliesPolicyBeforeValidation: false,
+      bashDenyTotal: false,
+    },
+  });
   saveExecutionPolicy({ ...config, execution }, options.dryRun);
   syncOpenCodeConfig(paths, { execution }, options.dryRun);
 

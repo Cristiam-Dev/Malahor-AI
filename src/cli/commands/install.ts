@@ -12,6 +12,7 @@ import {
 import { detectEnvironment, type DetectionResult } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
+import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { resolvePackagePaths } from "../core/package";
@@ -90,6 +91,18 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   validateBeforePolicy(paths, packagePaths, options);
 
   const execution = await resolveFinalPolicy(config.execution, options);
+  assertHooksAllowed({
+    event: "install.beforePolicy",
+    harness: "cli",
+    profile: "release",
+    cwd: paths.cwd,
+    projectRoot: packagePaths.root,
+    malahorHome: paths.malahorHome,
+    metadata: {
+      appliesPolicyBeforeValidation: false,
+      bashDenyTotal: false,
+    },
+  });
   saveExecutionPolicy({ ...config, execution }, options.dryRun);
   syncOpenCodeConfig(paths, { execution }, options.dryRun);
 

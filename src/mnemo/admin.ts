@@ -1,4 +1,6 @@
 import { backupFile, type BackupResult } from "../cli/core/backup";
+import { assertHooksAllowed } from "../cli/core/hooks/engine";
+import { resolvePaths } from "../cli/core/paths";
 import { dbPath, loadDb, normalizeProject, saveDb, type Observation, type ObservationType, type SessionSummary } from "./db";
 import { backupsDirForDb } from "./admin-backup";
 
@@ -99,6 +101,22 @@ export function deleteProjectMemory(project: string, confirm: string, filePath =
     throw new Error(`Confirmacion invalida. Para borrar ${preview.project}, confirm debe ser: ${preview.requiresConfirmation}`);
   }
 
+  assertHooksAllowed({
+    event: "memory.delete.apply",
+    harness: "mcp",
+    profile: "standard",
+    cwd: process.cwd(),
+    projectRoot: process.cwd(),
+    malahorHome: resolvePaths().malahorHome,
+    memoryScope: preview.project,
+    confirmation: confirm,
+    destructive: true,
+    metadata: {
+      previewToken: `delete:${preview.project}:${preview.observations}:${preview.sessions}`,
+      requiresConfirmation: preview.requiresConfirmation,
+    },
+  });
+
   const db = loadDb(filePath);
   const next = {
     ...db,
@@ -138,9 +156,26 @@ export function previewMemoryMove(id: number, targetProject: string, filePath = 
 
 export function moveMemory(id: number, targetProject: string, confirm: string, filePath = dbPath()): MemoryMoveResult {
   const preview = previewMemoryMove(id, targetProject, filePath);
+
   if (confirm !== preview.requiresConfirmation) {
     throw new Error(`Confirmacion invalida. Para mover #${id}, confirm debe ser: ${preview.requiresConfirmation}`);
   }
+
+  assertHooksAllowed({
+    event: "memory.move.apply",
+    harness: "mcp",
+    profile: "standard",
+    cwd: process.cwd(),
+    projectRoot: process.cwd(),
+    malahorHome: resolvePaths().malahorHome,
+    memoryScope: preview.fromProject,
+    confirmation: confirm,
+    destructive: true,
+    metadata: {
+      previewToken: `move:${preview.id}:${preview.fromProject}:${preview.toProject}`,
+      requiresConfirmation: preview.requiresConfirmation,
+    },
+  });
 
   const db = loadDb(filePath);
   const backup = backupFile(filePath, backupsDirForDb(filePath), false);

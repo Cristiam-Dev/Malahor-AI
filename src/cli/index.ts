@@ -3,6 +3,7 @@ import { runDoctor } from "./commands/doctor";
 import { runGraph } from "./commands/graph";
 import { runContext } from "./commands/context";
 import { runInstall } from "./commands/install";
+import { runHooksCommand } from "./commands/hooks";
 import { runMemory } from "./commands/memory";
 import { runObsidian } from "./commands/obsidian";
 import { runUninstall } from "./commands/uninstall";
@@ -37,6 +38,17 @@ async function main(argv: string[]): Promise<void> {
         return;
       case "graphify":
         runGraph({ action: parsed.args[0] ?? "status", dryRun: parsed.flags.has("dry-run") });
+        return;
+      case "hooks":
+        runHooksCommand({
+          action: parsed.args[0] ?? "help",
+          args: parsed.args.slice(1),
+          command: parsed.options.command,
+          paths: parsed.options.paths,
+          profile: parsed.options.profile,
+          confirm: parsed.options.confirm,
+          json: parsed.flags.has("json"),
+        });
         return;
       case "memory":
         runMemory({
@@ -107,7 +119,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       const key = arg.slice(2);
       flags.add(key);
 
-      if ((key === "confirm" || key === "mode" || key === "project" || key === "limit" || key === "policy-after") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
+      if ((key === "command" || key === "confirm" || key === "mode" || key === "paths" || key === "profile" || key === "project" || key === "limit" || key === "policy-after") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
         options[key] = rest[index + 1];
         index += 1;
       }

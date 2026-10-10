@@ -1,4 +1,8 @@
 import { toolDefinitions } from "./tool-definitions";
+import { runHooks } from "../cli/core/hooks/engine";
+import type { HookEvent, HookProfile } from "../cli/core/hooks/types";
+import { resolvePaths } from "../cli/core/paths";
+import { resolveProject } from "../cli/core/project";
 import { getObservation, listProjects, saveObservation, saveSessionSummary, searchObservations, type ObservationType } from "./db";
 import { contextForProject, memoryBrief } from "./context";
 import { deleteProjectMemory, inspectProjectMemory, moveMemory, previewMemoryMove, previewProjectDeletion } from "./admin";
@@ -57,9 +61,29 @@ export function callTool(call: ToolCall): unknown {
       return previewMemoryMove(numberArg(args.id, 0), stringArg(args.targetProject));
     case "mem_move":
       return moveMemory(numberArg(args.id, 0), stringArg(args.targetProject), stringArg(args.confirm));
+    case "malahor_hook_check":
+      return checkMalahorHooks(args);
     default:
       throw new Error(`Unknown tool: ${call.name}`);
   }
+}
+
+function checkMalahorHooks(args: Record<string, unknown>): unknown {
+  const paths = resolvePaths();
+  const project = resolveProject(paths.cwd);
+  return runHooks({
+    event: hookEventArg(args.event),
+    harness: "mcp",
+    profile: hookProfileArg(args.profile),
+    cwd: paths.cwd,
+    projectRoot: project.root,
+    malahorHome: paths.malahorHome,
+    project: project.canonicalKey,
+    command: optionalStringArg(args.command),
+    targetPaths: stringListArg(args.paths),
+    confirmation: optionalStringArg(args.confirm),
+    metadata: recordArg(args.metadata),
+  });
 }
 
 function stringArg(value: unknown, fallback?: string): string {
@@ -79,4 +103,24 @@ function optionalStringArg(value: unknown): string | undefined {
 function observationTypeArg(value: unknown): ObservationType {
   const allowed: ObservationType[] = ["decision", "bug", "pattern", "architecture", "learning", "general"];
   return allowed.includes(value as ObservationType) ? (value as ObservationType) : "general";
+}
+
+function hookEventArg(value: unknown): HookEvent {
+  if (typeof value === "string" && value.trim()) return value as HookEvent;
+  throw new Error("Expected hook event string");
+}
+
+function hookProfileArg(value: unknown): HookProfile {
+  if (value === "off" || value === "light" || value === "standard" || value === "strict" || value === "release") return value;
+  return "standard";
+}
+
+function stringListArg(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function recordArg(value: unknown): Record<string, unknown> {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) return value as Record<string, unknown>;
+  return {};
 }
