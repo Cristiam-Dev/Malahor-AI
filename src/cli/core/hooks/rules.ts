@@ -31,6 +31,7 @@ function repoBoundaryGuard(context: HookContext): HookViolation[] {
 }
 
 function destructiveMemoryGuard(context: HookContext): HookViolation[] {
+  if (context.policy?.memory.destructiveRequiresPreview === false) return [];
   const destructiveEvents = new Set(["memory.delete.apply", "memory.move.apply", "memory.restore.apply"]);
   if (!destructiveEvents.has(context.event)) return [];
 
@@ -63,7 +64,7 @@ function policySafetyGuard(context: HookContext): HookViolation[] {
   if (context.event !== "install.beforePolicy" && context.event !== "update.preflight") return [];
 
   const violations: HookViolation[] = [];
-  if (context.metadata?.appliesPolicyBeforeValidation === true) {
+  if (context.policy?.policy.enforceDeferredPolicy !== false && context.metadata?.appliesPolicyBeforeValidation === true) {
     violations.push({
       id: "MAL-HOOK-POLICY-DEFER",
       decision: "deny",
@@ -71,7 +72,7 @@ function policySafetyGuard(context: HookContext): HookViolation[] {
       fix: "Ejecuta assets/Mnemo/comandos/Graphify/validateInstallation y aplica politica al final.",
     });
   }
-  if (context.metadata?.bashDenyTotal === true) {
+  if (context.policy?.policy.blockTotalBashDeny !== false && context.metadata?.bashDenyTotal === true) {
     violations.push({
       id: "MAL-HOOK-POLICY-BASH-DENY",
       decision: "deny",
@@ -84,6 +85,7 @@ function policySafetyGuard(context: HookContext): HookViolation[] {
 }
 
 function dangerousGitGuard(context: HookContext): HookViolation[] {
+  if (context.policy?.git.blockDestructiveCommands === false) return [];
   const command = (context.command ?? "").trim();
   if (!command && !context.event.startsWith("git.")) return [];
 
@@ -101,6 +103,7 @@ function dangerousGitGuard(context: HookContext): HookViolation[] {
 }
 
 function commitMessageGuard(context: HookContext): HookViolation[] {
+  if (context.policy?.git.validateCommitMessage === false) return [];
   if (context.event !== "git.commit.before" || !context.command) return [];
 
   const message = extractCommitMessage(context.command);
@@ -118,6 +121,7 @@ function commitMessageGuard(context: HookContext): HookViolation[] {
 }
 
 function secretScanGuard(context: HookContext): HookViolation[] {
+  if (context.policy?.secrets.scanBeforeCommit === false) return [];
   const paths = readableTargetPaths(context);
   const leaks = paths.flatMap((targetPath) => scanFileForSecrets(targetPath));
 
@@ -135,7 +139,7 @@ function programmingQualityGuard(context: HookContext): HookViolation[] {
   const violations: HookViolation[] = [];
   const files = context.targetPaths ?? [];
 
-  if (context.event === "git.push.before" && context.confirmation !== "CHECKS_OK") {
+  if (context.policy?.git.requireChecksBeforePush !== false && context.event === "git.push.before" && context.confirmation !== "CHECKS_OK") {
     violations.push({
       id: "MAL-HOOK-PUSH-CHECKS",
       decision: strictness(context.profile, "ask"),
@@ -144,7 +148,7 @@ function programmingQualityGuard(context: HookContext): HookViolation[] {
     });
   }
 
-  const largeFiles = files.filter((file) => fileSize(path.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -154,7 +158,7 @@ function programmingQualityGuard(context: HookContext): HookViolation[] {
     });
   }
 
-  const genericModules = files.filter((file) => /(^|\/)(utils|helpers|common|shared)\.(ts|js|tsx|jsx)$/.test(file));
+  const genericModules = context.policy?.quality.warnGenericModules === false ? [] : files.filter((file) => /(^|\/)(utils|helpers|common|shared)\.(ts|js|tsx|jsx)$/.test(file));
   if (genericModules.length > 0) {
     violations.push({
       id: "MAL-HOOK-GENERIC-MODULE",

@@ -5,6 +5,7 @@ import { formatExecutionPolicy, loadConfig, type MalahorConfig, type MalahorExec
 import { levelForProject } from "../core/context";
 import { detectEnvironment } from "../core/detector";
 import { graphifyStatus } from "../core/graphify";
+import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
 import { MALAHOR_COMMAND_FILES, syncOpenCodeCommands } from "../core/opencode-commands";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
@@ -50,6 +51,7 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
   checks.push(checkMnemoConfig(paths.opencodeConfig));
   checks.push(checkCompaction(paths.opencodeConfig));
   checks.push(checkOpenCodeCommands(paths));
+  checks.push(checkHookPolicy(paths, project.canonicalKey));
   checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution));
   checks.push({
     name: "Graphify",
@@ -329,6 +331,20 @@ function checkOpenCodeCommands(paths: MalahorPaths): CheckResult {
     name: "OpenCode commands",
     ok: missing.length === 0,
     message: missing.length === 0 ? `${MALAHOR_COMMAND_FILES.length} instalados` : `faltan: ${missing.join(", ")}`,
+    critical: false,
+  };
+}
+
+function checkHookPolicy(paths: MalahorPaths, project: string): CheckResult {
+  const policyLoad = loadHookPolicy(paths, project);
+  const ok = policyLoad.warnings.length === 0;
+
+  return {
+    name: "Hook policy",
+    ok,
+    message: ok
+      ? `profile=${policyLoad.policy.profile} sources=${policyLoad.sources.length > 0 ? policyLoad.sources.length : "defaults"}`
+      : policyLoad.warnings.join("; "),
     critical: false,
   };
 }

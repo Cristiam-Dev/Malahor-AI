@@ -2,6 +2,29 @@ export type HookDecision = "allow" | "warn" | "ask" | "deny";
 
 export type HookProfile = "off" | "light" | "standard" | "strict" | "release";
 
+export interface HookPolicy {
+  profile: HookProfile;
+  git: {
+    blockDestructiveCommands: boolean;
+    requireChecksBeforePush: boolean;
+    validateCommitMessage: boolean;
+  };
+  secrets: {
+    scanBeforeCommit: boolean;
+  };
+  memory: {
+    destructiveRequiresPreview: boolean;
+  };
+  policy: {
+    enforceDeferredPolicy: boolean;
+    blockTotalBashDeny: boolean;
+  };
+  quality: {
+    warnLargeFiles: boolean;
+    warnGenericModules: boolean;
+  };
+}
+
 export type HookEvent =
   | "project.resolve.before"
   | "context.recover.before"
@@ -38,6 +61,7 @@ export interface HookContext {
   projectRoot: string;
   malahorHome: string;
   project?: string;
+  policy?: HookPolicy;
   command?: string;
   targetPaths?: string[];
   memoryScope?: string;

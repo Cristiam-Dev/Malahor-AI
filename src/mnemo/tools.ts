@@ -1,6 +1,7 @@
 import { toolDefinitions } from "./tool-definitions";
 import { runHooks } from "../cli/core/hooks/engine";
-import type { HookEvent, HookProfile } from "../cli/core/hooks/types";
+import { loadHookPolicy, parseHookProfile } from "../cli/core/hooks/policy-loader";
+import type { HookEvent } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
 import { resolveProject } from "../cli/core/project";
 import { getObservation, listProjects, saveObservation, saveSessionSummary, searchObservations, type ObservationType } from "./db";
@@ -71,14 +72,17 @@ export function callTool(call: ToolCall): unknown {
 function checkMalahorHooks(args: Record<string, unknown>): unknown {
   const paths = resolvePaths();
   const project = resolveProject(paths.cwd);
+  const profileOverride = typeof args.profile === "string" && args.profile.trim() ? parseHookProfile(args.profile) : undefined;
+  const policyLoad = loadHookPolicy(paths, project.canonicalKey, profileOverride);
   return runHooks({
     event: hookEventArg(args.event),
     harness: "mcp",
-    profile: hookProfileArg(args.profile),
+    profile: policyLoad.policy.profile,
     cwd: paths.cwd,
     projectRoot: project.root,
     malahorHome: paths.malahorHome,
     project: project.canonicalKey,
+    policy: policyLoad.policy,
     command: optionalStringArg(args.command),
     targetPaths: stringListArg(args.paths),
     confirmation: optionalStringArg(args.confirm),
@@ -108,11 +112,6 @@ function observationTypeArg(value: unknown): ObservationType {
 function hookEventArg(value: unknown): HookEvent {
   if (typeof value === "string" && value.trim()) return value as HookEvent;
   throw new Error("Expected hook event string");
-}
-
-function hookProfileArg(value: unknown): HookProfile {
-  if (value === "off" || value === "light" || value === "standard" || value === "strict" || value === "release") return value;
-  return "standard";
 }
 
 function stringListArg(value: unknown): string[] {

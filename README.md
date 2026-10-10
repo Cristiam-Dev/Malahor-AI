@@ -54,6 +54,7 @@ malahor-ai doctor
 - **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, aplicada al final de la instalacion. `guiar` y `acompanar` usan una lista blanca de comandos (no un bloqueo total): el agente conserva siempre la ruta de diagnostico y autorreparacion, y `install`/`update` solo piden confirmacion al usuario.
 - **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta, instala Graphify sin romper nada si falla y valida todo antes de tocar permisos.
 - **Hooks cross-harness**: reglas internas de Malahor independientes de OpenCode para bloquear secretos, git destructivo, memoria destructiva sin preview, politica insegura y pushes sin checks. Se invocan por CLI (`malahor-ai hooks check ...`) o MCP (`malahor_hook_check`).
+- **Perfiles de hooks**: `off`, `light`, `standard`, `strict`, `release`, configurables fuera del repo en `~/.malahor/policies/default.jsonc` y `~/.malahor/policies/projects/<proyecto>.jsonc`.
 - **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
 
 ## Principio central
@@ -79,6 +80,8 @@ malahor-ai memory list
 malahor-ai memory inspect <proyecto>
 
 # Guardrails antes de acciones sensibles (portable a cualquier harness)
+malahor-ai hooks status
+malahor-ai hooks profile set release --project malahor
 malahor-ai hooks check git.commit.before
 malahor-ai hooks check git.push.before --profile release --confirm CHECKS_OK
 malahor-ai hooks check git.reset.before --command "git reset --hard"

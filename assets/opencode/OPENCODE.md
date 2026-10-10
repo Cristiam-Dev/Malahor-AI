@@ -32,6 +32,7 @@
 ## Hooks y guardrails cross-harness
 
 - Las reglas criticas viven en Malahor, no en OpenCode: antes de acciones sensibles usar `malahor-ai hooks check <event>` o la tool MCP `malahor_hook_check`.
+- Los perfiles (`off`, `light`, `standard`, `strict`, `release`) se resuelven desde Malahor: `~/.malahor/policies/default.jsonc` y `~/.malahor/policies/projects/<proyecto>.jsonc`. Consultar con `malahor-ai hooks status`; cambiar con `malahor-ai hooks profile set <perfil> [--project <key>]`.
 - Antes de `git commit`, `git push`, `git reset`, `git checkout`, `git rebase`, stage de archivos sensibles, cambios destructivos de memoria, install/update de politica o escrituras fuera de rol, ejecutar el hook correspondiente.
 - Si un hook devuelve `DENY`, no ejecutar la accion; mostrar el motivo y el `Fix` exacto.
 - Si devuelve `ASK`, pedir confirmacion/evidencia humana antes de continuar; para push usar `CHECKS_OK` solo si tests/build relevantes ya pasaron.

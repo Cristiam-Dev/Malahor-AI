@@ -46,6 +46,7 @@ async function main(argv: string[]): Promise<void> {
           command: parsed.options.command,
           paths: parsed.options.paths,
           profile: parsed.options.profile,
+          project: parsed.options.project,
           confirm: parsed.options.confirm,
           json: parsed.flags.has("json"),
         });
