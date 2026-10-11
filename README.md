@@ -37,6 +37,7 @@ malahor-ai doctor
 | `malahor-ai doctor` | Diagnostica la instalacion; `--self-heal` repara y migra permisos legacy |
 | `malahor-ai graph` | Genera mapa de codigo con Graphify, fuera del repo |
 | `malahor-ai graphify` | `status` / `install` / `verify`: venv aislado en `~/.malahor/tools/graphify` |
+| `malahor-ai git` | Flujo git asistido: precommit, prepush y mensajes de commit seguros |
 | `malahor-ai hooks` | Guardrails cross-harness para git, secretos, memoria, instalacion y calidad |
 | `malahor-ai context` | Nivel de contexto por proyecto y deteccion de stack |
 | `malahor-ai memory` | Administra la memoria Mnemo |
@@ -55,6 +56,7 @@ malahor-ai doctor
 - **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta, instala Graphify sin romper nada si falla y valida todo antes de tocar permisos.
 - **Hooks cross-harness**: reglas internas de Malahor independientes de OpenCode para bloquear secretos, git destructivo, memoria destructiva sin preview, politica insegura y pushes sin checks. Se invocan por CLI (`malahor-ai hooks check ...`) o MCP (`malahor_hook_check`).
 - **Perfiles de hooks**: `off`, `light`, `standard`, `strict`, `release`, configurables fuera del repo en `~/.malahor/policies/default.jsonc` y `~/.malahor/policies/projects/<proyecto>.jsonc`.
+- **Git asistido**: `malahor-ai git precommit`, `prepush` y `commit-message` ejecutan los guardrails y proponen el comando seguro sin hacer `git add`, `commit` ni `push` por ti.
 - **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
 
 ## Principio central
@@ -85,6 +87,11 @@ malahor-ai hooks profile set release --project malahor
 malahor-ai hooks check git.commit.before
 malahor-ai hooks check git.push.before --profile release --confirm CHECKS_OK
 malahor-ai hooks check git.reset.before --command "git reset --hard"
+
+# Flujo git asistido (no ejecuta commit/push)
+malahor-ai git commit-message agrega flujo git asistido --type feat --scope hooks
+malahor-ai git precommit --message "✨ feat(hooks): agrega flujo git asistido"
+malahor-ai git prepush --confirm CHECKS_OK
 
 # Configurar el puente Obsidian (modo automatico: wsl-windows o windows-local)
 malahor-ai obsidian status
