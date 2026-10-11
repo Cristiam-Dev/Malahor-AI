@@ -21,6 +21,7 @@ describe("git workflow asistido", () => {
       projectRoot: process.cwd(),
       malahorHome: `${process.cwd()}/.sandbox/home/.malahor`,
       command: `git commit -m '${message}'`,
+      metadata: { validationOnly: true },
     });
 
     expect(result.decision).toBe("allow");

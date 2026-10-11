@@ -95,6 +95,7 @@ describe("malahor hooks", () => {
       event: "git.commit.before",
       command: "git commit -m 'update stuff'",
       profile: "release",
+      metadata: { validationOnly: true },
     }));
 
     expect(result.decision).toBe("ask");
@@ -106,9 +107,43 @@ describe("malahor hooks", () => {
       event: "git.commit.before",
       command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
       profile: "release",
+      metadata: { validationOnly: true },
     }));
 
     expect(result.decision).toBe("allow");
+  });
+
+  test("bloquea commit real sin consentimiento explicito", () => {
+    const result = runHooks(baseContext({
+      event: "git.commit.before",
+      command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
+      profile: "release",
+    }));
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-CONSENT")).toBe(true);
+  });
+
+  test("permite commit real con consentimiento explicito", () => {
+    const result = runHooks(baseContext({
+      event: "git.commit.before",
+      command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
+      confirmation: "USER_REQUESTED_COMMIT",
+      profile: "release",
+    }));
+
+    expect(result.decision).toBe("allow");
+  });
+
+  test("bloquea stage real sin consentimiento explicito", () => {
+    const result = runHooks(baseContext({
+      event: "file.stage.before",
+      command: "git add README.md",
+      profile: "release",
+    }));
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-STAGE-CONSENT")).toBe(true);
   });
 
   test("expone hook check por MCP", () => {

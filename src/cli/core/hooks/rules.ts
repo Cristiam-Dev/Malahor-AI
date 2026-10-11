@@ -7,6 +7,7 @@ export const builtInHookRules: HookRule[] = [
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
   { id: "dangerous-git", run: dangerousGitGuard },
+  { id: "git-consent", run: gitConsentGuard },
   { id: "commit-message", run: commitMessageGuard },
   { id: "secret-scan", run: secretScanGuard },
   { id: "programming-quality", run: programmingQualityGuard },
@@ -102,6 +103,31 @@ function dangerousGitGuard(context: HookContext): HookViolation[] {
     .map(([, message, fix]) => ({ id: "MAL-HOOK-GIT-DESTRUCTIVE", decision: "deny", message, fix }));
 }
 
+function gitConsentGuard(context: HookContext): HookViolation[] {
+  const command = (context.command ?? "").trim();
+  if (!command || context.metadata?.validationOnly === true) return [];
+
+  if (context.event === "git.commit.before" && /\bgit\s+commit\b/.test(command) && !hasConsent(context, "USER_REQUESTED_COMMIT", "userExplicitlyRequestedCommit")) {
+    return [{
+      id: "MAL-HOOK-GIT-CONSENT",
+      decision: "deny",
+      message: "git commit requiere pedido explicito del usuario; 'continuar', 'cerrar fase' o 'implementar' no autorizan commitear.",
+      fix: "No ejecutes el commit. Pide confirmacion explicita o valida con confirmacion USER_REQUESTED_COMMIT si el usuario pidio commitear.",
+    }];
+  }
+
+  if (context.event === "file.stage.before" && /\bgit\s+add\b/.test(command) && !hasConsent(context, "USER_REQUESTED_STAGE", "userExplicitlyRequestedStage")) {
+    return [{
+      id: "MAL-HOOK-GIT-STAGE-CONSENT",
+      decision: "deny",
+      message: "git add/stage requiere pedido explicito del usuario; preparar cambios no equivale a staging.",
+      fix: "No ejecutes git add. Pide confirmacion explicita o valida con confirmacion USER_REQUESTED_STAGE si el usuario pidio stagear.",
+    }];
+  }
+
+  return [];
+}
+
 function commitMessageGuard(context: HookContext): HookViolation[] {
   if (context.policy?.git.validateCommitMessage === false) return [];
   if (context.event !== "git.commit.before" || !context.command) return [];
@@ -194,6 +220,10 @@ function scanFileForSecrets(filePath: string): string[] {
 function extractCommitMessage(command: string): string | null {
   const match = /\s-m\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(command);
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+}
+
+function hasConsent(context: HookContext, confirmation: string, metadataKey: string): boolean {
+  return context.confirmation === confirmation || context.metadata?.[metadataKey] === true;
 }
 
 function strictness(profile: HookProfile, fallback: "warn" | "ask"): "warn" | "ask" | "deny" {

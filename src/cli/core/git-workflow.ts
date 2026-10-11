@@ -64,6 +64,7 @@ function runPrecommit(options: GitWorkflowOptions): GitWorkflowResult {
     policy: context.policy,
     command,
     targetPaths,
+    metadata: { validationOnly: true },
   });
 
   const notes = [targetPaths.length > 0 ? `${targetPaths.length} archivo(s) revisado(s).` : "No hay archivos staged; se revisaron cambios de trabajo si existian."];
@@ -118,6 +119,7 @@ function runCommitMessage(options: GitWorkflowOptions): GitWorkflowResult {
     policy: context.policy,
     command,
     targetPaths,
+    metadata: { validationOnly: true },
   });
 
   return workflowResult(context, "commit-message", targetPaths, ["Mensaje generado; Malahor no ejecuta git commit por ti."], hookResult, message, command);

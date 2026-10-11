@@ -35,6 +35,7 @@
 - Los perfiles (`off`, `light`, `standard`, `strict`, `release`) se resuelven desde Malahor: `~/.malahor/policies/default.jsonc` y `~/.malahor/policies/projects/<proyecto>.jsonc`. Consultar con `malahor-ai hooks status`; cambiar con `malahor-ai hooks profile set <perfil> [--project <key>]`.
 - Antes de `git commit`, `git push`, `git reset`, `git checkout`, `git rebase`, stage de archivos sensibles, cambios destructivos de memoria, install/update de politica o escrituras fuera de rol, ejecutar el hook correspondiente.
 - Para el flujo asistido preferir `malahor-ai git precommit`, `malahor-ai git prepush --confirm CHECKS_OK` y `malahor-ai git commit-message ...`; estos comandos no ejecutan `git add`, `commit` ni `push`, solo validan y proponen.
+- `git add` y `git commit` requieren una orden explicita del usuario que mencione stagear/commitear. Frases generales como "continua", "cierra la fase", "listo" o "implementa" no autorizan staging ni commit.
 - Si un hook devuelve `DENY`, no ejecutar la accion; mostrar el motivo y el `Fix` exacto.
 - Si devuelve `ASK`, pedir confirmacion/evidencia humana antes de continuar; para push usar `CHECKS_OK` solo si tests/build relevantes ya pasaron.
 - Eventos git base: `git.commit.before`, `git.push.before`, `git.reset.before`, `git.checkout.before`, `git.rebase.before`, `file.stage.before`.
@@ -137,8 +138,9 @@
 ## Commits
 
 - No ejecutar `git add`, `git commit`, `commit --amend`, `push`, `reset` ni `checkout` salvo orden explicita del usuario.
+- Si necesitas validar un commit sin ejecutarlo, usa `malahor-ai git precommit` o `commit-message`; eso no equivale a autorizacion para commitear.
 - Antes de `git commit` ejecutar `malahor-ai git precommit --message "<mensaje previsto>"` o `malahor-ai hooks check git.commit.before --command "<comando previsto>"`; antes de `git push` ejecutar `malahor-ai git prepush --confirm CHECKS_OK` o `malahor-ai hooks check git.push.before --profile release` y continuar solo si no hay DENY/ASK pendiente.
-- Al proponer texto de commit, usar la skill `git-commit-text` si esta disponible.
+- Al proponer texto de commit, usar siempre la skill first-party `git-commit-text`; es regla de oro de Malahor.
 - Preferencia del usuario para mensajes de commit: titulo en espanol con icono referente al inicio, seguido de Conventional Commit (`✨ feat(scope): ...`, `🐛 fix(scope): ...`, etc.).
-- Si el cuerpo aporta contexto, razon o impacto, escribirlo como lista con viñetas `-`, una idea por linea.
+- Incluir cuerpo con viñetas `-` siempre que sea viable y aporte contexto, razon, impacto, docs o validaciones; omitirlo solo si el cambio es trivial.
 - No agregar atribucion de IA ni ruido ceremonial.

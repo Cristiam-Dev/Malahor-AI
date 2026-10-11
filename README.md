@@ -57,6 +57,8 @@ malahor-ai doctor
 - **Hooks cross-harness**: reglas internas de Malahor independientes de OpenCode para bloquear secretos, git destructivo, memoria destructiva sin preview, politica insegura y pushes sin checks. Se invocan por CLI (`malahor-ai hooks check ...`) o MCP (`malahor_hook_check`).
 - **Perfiles de hooks**: `off`, `light`, `standard`, `strict`, `release`, configurables fuera del repo en `~/.malahor/policies/default.jsonc` y `~/.malahor/policies/projects/<proyecto>.jsonc`.
 - **Git asistido**: `malahor-ai git precommit`, `prepush` y `commit-message` ejecutan los guardrails y proponen el comando seguro sin hacer `git add`, `commit` ni `push` por ti.
+- **Consentimiento git**: `git add` y `git commit` quedan bloqueados por hooks si no hay una orden explicita de stage/commit; "continuar" o "cerrar fase" no cuentan como autorizacion.
+- **Skill canonica de commits**: `git-commit-text` es regla de oro para proponer mensajes: icono + Conventional Commit en espanol y cuerpo con viñetas siempre que aporte contexto.
 - **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
 
 ## Principio central
@@ -92,6 +94,10 @@ malahor-ai hooks check git.reset.before --command "git reset --hard"
 malahor-ai git commit-message agrega flujo git asistido --type feat --scope hooks
 malahor-ai git precommit --message "✨ feat(hooks): agrega flujo git asistido"
 malahor-ai git prepush --confirm CHECKS_OK
+
+# Validar acciones git reales solo con consentimiento explicito
+malahor-ai hooks check file.stage.before --command "git add README.md" --confirm USER_REQUESTED_STAGE
+malahor-ai hooks check git.commit.before --command "git commit -m '✨ feat(hooks): agrega flujo git asistido'" --confirm USER_REQUESTED_COMMIT
 
 # Configurar el puente Obsidian (modo automatico: wsl-windows o windows-local)
 malahor-ai obsidian status
