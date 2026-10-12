@@ -17,7 +17,7 @@
     "agent"
   ],
   "bin": {
-    "malahor-ai": "./dist/index.js"
+    "malahor-ai": "dist/index.js"
   },
   "files": [
     "dist",
