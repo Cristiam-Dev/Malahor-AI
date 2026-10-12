@@ -1,6 +1,6 @@
 {
   "name": "malahor-ai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI local para potenciar agentes de IA con memoria persistente, OpenCode, Graphify, SDD, Obsidian y Vikunja.",
   "license": "UNLICENSED",
   "type": "module",

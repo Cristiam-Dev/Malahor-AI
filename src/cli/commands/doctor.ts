@@ -65,6 +65,7 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
   process.stdout.write(`\nmalahor-ai doctor${options.selfHeal ? " --self-heal" : ""}\n=================\n`);
   process.stdout.write(`Mode: ${config.mode}\n`);
   process.stdout.write(`Config file: ${paths.configFile}\n`);
+  process.stdout.write(`OpenCode dir: ${paths.opencodeDir}\n`);
   process.stdout.write(`Execution policy: ${formatExecutionPolicy(config.execution)}\n`);
   process.stdout.write(`Project: ${project.name}\n`);
   process.stdout.write(`Project root: ${project.root}\n`);

@@ -130,6 +130,7 @@ malahor-ai memory restore <backup> --yes --confirm RESTORE
 - Graphify no encontrado: `malahor-ai graphify install` (venv aislado). Es opcional; su ausencia no rompe nada.
 - Obsidian no conecta desde WSL: permite los puertos 27123 y 27124 en el Firewall de Windows y verifica el plugin "Local REST API".
 - Cambiaste de politica y no surte efecto: abre una sesion nueva de OpenCode (o cambia de agente con Tab) para recargar `opencode.jsonc`.
+- En Windows, Malahor detecta la carpeta real de OpenCode V2 con `opencode api get /api/config`; si necesitas forzar otra ruta, usa `MALAHOR_OPENCODE_DIR`.
 - Para probar sin tocar el entorno real: scripts sandbox de la seccion Desarrollo.
 
 ## Desarrollo
