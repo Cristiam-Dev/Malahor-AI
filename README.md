@@ -14,7 +14,7 @@ CLI local que potencia agentes de IA —OpenCode primero— con memoria persiste
 
 La via recomendada no requiere consola: abre OpenCode y escribe `instala malahor`. El agente ejecuta el bootstrap agent-safe completo (instalacion, validaciones y Graphify opcional) y solo te pedira confirmar si algo toca configuracion.
 
-Si prefieres terminal, una sola linea:
+Si prefieres terminal, una sola linea cuando el paquete este publicado en npm:
 
 ```bash
 npm install -g malahor-ai && malahor-ai install --bootstrap --yes
@@ -28,6 +28,8 @@ malahor-ai doctor
 ```
 
 `install` configura OpenCode, instala los assets de Malahor y **aplica la politica de intervencion al final, solo tras validar** que Mnemo, comandos, compaction y recuperacion de contexto funcionan: si algo falla, el agente nunca queda bloqueado. `doctor --self-heal` repara instalaciones rotas y migra permisos antiguos. La politica activa vive en `opencode.jsonc`; tras cambiarla, abre una sesion nueva de OpenCode.
+
+Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone todavia una API publica estable ni funciona como SDK autonomo embebible dentro de otros proyectos.
 
 ## Comandos
 
@@ -145,4 +147,6 @@ El sandbox usa `.sandbox/home/.malahor` y `.sandbox/home/.config/opencode` para 
 
 ## Licencia
 
-MIT. Ver `LICENSE`.
+Software propietario. Todos los derechos reservados. Ver `LICENSE`.
+
+El paquete puede distribuirse por npm publico para facilitar la instalacion, pero eso no concede una licencia open-source ni permisos de uso, copia, modificacion o redistribucion sin autorizacion escrita del titular de derechos.
