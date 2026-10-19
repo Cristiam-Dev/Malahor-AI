@@ -8,6 +8,7 @@ import { graphifyStatus } from "../core/graphify";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
 import { MALAHOR_COMMAND_FILES, syncOpenCodeCommands } from "../core/opencode-commands";
+import { hasDuplicateConfigs } from "../core/opencode-config/preview";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveProject } from "../core/project";
@@ -51,6 +52,7 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
   checks.push(checkMnemoConfig(paths.opencodeConfig));
   checks.push(checkCompaction(paths.opencodeConfig));
   checks.push(checkOpenCodeCommands(paths));
+  checks.push(checkOpenCodeConfigDuplicates(paths));
   checks.push(checkHookPolicy(paths, project.canonicalKey));
   checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution));
   checks.push({
@@ -178,6 +180,11 @@ function repairInstallFiles(packagePaths: MalahorPackagePaths, paths: MalahorPat
 }
 
 function repairOpenCodeConfigFile(config: MalahorConfig, paths: MalahorPaths, dryRun: boolean, repairs: string[]): void {
+  if (hasDuplicateConfigs(paths.opencodeDir)) {
+    repairs.push("AVISO: opencode.json y opencode.jsonc coexisten; el self-heal no consolida ni reescribe. Usa `malahor-ai config`.");
+    return;
+  }
+
   if (!fs.existsSync(paths.opencodeConfig)) {
     syncOpenCodeConfig(paths, { execution: config.execution }, dryRun);
     repairs.push(`${dryRun ? "crearia" : "creado"} opencode.jsonc con Mnemo/compaction/politica`);
@@ -334,6 +341,14 @@ function checkOpenCodeCommands(paths: MalahorPaths): CheckResult {
     message: missing.length === 0 ? `${MALAHOR_COMMAND_FILES.length} instalados` : `faltan: ${missing.join(", ")}`,
     critical: false,
   };
+}
+
+function checkOpenCodeConfigDuplicates(paths: MalahorPaths): CheckResult {
+  if (!hasDuplicateConfigs(paths.opencodeDir)) {
+    return { name: "OpenCode config duplicados", ok: true, message: "opencode.json/opencode.jsonc sin duplicados", critical: false };
+  }
+
+  return { name: "OpenCode config duplicados", ok: false, message: "opencode.json y opencode.jsonc coexisten; usar `malahor-ai config` (el self-heal no los consolida)", critical: false };
 }
 
 function checkHookPolicy(paths: MalahorPaths, project: string): CheckResult {
