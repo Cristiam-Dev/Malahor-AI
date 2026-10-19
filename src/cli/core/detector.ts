@@ -29,6 +29,7 @@ export function detectEnvironment(paths: MalahorPaths): DetectionResult {
       node: commandExists("node"),
       bun: commandExists("bun"),
       pnpm: commandExists("pnpm"),
+      npm: commandExists("npm"),
       python: commandExists("python3") || commandExists("python"),
       pip: commandExists("pip3") || commandExists("pip"),
       opencode: commandExists("opencode"),

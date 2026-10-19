@@ -4,6 +4,7 @@ import { loadConfig } from "../core/config";
 import { removeBuildPolicyConfig, removeMnemoConfig } from "../core/injector";
 import { instructionsState } from "../core/instructions";
 import { removeOpenCodeCommands } from "../core/opencode-commands";
+import { describeSdkRemove, removeOpencodeSdk } from "../core/opencode-sdk";
 import { isSandbox } from "../core/paths";
 
 export interface UninstallOptions {
@@ -32,6 +33,12 @@ export function runUninstall(options: UninstallOptions): void {
   removeMnemoConfig(paths, options.dryRun);
   const buildPolicy = removeBuildPolicyConfig(paths, options.dryRun);
   const removedCommands = removeOpenCodeCommands(paths, options.dryRun);
+  const sdkRemoval = removeOpencodeSdk({
+    opencodeDir: paths.opencodeDir,
+    backupsDir: paths.backupsDir,
+    stateFile: paths.opencodeSdkState,
+    dryRun: options.dryRun,
+  });
 
   if (!options.dryRun) {
     if (agentsState === "managed" && fs.existsSync(paths.agentsMd)) {
@@ -50,6 +57,7 @@ export function runUninstall(options: UninstallOptions): void {
     ? `Build policy: ${options.dryRun ? "would remove locks" : `removed locks (${buildPolicy.cleaned.join(", ") || "marker"})`}`
     : "Build policy: nothing to remove");
   printLine(`OpenCode commands: ${options.dryRun ? "would remove" : "removed"} ${removedCommands}`);
+  printLine(describeSdkRemove(sdkRemoval));
   printLine(agentsState === "managed"
     ? `AGENTS.md: ${options.dryRun ? "would remove" : "removed"}`
     : agentsState === "foreign"

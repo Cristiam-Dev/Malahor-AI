@@ -16,6 +16,7 @@ import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
+import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import type { MalahorPackagePaths } from "../core/package";
@@ -76,6 +77,13 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
   const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
+  const sdk = ensureOpencodeSdk({
+    opencodeDir: paths.opencodeDir,
+    backupsDir: paths.backupsDir,
+    stateFile: paths.opencodeSdkState,
+    dryRun: options.dryRun,
+    commands: { bun: detection.commands.bun, npm: detection.commands.npm },
+  });
 
   // MCP + compaction primero (sin tocar politica): Mnemo debe poder usarse ya.
   syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
@@ -84,6 +92,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   printLine(agentsSync.backup?.created ? `Backup AGENTS.md: ${agentsSync.backup.destination}` : "Backup AGENTS.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would install" : "installed"}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would install" : "installed"} ${commands.files} in ${commands.destination}`);
+  printLine(describeSdkEnsure(sdk));
   printLine("Mnemo MCP: configured");
   printLine("OpenCode compaction: configured");
 

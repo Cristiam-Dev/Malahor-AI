@@ -11,6 +11,7 @@ import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
+import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { validateInstallation } from "../core/validate";
@@ -67,6 +68,13 @@ export function runUpdate(options: UpdateOptions): void {
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
   const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
+  const sdk = ensureOpencodeSdk({
+    opencodeDir: paths.opencodeDir,
+    backupsDir: paths.backupsDir,
+    stateFile: paths.opencodeSdkState,
+    dryRun: options.dryRun,
+    commands: { bun: detection.commands.bun, npm: detection.commands.npm },
+  });
 
   syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
 
@@ -74,6 +82,7 @@ export function runUpdate(options: UpdateOptions): void {
   printLine(agentsSync.backup?.created ? `Backup AGENTS.md: ${agentsSync.backup.destination}` : "Backup AGENTS.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
+  printLine(describeSdkEnsure(sdk));
   printLine(`Mnemo MCP: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(describeInstructionsSync(agentsSync, options.dryRun));
   const legacyHint = legacyInstructionsHint(paths.opencodeMd);

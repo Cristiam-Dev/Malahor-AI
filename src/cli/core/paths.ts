@@ -21,6 +21,7 @@ export interface MalahorPaths {
   opencodeConfig: string;
   agentsMd: string;
   opencodeMd: string;
+  opencodeSdkState: string;
   backupsDir: string;
 }
 
@@ -48,6 +49,7 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env, cwd = process
     opencodeConfig: pathApi.join(opencodeDir, "opencode.jsonc"),
     agentsMd: pathApi.join(opencodeDir, "AGENTS.md"),
     opencodeMd: pathApi.join(opencodeDir, "OPENCODE.md"),
+    opencodeSdkState: pathApi.join(malahorHome, "opencode-sdk.json"),
     backupsDir: pathApi.join(malahorHome, "backups"),
   };
 }
