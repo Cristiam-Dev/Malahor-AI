@@ -5,7 +5,7 @@
 - Responder siempre en espanol.
 - Cargar memoria del proyecto con Mnemo al inicio de cada sesion.
 - Cuando la referencia sea inequívoca, normalizar `malaho`, `malahor`, `MalaHor`, `malahor ai`, `malahor-ai`, `malahor_ai` y variantes equivalentes hacia el proyecto `malahor`.
-- Resolver siempre el proyecto activo a una clave canonica antes de usar Mnemo, Graphify, Vikunja u Obsidian.
+- Resolver siempre el proyecto activo a una clave canonica antes de usar Mnemo, Graphify u Obsidian.
 - Orden oficial de contexto: ProjectResolver, Mnemo, Graphify, Obsidian MCP y lectura puntual de archivos.
 - Respetar `plan` y `build` de OpenCode como fuente de verdad para la fase actual.
 - En `plan`, priorizar exploracion, analisis, propuesta, especificacion y diseno antes de ejecutar cambios.
@@ -104,7 +104,7 @@
 - Normalizar mayusculas, acentos, espacios, guiones, underscores y aliases antes de crear contexto nuevo.
 - Si hay una coincidencia canonica clara, reutilizarla sin crear proyectos alternos.
 - Si hay varias coincidencias plausibles, preguntar antes de cargar o crear contexto.
-- Mnemo, Graphify, Vikunja y Obsidian deben usar la misma clave canonica resuelta.
+- Mnemo, Graphify y Obsidian deben usar la misma clave canonica resuelta.
 
 ## Obsidian
 
@@ -119,12 +119,6 @@
 - Si el contenido leido empieza con comilla doble o contiene `\n` literales, tratarlo como codificado y decodificarlo primero.
 - Verificar despues de cada escritura con un nuevo GET decodificado: el disco debe quedar en markdown limpio, sin comilla inicial ni `\n` literales.
 - `obsidian_delete_file` puede fallar con error 40400 pero borrar igual; tras borrar, listar el directorio para confirmar el estado real.
-
-## Vikunja
-
-- Vikunja es la capa operativa para proyectos, tareas, pendientes, seguimiento y estado de trabajo.
-- Buscar proyectos existentes por alias antes de crear duplicados.
-- No crear archivos `Tareas.md` en Obsidian.
 
 ## Desarrollo
 
