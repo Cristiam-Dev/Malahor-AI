@@ -10,7 +10,7 @@ export interface DetectionResult {
   nodeVersion: string;
   nodeMajor: number;
   opencodeConfigExists: boolean;
-  opencodeMdExists: boolean;
+  agentsMdExists: boolean;
   commands: Record<string, boolean>;
 }
 
@@ -24,7 +24,7 @@ export function detectEnvironment(paths: MalahorPaths): DetectionResult {
     nodeVersion,
     nodeMajor: Number(nodeVersion.split(".")[0] ?? 0),
     opencodeConfigExists: fs.existsSync(paths.opencodeConfig),
-    opencodeMdExists: fs.existsSync(paths.opencodeMd),
+    agentsMdExists: fs.existsSync(paths.agentsMd),
     commands: {
       node: commandExists("node"),
       bun: commandExists("bun"),

@@ -19,6 +19,7 @@ export interface MalahorPaths {
   configFile: string;
   opencodeDir: string;
   opencodeConfig: string;
+  agentsMd: string;
   opencodeMd: string;
   backupsDir: string;
 }
@@ -45,6 +46,7 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env, cwd = process
     configFile: pathApi.resolve(cwd, env.MALAHOR_CONFIG ?? pathApi.join(malahorHome, "config.jsonc")),
     opencodeDir,
     opencodeConfig: pathApi.join(opencodeDir, "opencode.jsonc"),
+    agentsMd: pathApi.join(opencodeDir, "AGENTS.md"),
     opencodeMd: pathApi.join(opencodeDir, "OPENCODE.md"),
     backupsDir: pathApi.join(malahorHome, "backups"),
   };
@@ -140,7 +142,8 @@ function scoreOpenCodeDir(candidate: string, pathApi: typeof path.posix | typeof
   if (fs.existsSync(pathApi.join(candidate, "opencode.jsonc"))) score += 8;
   if (fs.existsSync(pathApi.join(candidate, "opencode.json"))) score += 8;
   if (fs.existsSync(pathApi.join(candidate, "commands"))) score += 4;
-  if (fs.existsSync(pathApi.join(candidate, "OPENCODE.md"))) score += 2;
+  if (fs.existsSync(pathApi.join(candidate, "AGENTS.md"))) score += 2;
+  if (fs.existsSync(pathApi.join(candidate, "OPENCODE.md"))) score += 2; // legado
   return score;
 }
 

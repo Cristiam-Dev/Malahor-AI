@@ -9,6 +9,7 @@ import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
+import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
@@ -27,7 +28,7 @@ export function runUpdate(options: UpdateOptions): void {
   const paths = config.paths;
   const detection = detectEnvironment(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
-  const opencodeAsset = path.join(packagePaths.assetsDir, "opencode", "OPENCODE.md");
+  const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
 
   printHeader("malahor-ai update");
@@ -45,8 +46,8 @@ export function runUpdate(options: UpdateOptions): void {
 
   ensureBuild(packagePaths, detection, options);
 
-  if (!fs.existsSync(opencodeAsset)) {
-    throw new Error("No existe assets/opencode/OPENCODE.md.");
+  if (!fs.existsSync(agentsAsset)) {
+    throw new Error("No existe assets/opencode/AGENTS.md.");
   }
 
   if (!options.dryRun) {
@@ -58,11 +59,10 @@ export function runUpdate(options: UpdateOptions): void {
   }
 
   const configBackup = backupFile(paths.opencodeConfig, paths.backupsDir, options.dryRun);
-  const mdBackup = backupFile(paths.opencodeMd, paths.backupsDir, options.dryRun);
+  const agentsSync = syncManagedInstructions(agentsAsset, paths.agentsMd, paths.backupsDir, options.dryRun);
 
   if (!options.dryRun) {
     fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
-    fs.copyFileSync(opencodeAsset, paths.opencodeMd);
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
@@ -71,11 +71,13 @@ export function runUpdate(options: UpdateOptions): void {
   syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
-  printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
+  printLine(agentsSync.backup?.created ? `Backup AGENTS.md: ${agentsSync.backup.destination}` : "Backup AGENTS.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
   printLine(`Mnemo MCP: ${options.dryRun ? "would refresh" : "refreshed"}`);
-  printLine(`OPENCODE.md: ${options.dryRun ? "would refresh" : "refreshed"}`);
+  printLine(describeInstructionsSync(agentsSync, options.dryRun));
+  const legacyHint = legacyInstructionsHint(paths.opencodeMd);
+  if (legacyHint) printLine(legacyHint);
   printLine("Local data: kept");
 
   runGraphifyStep(paths, options);

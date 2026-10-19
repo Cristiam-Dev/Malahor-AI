@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { copyAssets } from "../core/assets";
+import { backupFile } from "../core/backup";
 import { formatExecutionPolicy, loadConfig, type MalahorConfig, type MalahorExecutionPolicy } from "../core/config";
 import { levelForProject } from "../core/context";
 import { detectEnvironment } from "../core/detector";
 import { graphifyStatus } from "../core/graphify";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
+import { instructionsState, syncManagedInstructions } from "../core/instructions";
 import { MALAHOR_COMMAND_FILES, syncOpenCodeCommands } from "../core/opencode-commands";
 import { hasDuplicateConfigs } from "../core/opencode-config/preview";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
@@ -48,7 +50,8 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
   checks.push({ name: "Assets dir", ok: fs.existsSync(paths.assetsDir), message: paths.assetsDir, critical: true });
   checks.push({ name: "Graphs dir", ok: fs.existsSync(paths.graphsDir), message: paths.graphsDir, critical: true });
   checks.push({ name: "OpenCode config", ok: fs.existsSync(paths.opencodeConfig), message: paths.opencodeConfig, critical: true });
-  checks.push({ name: "OPENCODE.md", ok: fs.existsSync(paths.opencodeMd), message: paths.opencodeMd, critical: true });
+  checks.push(checkInstructions(paths));
+  checks.push(checkLegacyInstructions(paths));
   checks.push(checkMnemoConfig(paths.opencodeConfig));
   checks.push(checkCompaction(paths.opencodeConfig));
   checks.push(checkOpenCodeCommands(paths));
@@ -133,6 +136,8 @@ function selfHeal(config: MalahorConfig, paths: MalahorPaths, dryRun: boolean): 
     repairInstallFiles(packagePaths, paths, dryRun, repairs);
   }
 
+  archiveLegacyInstructions(paths, dryRun, repairs);
+
   repairOpenCodeConfigFile(config, paths, dryRun, repairs);
 
   return repairs;
@@ -147,7 +152,7 @@ function tryResolvePackagePaths(cwd: string): MalahorPackagePaths | null {
 }
 
 function repairInstallFiles(packagePaths: MalahorPackagePaths, paths: MalahorPaths, dryRun: boolean, repairs: string[]): void {
-  const opencodeAsset = path.join(packagePaths.assetsDir, "opencode", "OPENCODE.md");
+  const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
 
   if (!fs.existsSync(paths.mnemoIndex) && fs.existsSync(packagePaths.mnemoBuild)) {
@@ -158,12 +163,14 @@ function repairInstallFiles(packagePaths: MalahorPackagePaths, paths: MalahorPat
     repairs.push(`${dryRun ? "restauraria" : "restaurado"} Mnemo index`);
   }
 
-  if (!fs.existsSync(paths.opencodeMd) && fs.existsSync(opencodeAsset)) {
-    if (!dryRun) {
-      fs.mkdirSync(paths.opencodeDir, { recursive: true });
-      fs.copyFileSync(opencodeAsset, paths.opencodeMd);
+  if (fs.existsSync(agentsAsset)) {
+    const agentsSync = syncManagedInstructions(agentsAsset, paths.agentsMd, paths.backupsDir, dryRun);
+
+    if (agentsSync.action === "created") {
+      repairs.push(`${dryRun ? "crearia" : "creado"} AGENTS.md gestionado`);
+    } else if (agentsSync.action === "refreshed") {
+      repairs.push(`${dryRun ? "refrescaria" : "refrescado"} AGENTS.md gestionado (backup ${agentsSync.backup?.destination ?? "en backups"})`);
     }
-    repairs.push(`${dryRun ? "restauraria" : "restaurado"} OPENCODE.md`);
   }
 
   if (!fs.existsSync(paths.assetsDir) && fs.existsSync(packagePaths.assetsDir)) {
@@ -177,6 +184,20 @@ function repairInstallFiles(packagePaths: MalahorPackagePaths, paths: MalahorPat
     syncOpenCodeCommands(commandsAsset, paths, dryRun);
     repairs.push(`${dryRun ? "reinstalaria" : "reinstalados"} ${missingCommands.length} comando(s) OpenCode: ${missingCommands.join(", ")}`);
   }
+}
+
+// Migracion asistida: el OPENCODE.md de versiones previas quedo inerte en OpenCode V2
+// (solo lee AGENTS.md). Se archiva (copia a backups + retiro); nunca se pierde contenido.
+function archiveLegacyInstructions(paths: MalahorPaths, dryRun: boolean, repairs: string[]): void {
+  if (!fs.existsSync(paths.opencodeMd)) return;
+
+  const backup = backupFile(paths.opencodeMd, paths.backupsDir, dryRun);
+
+  if (!dryRun) {
+    fs.unlinkSync(paths.opencodeMd);
+  }
+
+  repairs.push(`${dryRun ? "archivaria" : "archivado"} OPENCODE.md legado (inerte en V2) en ${backup.destination ?? paths.backupsDir}`);
 }
 
 function repairOpenCodeConfigFile(config: MalahorConfig, paths: MalahorPaths, dryRun: boolean, repairs: string[]): void {
@@ -349,6 +370,28 @@ function checkOpenCodeConfigDuplicates(paths: MalahorPaths): CheckResult {
   }
 
   return { name: "OpenCode config duplicados", ok: false, message: "opencode.json y opencode.jsonc coexisten; usar `malahor-ai config` (el self-heal no los consolida)", critical: false };
+}
+
+function checkInstructions(paths: MalahorPaths): CheckResult {
+  const state = instructionsState(paths.agentsMd);
+
+  if (state === "managed") {
+    return { name: "AGENTS.md", ok: true, message: `${paths.agentsMd} (gestionado por Malahor)`, critical: true };
+  }
+
+  if (state === "foreign") {
+    return { name: "AGENTS.md", ok: true, message: `${paths.agentsMd} (propio; no gestionado por Malahor)`, critical: true };
+  }
+
+  return { name: "AGENTS.md", ok: false, message: `falta: ${paths.agentsMd} (corre \`malahor-ai update --yes\` o \`malahor-ai doctor --self-heal\`)`, critical: true };
+}
+
+function checkLegacyInstructions(paths: MalahorPaths): CheckResult {
+  if (!fs.existsSync(paths.opencodeMd)) {
+    return { name: "OPENCODE.md (legado)", ok: true, message: "no presente", critical: false };
+  }
+
+  return { name: "OPENCODE.md (legado)", ok: false, message: "inerte en V2 (solo se lee AGENTS.md); archivar con `malahor-ai doctor --self-heal`", critical: false };
 }
 
 function checkHookPolicy(paths: MalahorPaths, project: string): CheckResult {

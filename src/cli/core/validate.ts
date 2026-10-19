@@ -20,8 +20,8 @@ export function validateInstallation(paths: MalahorPaths, packagePaths: MalahorP
   if (!fs.existsSync(paths.assetsDir)) {
     problems.push(`Assets faltan: ${paths.assetsDir}`);
   }
-  if (!fs.existsSync(paths.opencodeMd)) {
-    problems.push(`OPENCODE.md falta: ${paths.opencodeMd}`);
+  if (!fs.existsSync(paths.agentsMd)) {
+    problems.push(`AGENTS.md falta: ${paths.agentsMd}`);
   }
 
   const commandsDir = path.join(paths.opencodeDir, "commands");

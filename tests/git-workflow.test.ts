@@ -30,7 +30,7 @@ describe("git workflow asistido", () => {
   test("infiere docs cuando solo cambian markdowns", () => {
     const message = composeCommitMessage({
       summary: "actualiza guia de hooks",
-      paths: ["README.md", "assets/opencode/OPENCODE.md"],
+      paths: ["README.md", "assets/opencode/AGENTS.md"],
     });
 
     expect(message).toBe("📝 docs(docs): actualiza guia de hooks");

@@ -14,6 +14,7 @@ import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
+import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { resolvePackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
@@ -33,7 +34,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   const paths = config.paths;
   const detection = detectEnvironment(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
-  const opencodeAsset = path.join(packagePaths.assetsDir, "opencode", "OPENCODE.md");
+  const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
 
   printHeader("malahor-ai install");
@@ -54,8 +55,8 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   // Si la validacion falla, la politica guardada sigue intacta y el agente conserva salida.
   ensureBuild(packagePaths, paths, detection, options);
 
-  if (!fs.existsSync(opencodeAsset)) {
-    throw new Error("No existe assets/opencode/OPENCODE.md.");
+  if (!fs.existsSync(agentsAsset)) {
+    throw new Error("No existe assets/opencode/AGENTS.md.");
   }
 
   if (!options.dryRun) {
@@ -67,11 +68,10 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   }
 
   const configBackup = backupFile(paths.opencodeConfig, paths.backupsDir, options.dryRun);
-  const mdBackup = backupFile(paths.opencodeMd, paths.backupsDir, options.dryRun);
+  const agentsSync = syncManagedInstructions(agentsAsset, paths.agentsMd, paths.backupsDir, options.dryRun);
 
   if (!options.dryRun) {
     fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
-    fs.copyFileSync(opencodeAsset, paths.opencodeMd);
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
@@ -81,7 +81,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
-  printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
+  printLine(agentsSync.backup?.created ? `Backup AGENTS.md: ${agentsSync.backup.destination}` : "Backup AGENTS.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would install" : "installed"}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would install" : "installed"} ${commands.files} in ${commands.destination}`);
   printLine("Mnemo MCP: configured");
@@ -108,7 +108,9 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 
   printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
   printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"} (${formatExecutionPolicy(execution)})`);
-  printLine("OPENCODE.md: installed");
+  printLine(describeInstructionsSync(agentsSync, options.dryRun));
+  const legacyHint = legacyInstructionsHint(paths.opencodeMd);
+  if (legacyHint) printLine(legacyHint);
   printLine("Validation: passed (politica aplicada al final)");
   printLine("Next: run `malahor-ai doctor`. Si la politica cambio, abre una sesion nueva de OpenCode para recargarla.");
   printLine("Reparacion sin consola: /malahor-bootstrap y /malahor-reparar funcionan aunque el agente este bloqueado.");
