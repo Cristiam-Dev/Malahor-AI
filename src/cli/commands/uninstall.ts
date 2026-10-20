@@ -3,6 +3,12 @@ import { backupFile } from "../core/backup";
 import { loadConfig } from "../core/config";
 import { removeBuildPolicyConfig, removeMnemoConfig } from "../core/injector";
 import { instructionsState } from "../core/instructions";
+import {
+  describePluginStateRemoval,
+  describePluginSync,
+  removeManagedPlugin,
+  removePluginState,
+} from "../core/managed-plugin";
 import { removeOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkRemove, removeOpencodeSdk } from "../core/opencode-sdk";
 import { isSandbox } from "../core/paths";
@@ -39,6 +45,8 @@ export function runUninstall(options: UninstallOptions): void {
     stateFile: paths.opencodeSdkState,
     dryRun: options.dryRun,
   });
+  const pluginRemoval = removeManagedPlugin(paths.malahorPluginDir, paths.backupsDir, options.dryRun);
+  const pluginStateRemoval = removePluginState(paths.pluginState, options.dryRun);
 
   if (!options.dryRun) {
     if (agentsState === "managed" && fs.existsSync(paths.agentsMd)) {
@@ -58,6 +66,8 @@ export function runUninstall(options: UninstallOptions): void {
     : "Build policy: nothing to remove");
   printLine(`OpenCode commands: ${options.dryRun ? "would remove" : "removed"} ${removedCommands}`);
   printLine(describeSdkRemove(sdkRemoval));
+  printLine(describePluginSync(pluginRemoval));
+  printLine(describePluginStateRemoval(pluginStateRemoval));
   printLine(agentsState === "managed"
     ? `AGENTS.md: ${options.dryRun ? "would remove" : "removed"}`
     : agentsState === "foreign"

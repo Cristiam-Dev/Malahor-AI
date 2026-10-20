@@ -15,6 +15,7 @@ import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
+import { describePluginSync, syncManagedPlugin } from "../core/managed-plugin";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths } from "../core/package";
@@ -37,6 +38,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   const packagePaths = resolvePackagePaths(paths.cwd);
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
+  const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
 
   printHeader("malahor-ai install");
   printLine(`Mode: ${config.mode}`);
@@ -58,6 +60,10 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 
   if (!fs.existsSync(agentsAsset)) {
     throw new Error("No existe assets/opencode/AGENTS.md.");
+  }
+
+  if (!fs.existsSync(pluginAsset)) {
+    throw new Error("No existe assets/opencode/plugins/malahor/index.ts.");
   }
 
   if (!options.dryRun) {
@@ -84,6 +90,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
     dryRun: options.dryRun,
     commands: { bun: detection.commands.bun, npm: detection.commands.npm },
   });
+  const plugin = syncManagedPlugin(pluginAsset, paths.malahorPluginDir, paths.backupsDir, options.dryRun);
 
   // MCP + compaction primero (sin tocar politica): Mnemo debe poder usarse ya.
   syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
@@ -93,6 +100,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   printLine(`Assets: ${options.dryRun ? "would install" : "installed"}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would install" : "installed"} ${commands.files} in ${commands.destination}`);
   printLine(describeSdkEnsure(sdk));
+  printLine(describePluginSync(plugin));
   printLine("Mnemo MCP: configured");
   printLine("OpenCode compaction: configured");
 

@@ -10,6 +10,7 @@ import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
+import { describePluginSync, syncManagedPlugin } from "../core/managed-plugin";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
@@ -31,6 +32,7 @@ export function runUpdate(options: UpdateOptions): void {
   const packagePaths = resolvePackagePaths(paths.cwd);
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
+  const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
 
   printHeader("malahor-ai update");
   printLine(`Mode: ${config.mode}`);
@@ -49,6 +51,10 @@ export function runUpdate(options: UpdateOptions): void {
 
   if (!fs.existsSync(agentsAsset)) {
     throw new Error("No existe assets/opencode/AGENTS.md.");
+  }
+
+  if (!fs.existsSync(pluginAsset)) {
+    throw new Error("No existe assets/opencode/plugins/malahor/index.ts.");
   }
 
   if (!options.dryRun) {
@@ -75,6 +81,7 @@ export function runUpdate(options: UpdateOptions): void {
     dryRun: options.dryRun,
     commands: { bun: detection.commands.bun, npm: detection.commands.npm },
   });
+  const plugin = syncManagedPlugin(pluginAsset, paths.malahorPluginDir, paths.backupsDir, options.dryRun);
 
   syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
 
@@ -83,6 +90,7 @@ export function runUpdate(options: UpdateOptions): void {
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
   printLine(describeSdkEnsure(sdk));
+  printLine(describePluginSync(plugin));
   printLine(`Mnemo MCP: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(describeInstructionsSync(agentsSync, options.dryRun));
   const legacyHint = legacyInstructionsHint(paths.opencodeMd);
