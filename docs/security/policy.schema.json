@@ -1,0 +1,585 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:malahor:security-policy:v1",
+  "title": "Malahor security policy v1",
+  "description": "Esquema normativo de una capa de política de seguridad runtime. La monotonía, la autoridad y la procedencia se aplican en runtime; este esquema valida estructura.",
+  "$comment": "v1 no define firma criptográfica. La confianza se basa en ubicación, propiedad/ACL, hash canónico y política efectiva. Un campo desconocido en política corporativa invalida la capa (fail closed); en política local se ignora con WARN.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contractVersion",
+    "policyVersion",
+    "issuer",
+    "issuedAt",
+    "controls"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Versión del esquema de política."
+    },
+    "contractVersion": {
+      "const": 1,
+      "description": "Versión del contrato de seguridad runtime."
+    },
+    "policyVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Versión legible de esta capa, por ejemplo 2026-10-21.1."
+    },
+    "issuer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Emisor responsable de la capa."
+    },
+    "issuedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Fecha de emisión en ISO 8601."
+    },
+    "profile": {
+      "enum": ["off", "light", "standard", "strict", "release"],
+      "description": "Ajusta solo controles opcionales. Nunca desactiva el suelo built-in/corporativo."
+    },
+    "controls": {
+      "$ref": "#/$defs/controls"
+    }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Controles de seguridad. Un valor true es más estricto que false; las listas se intersectan o unen según el contrato.",
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/files"
+        },
+        "shell": {
+          "$ref": "#/$defs/shell"
+        },
+        "git": {
+          "$ref": "#/$defs/git"
+        },
+        "memory": {
+          "$ref": "#/$defs/memory"
+        },
+        "persistence": {
+          "$ref": "#/$defs/persistence"
+        },
+        "destructive": {
+          "$ref": "#/$defs/destructive"
+        },
+        "egress": {
+          "$ref": "#/$defs/egress"
+        },
+        "integrations": {
+          "$ref": "#/$defs/integrations"
+        },
+        "approval": {
+          "$ref": "#/$defs/approval"
+        },
+        "audit": {
+          "$ref": "#/$defs/audit"
+        },
+        "host": {
+          "$ref": "#/$defs/host"
+        }
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enforceRoots": {
+          "type": "boolean",
+          "description": "Exige que lectura/escritura queden dentro de raíces autorizadas."
+        },
+        "allowedReadRoots": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Raíces de lectura permitidas; se intersectan entre capas."
+        },
+        "allowedWriteRoots": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Raíces de escritura permitidas; se intersectan entre capas."
+        },
+        "deniedPathGlobs": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Patrones prohibidos; se unen entre capas."
+        },
+        "resolveSymlinks": {
+          "type": "boolean",
+          "description": "Resuelve symlinks/junctions antes de aplicar raíces."
+        },
+        "excludeSecretsFromContext": {
+          "type": "boolean",
+          "description": "Excluye secretos del contexto del modelo."
+        },
+        "excludeSecretsFromIndex": {
+          "type": "boolean",
+          "description": "Excluye secretos de CodeGraph u otros índices."
+        },
+        "requireApprovalOutsideRoots": {
+          "type": "boolean",
+          "description": "Una ruta fuera de raíces exige aprobación humana; no se permite por defecto."
+        }
+      }
+    },
+    "shell": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enforceCommandAllowlist": {
+          "type": "boolean",
+          "description": "Solo comandos permitidos pueden ejecutarse."
+        },
+        "allowedCommands": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Comandos permitidos; se intersectan entre capas."
+        },
+        "deniedCommands": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Comandos prohibidos; se unen entre capas."
+        },
+        "minimizeEnvironment": {
+          "type": "boolean",
+          "description": "Pasa un entorno mínimo al proceso."
+        },
+        "denyCredentialEnv": {
+          "type": "boolean",
+          "description": "Bloquea variables de credenciales/tokens."
+        },
+        "enforceTimeout": {
+          "type": "boolean",
+          "description": "Exige timeout para comandos."
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400,
+          "description": "Timeout máximo; se toma el valor más restrictivo."
+        },
+        "inspectIndirectExecution": {
+          "type": "boolean",
+          "description": "Inspecciona scripts, wrappers, shebangs y ejecución indirecta."
+        },
+        "blockUnapprovedScripts": {
+          "type": "boolean",
+          "description": "Bloquea scripts no aprobados."
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requireStageConsent": {
+          "type": "boolean",
+          "description": "Exige consentimiento humano para stage."
+        },
+        "requireCommitConsent": {
+          "type": "boolean",
+          "description": "Exige consentimiento humano para commit."
+        },
+        "requirePushApproval": {
+          "type": "boolean",
+          "description": "Exige aprobación humana para push."
+        },
+        "scanStagedContent": {
+          "type": "boolean",
+          "description": "Escanea el contenido staged antes del commit."
+        },
+        "scanOutgoingCommits": {
+          "type": "boolean",
+          "description": "Escanea commits salientes antes del push."
+        },
+        "requireChecksBeforePush": {
+          "type": "boolean",
+          "description": "Exige checks verdes antes de push."
+        },
+        "bindChecksToRevision": {
+          "type": "boolean",
+          "description": "Los checks deben corresponder a la revisión exacta."
+        },
+        "blockDestructive": {
+          "type": "boolean",
+          "description": "Bloquea reset/rebase/checkout/push --force y equivalentes sin aprobación."
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requireClientOnEveryOperation": {
+          "type": "boolean",
+          "description": "Toda operación de memoria/documentación autoriza un cliente."
+        },
+        "requireProjectOnEveryOperation": {
+          "type": "boolean",
+          "description": "Toda operación de memoria/documentación autoriza un proyecto."
+        },
+        "enforceClientIsolation": {
+          "type": "boolean",
+          "description": "Impide recuperación o escritura cruzada entre clientes."
+        },
+        "denyCrossClientRelated": {
+          "type": "boolean",
+          "description": "Bloquea brief/related/ancestros/global que expongan otro cliente."
+        },
+        "restrictSearchToAuthorizedScopes": {
+          "type": "boolean",
+          "description": "Toda búsqueda se limita a scopes autorizados."
+        },
+        "allowedClients": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Clientes permitidos; se intersectan entre capas."
+        },
+        "allowedProjects": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Proyectos permitidos; se intersectan entre capas."
+        },
+        "allowedRoots": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Raíces documentales permitidas; se intersectan entre capas."
+        },
+        "adminRequiresApproval": {
+          "type": "boolean",
+          "description": "Promoción, borrado, migración y administración exigen aprobación."
+        },
+        "requireGlobalScopeApproval": {
+          "type": "boolean",
+          "description": "El scope global exige aprobación explícita."
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requireClassificationBeforePersist": {
+          "type": "boolean",
+          "description": "Clasifica antes de guardar/indexar/exportar."
+        },
+        "blockSecrets": {
+          "type": "boolean",
+          "description": "Bloquea secretos en persistencia/contexto."
+        },
+        "blockPersonalData": {
+          "type": "boolean",
+          "description": "Bloquea datos personales no autorizados."
+        },
+        "redactSensitiveData": {
+          "type": "boolean",
+          "description": "Redacta datos sensibles antes de persistir/enviar."
+        },
+        "blockUnclassifiedContext": {
+          "type": "boolean",
+          "description": "Bloquea contexto no clasificado en canales sensibles."
+        },
+        "captureSubagentsOptIn": {
+          "type": "boolean",
+          "description": "La captura de subagentes requiere opt-in."
+        },
+        "exportRequiresApproval": {
+          "type": "boolean",
+          "description": "Exportar memoria/contexto exige aprobación."
+        },
+        "logsExcludePayloads": {
+          "type": "boolean",
+          "description": "Los logs no incluyen payloads."
+        }
+      }
+    },
+    "destructive": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requirePreview": {
+          "type": "boolean",
+          "description": "Exige preview antes de una operación destructiva."
+        },
+        "requireBackup": {
+          "type": "boolean",
+          "description": "Exige respaldo/rollback."
+        },
+        "requireApproval": {
+          "type": "boolean",
+          "description": "Exige aprobación humana vinculada."
+        },
+        "revalidateBeforeApply": {
+          "type": "boolean",
+          "description": "Revalida recursos/estado inmediatamente antes del efecto."
+        },
+        "bindApprovalToVersion": {
+          "type": "boolean",
+          "description": "La aprobación se invalida si cambia la versión/digest."
+        },
+        "requireConditionalWrites": {
+          "type": "boolean",
+          "description": "Usa escrituras condicionales cuando el destino lo permita."
+        },
+        "blockSilentDelete": {
+          "type": "boolean",
+          "description": "Prohíbe borrados silenciosos o sin rastro."
+        }
+      }
+    },
+    "egress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enforceProviderAllowlist": {
+          "type": "boolean",
+          "description": "Solo proveedores permitidos."
+        },
+        "allowedProviders": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Proveedores permitidos; se intersectan entre capas."
+        },
+        "allowedEndpoints": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Endpoints permitidos; se intersectan entre capas."
+        },
+        "allowedProtocols": {
+          "type": "array",
+          "items": {
+            "enum": ["https", "wss"]
+          },
+          "uniqueItems": true,
+          "description": "Protocolos permitidos para egress de modelo/red."
+        },
+        "requireTls": {
+          "type": "boolean",
+          "description": "Exige TLS y verificación de certificado."
+        },
+        "requireIdentityVerification": {
+          "type": "boolean",
+          "description": "Verifica identidad del endpoint/proveedor."
+        },
+        "coverPromptAttachments": {
+          "type": "boolean",
+          "description": "Cubre prompt y adjuntos."
+        },
+        "coverContinuationsTitlesCompaction": {
+          "type": "boolean",
+          "description": "Cubre continuaciones, títulos, compactación y generación auxiliar."
+        },
+        "coverMcpShellFetch": {
+          "type": "boolean",
+          "description": "Cubre MCP, shell y fetch de Code Mode."
+        },
+        "blockUnmeasurableChannels": {
+          "type": "boolean",
+          "description": "Bloquea canales que no se pueden mediar."
+        },
+        "blockAutoModelSelection": {
+          "type": "boolean",
+          "description": "Prohíbe selección/detección automática de modelos."
+        }
+      }
+    },
+    "integrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enforceMcpToolAllowlist": {
+          "type": "boolean",
+          "description": "Solo herramientas MCP permitidas."
+        },
+        "allowedMcpTools": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Herramientas MCP en formato server/tool; se intersectan entre capas."
+        },
+        "requireMcpIntegrity": {
+          "type": "boolean",
+          "description": "Verifica integridad/procedencia del servidor MCP."
+        },
+        "allowedSkills": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Skills permitidas; se intersectan entre capas."
+        },
+        "allowedPlugins": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Plugins permitidos; se intersectan entre capas."
+        },
+        "requirePluginIntegrity": {
+          "type": "boolean",
+          "description": "Verifica integridad/procedencia del plugin."
+        },
+        "subagentsSameFloor": {
+          "type": "boolean",
+          "description": "Primario y subagentes comparten el mismo suelo."
+        },
+        "treatRepoTextAsUntrusted": {
+          "type": "boolean",
+          "description": "Texto del repo/notas no es autorización."
+        },
+        "blockUnapprovedIntegrations": {
+          "type": "boolean",
+          "description": "Bloquea integraciones no aprobadas."
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requireHumanChannel": {
+          "type": "boolean",
+          "description": "La aprobación debe venir de un canal humano/host de confianza."
+        },
+        "allowedChannels": {
+          "type": "array",
+          "items": {
+            "enum": ["tty", "host-ui", "managed"]
+          },
+          "uniqueItems": true,
+          "description": "Canales aceptados; se intersectan entre capas."
+        },
+        "askWithoutChannel": {
+          "const": "deny",
+          "description": "Sin canal confiable, ask se resuelve como deny. No configurable."
+        },
+        "oneTime": {
+          "type": "boolean",
+          "description": "La aprobación es de un solo uso."
+        },
+        "maxTtlSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400,
+          "description": "Vigencia máxima; se toma el valor más restrictivo."
+        },
+        "bindOperation": {
+          "type": "boolean",
+          "description": "Vincula la aprobación a la operación."
+        },
+        "bindResources": {
+          "type": "boolean",
+          "description": "Vincula la aprobación a los recursos exactos."
+        },
+        "bindClient": {
+          "type": "boolean",
+          "description": "Vincula la aprobación al cliente."
+        },
+        "bindPolicyHash": {
+          "type": "boolean",
+          "description": "Vincula la aprobación al hash de política."
+        },
+        "bindContractVersion": {
+          "type": "boolean",
+          "description": "Vincula la aprobación a la versión del contrato."
+        },
+        "invalidateOnStateChange": {
+          "type": "boolean",
+          "description": "Invalida la aprobación si cambia el estado relevante."
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "description": "La auditoría es obligatoria para operaciones cubiertas."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Ruta del archivo de auditoría; la política corporativa puede imponer una."
+        },
+        "fileMode": {
+          "type": "string",
+          "pattern": "^0?600$",
+          "description": "Modo Unix del archivo; en Windows se usan ACL equivalentes."
+        },
+        "directoryMode": {
+          "type": "string",
+          "pattern": "^0?700$",
+          "description": "Modo Unix del directorio; en Windows se usan ACL equivalentes."
+        },
+        "appendOnly": {
+          "type": "boolean",
+          "description": "Registro append-only."
+        },
+        "includeDecision": {
+          "type": "boolean",
+          "description": "Incluye la decisión final."
+        },
+        "includeRuleIds": {
+          "type": "boolean",
+          "description": "Incluye IDs de reglas."
+        },
+        "includeResourceRefs": {
+          "type": "boolean",
+          "description": "Incluye referencias hash/ruta normalizada, nunca contenido."
+        },
+        "includePayloads": {
+          "const": false,
+          "description": "Prohibido incluir payloads en auditoría."
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650,
+          "description": "Retención en días; se toma el valor más restrictivo."
+        },
+        "maxFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Máximo de archivos rotados; se toma el valor más restrictivo."
+        },
+        "failClosedIfUnavailable": {
+          "type": "boolean",
+          "description": "Si la auditoría es obligatoria y no está disponible, deniega la operación."
+        },
+        "corporateOverridePath": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Ruta administrada que puede imponer la política corporativa."
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requiredControls": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "os-account-separation",
+              "disk-encryption",
+              "network-egress",
+              "host-policy",
+              "tamper-protection"
+            ]
+          },
+          "uniqueItems": true,
+          "description": "Controles de host exigidos; si no se verifican, se bloquean las capacidades dependientes."
+        },
+        "doctorMayCertify": {
+          "const": false,
+          "description": "doctor informa cobertura; no certifica aislamiento ni cumplimiento."
+        },
+        "declaredLimits": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Límites declarados del host/SO/red."
+        }
+      }
+    }
+  }
+}
