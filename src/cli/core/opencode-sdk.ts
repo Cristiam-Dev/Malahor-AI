@@ -283,6 +283,12 @@ export function describeSdkRemove(result: SdkRemoveResult): string {
   }
 }
 
+// Lectura sin efectos para doctor: el ownership solo se escribe al agregar o
+// actualizar la dependencia, nunca al diagnosticar.
+export function readSdkOwnership(filePath: string): SdkOwnership | null {
+  return readOwnership(filePath);
+}
+
 export function compareVersions(left: string, right: string): number {
   const a = parseNumeric(left);
   const b = parseNumeric(right);

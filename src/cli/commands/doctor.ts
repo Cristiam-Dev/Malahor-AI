@@ -4,15 +4,18 @@ import { copyAssets } from "../core/assets";
 import { backupFile } from "../core/backup";
 import { formatExecutionPolicy, loadConfig, type MalahorConfig, type MalahorExecutionPolicy } from "../core/config";
 import { levelForProject } from "../core/context";
-import { detectEnvironment } from "../core/detector";
+import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostInfo } from "../core/detector";
 import { graphifyStatus } from "../core/graphify";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
 import { instructionsState, syncManagedInstructions } from "../core/instructions";
+import { describePluginSync, syncManagedPlugin } from "../core/managed-plugin";
 import { MALAHOR_COMMAND_FILES, syncOpenCodeCommands } from "../core/opencode-commands";
 import { hasDuplicateConfigs } from "../core/opencode-config/preview";
+import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
+import { pluginHealthChecks, type PluginHealthCheck } from "../core/plugin-health";
 import { resolveProject } from "../core/project";
 
 export interface DoctorOptions {
@@ -30,20 +33,31 @@ interface CheckResult {
 export function runDoctor(options: DoctorOptions): void {
   const config = loadConfig();
   const paths = config.paths;
+  const detection = detectEnvironment(paths);
+  const host = detectOpenCodeHost(paths);
+  const packagePaths = tryResolvePackagePaths(paths.cwd);
 
-  const repairs = options.selfHeal ? selfHeal(config, paths, options.dryRun) : [];
-  renderReport(config, paths, repairs, options);
+  const repairs = options.selfHeal ? selfHeal(config, paths, detection, packagePaths, options.dryRun) : [];
+  renderReport(config, paths, detection, host, packagePaths, repairs, options);
 }
 
-function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: string[], options: DoctorOptions): void {
+function renderReport(
+  config: MalahorConfig,
+  paths: MalahorPaths,
+  detection: DetectionResult,
+  host: OpenCodeHostInfo,
+  packagePaths: MalahorPackagePaths | null,
+  repairs: string[],
+  options: DoctorOptions,
+): void {
   const project = resolveProject(paths.cwd, config.projects.aliases);
-  const detection = detectEnvironment(paths);
   const graphStatus = graphifyStatus(paths);
   const checks: CheckResult[] = [];
 
   checks.push({ name: "Node", ok: detection.nodeMajor >= 22, message: detection.nodeVersion, critical: true });
   checks.push({ name: "Supported runtime", ok: detection.platform === "linux" || detection.platform === "darwin" || detection.platform === "win32", message: `platform=${detection.platform} wsl=${String(detection.isWsl)}`, critical: true });
   checks.push({ name: "OpenCode command", ok: detection.commands.opencode, message: detection.commands.opencode ? "found" : "not found", critical: true });
+  checks.push(checkOpenCodeHost(host));
   checks.push({ name: "Malahor home", ok: fs.existsSync(paths.malahorHome), message: paths.malahorHome, critical: true });
   checks.push({ name: "Mnemo dir", ok: fs.existsSync(paths.mnemoDir), message: paths.mnemoDir, critical: true });
   checks.push({ name: "Mnemo index", ok: fs.existsSync(paths.mnemoIndex), message: paths.mnemoIndex, critical: true });
@@ -56,6 +70,9 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
   checks.push(checkCompaction(paths.opencodeConfig));
   checks.push(checkOpenCodeCommands(paths));
   checks.push(checkOpenCodeConfigDuplicates(paths));
+  for (const check of pluginHealthChecks({ paths, host, packagePaths })) {
+    checks.push(fromPluginHealth(check));
+  }
   checks.push(checkHookPolicy(paths, project.canonicalKey));
   checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution));
   checks.push({
@@ -71,6 +88,7 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
   process.stdout.write(`Mode: ${config.mode}\n`);
   process.stdout.write(`Config file: ${paths.configFile}\n`);
   process.stdout.write(`OpenCode dir: ${paths.opencodeDir}\n`);
+  process.stdout.write(`OpenCode host: ${formatOpenCodeHost(host)}\n`);
   process.stdout.write(`Execution policy: ${formatExecutionPolicy(config.execution)}\n`);
   process.stdout.write(`Project: ${project.name}\n`);
   process.stdout.write(`Project root: ${project.root}\n`);
@@ -80,13 +98,14 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
   process.stdout.write(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}\n\n`);
 
   if (options.selfHeal) {
+    const repairLabel = options.dryRun ? "Repararia (dry-run)" : "Reparado";
     if (repairs.length > 0) {
-      process.stdout.write("Reparado:\n");
+      process.stdout.write(`${repairLabel}:\n`);
       for (const repair of repairs) {
         process.stdout.write(`- ${repair}\n`);
       }
     } else {
-      process.stdout.write("Reparado: nada (no se requerian cambios)\n");
+      process.stdout.write(`${repairLabel}: nada (no se requerian cambios)\n`);
     }
     process.stdout.write("\n");
   }
@@ -115,7 +134,13 @@ function renderReport(config: MalahorConfig, paths: MalahorPaths, repairs: strin
 
 // Self-heal agent-safe: repara lo declarable desde el paquete sin pedir consola.
 // Jamas deja permisos mas restrictivos que los guardados en config; migrar legacy deny -> whitelist.
-function selfHeal(config: MalahorConfig, paths: MalahorPaths, dryRun: boolean): string[] {
+function selfHeal(
+  config: MalahorConfig,
+  paths: MalahorPaths,
+  detection: DetectionResult,
+  packagePaths: MalahorPackagePaths | null,
+  dryRun: boolean,
+): string[] {
   const repairs: string[] = [];
 
   const missingDirs = [paths.mnemoDir, paths.assetsDir, paths.graphsDir, paths.vaultDir, paths.opencodeDir].filter((dir) => !fs.existsSync(dir));
@@ -128,13 +153,14 @@ function selfHeal(config: MalahorConfig, paths: MalahorPaths, dryRun: boolean): 
     repairs.push(`${dryRun ? "crearia" : "creados"} ${missingDirs.length} directorio(s): ${missingDirs.join(", ")}`);
   }
 
-  const packagePaths = tryResolvePackagePaths(paths.cwd);
-
   if (!packagePaths) {
     repairs.push("AVISO: no se resolvio el paquete malahor-ai desde el cwd; reparaciones de assets/archivos omitidas (corre el heal dentro del repo o reinstala con npm)");
   } else {
     repairInstallFiles(packagePaths, paths, dryRun, repairs);
+    repairManagedPlugin(packagePaths, paths, dryRun, repairs);
   }
+
+  repairSdk(paths, detection, dryRun, repairs);
 
   archiveLegacyInstructions(paths, dryRun, repairs);
 
@@ -148,6 +174,34 @@ function tryResolvePackagePaths(cwd: string): MalahorPackagePaths | null {
     return resolvePackagePaths(cwd);
   } catch {
     return null;
+  }
+}
+
+function repairManagedPlugin(packagePaths: MalahorPackagePaths, paths: MalahorPaths, dryRun: boolean, repairs: string[]): void {
+  const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
+
+  if (!fs.existsSync(pluginAsset)) {
+    repairs.push("AVISO: asset del plugin no encontrado; no se repara el plugin");
+    return;
+  }
+
+  const plugin = syncManagedPlugin(pluginAsset, paths.malahorPluginDir, paths.backupsDir, dryRun);
+  if (plugin.status !== "up-to-date") {
+    repairs.push(describePluginSync(plugin));
+  }
+}
+
+function repairSdk(paths: MalahorPaths, detection: DetectionResult, dryRun: boolean, repairs: string[]): void {
+  const sdk = ensureOpencodeSdk({
+    opencodeDir: paths.opencodeDir,
+    backupsDir: paths.backupsDir,
+    stateFile: paths.opencodeSdkState,
+    dryRun,
+    commands: { bun: detection.commands.bun, npm: detection.commands.npm },
+  });
+
+  if (sdk.status !== "up-to-date") {
+    repairs.push(describeSdkEnsure(sdk));
   }
 }
 
@@ -434,6 +488,42 @@ function checkMnemoConfig(configPath: string): CheckResult {
   } catch (error) {
     return { name: "Mnemo MCP config", ok: false, message: (error as Error).message, critical: true };
   }
+}
+
+function checkOpenCodeHost(host: OpenCodeHostInfo): CheckResult {
+  if (host.kind === "unknown") {
+    return {
+      name: "OpenCode host",
+      ok: false,
+      message: `unknown${host.error ? ` (${host.error})` : ""}`,
+      critical: false,
+    };
+  }
+
+  const note = host.kind === "v1" ? " (V1; cobertura completa T-5.6.4 pendiente)" : "";
+  return {
+    name: "OpenCode host",
+    ok: true,
+    message: `${host.kind} ${host.version ?? ""}${note}`.trim(),
+    critical: true,
+  };
+}
+
+function formatOpenCodeHost(host: OpenCodeHostInfo): string {
+  if (host.kind === "unknown") {
+    return `unknown${host.error ? ` (${host.error})` : ""}`;
+  }
+
+  return `${host.kind} ${host.version ?? ""}`.trim();
+}
+
+function fromPluginHealth(check: PluginHealthCheck): CheckResult {
+  return {
+    name: check.name,
+    ok: check.status === "ok",
+    message: check.message,
+    critical: check.status === "fail",
+  };
 }
 
 function agentConfig(config: OpenCodeConfig, agentName: string): Record<string, unknown> | undefined {
