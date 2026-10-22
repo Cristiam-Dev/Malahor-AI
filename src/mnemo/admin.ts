@@ -1,6 +1,6 @@
 import { backupFile, type BackupResult } from "../cli/core/backup";
 import { assertHooksAllowed } from "../cli/core/hooks/engine";
-import { resolvePaths } from "../cli/core/paths";
+import { mcpHookContext } from "./hook-context";
 import { dbPath, loadDb, normalizeProject, saveDb, type Observation, type ObservationType, type SessionSummary } from "./db";
 import { backupsDirForDb } from "./admin-backup";
 
@@ -101,13 +101,7 @@ export function deleteProjectMemory(project: string, confirm: string, filePath =
     throw new Error(`Confirmacion invalida. Para borrar ${preview.project}, confirm debe ser: ${preview.requiresConfirmation}`);
   }
 
-  assertHooksAllowed({
-    event: "memory.delete.apply",
-    harness: "mcp",
-    profile: "standard",
-    cwd: process.cwd(),
-    projectRoot: process.cwd(),
-    malahorHome: resolvePaths().malahorHome,
+  assertHooksAllowed(mcpHookContext("memory.delete.apply", {
     memoryScope: preview.project,
     confirmation: confirm,
     destructive: true,
@@ -115,7 +109,7 @@ export function deleteProjectMemory(project: string, confirm: string, filePath =
       previewToken: `delete:${preview.project}:${preview.observations}:${preview.sessions}`,
       requiresConfirmation: preview.requiresConfirmation,
     },
-  });
+  }));
 
   const db = loadDb(filePath);
   const next = {
@@ -161,13 +155,7 @@ export function moveMemory(id: number, targetProject: string, confirm: string, f
     throw new Error(`Confirmacion invalida. Para mover #${id}, confirm debe ser: ${preview.requiresConfirmation}`);
   }
 
-  assertHooksAllowed({
-    event: "memory.move.apply",
-    harness: "mcp",
-    profile: "standard",
-    cwd: process.cwd(),
-    projectRoot: process.cwd(),
-    malahorHome: resolvePaths().malahorHome,
+  assertHooksAllowed(mcpHookContext("memory.move.apply", {
     memoryScope: preview.fromProject,
     confirmation: confirm,
     destructive: true,
@@ -175,7 +163,7 @@ export function moveMemory(id: number, targetProject: string, confirm: string, f
       previewToken: `move:${preview.id}:${preview.fromProject}:${preview.toProject}`,
       requiresConfirmation: preview.requiresConfirmation,
     },
-  });
+  }));
 
   const db = loadDb(filePath);
   const backup = backupFile(filePath, backupsDirForDb(filePath), false);

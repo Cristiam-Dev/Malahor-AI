@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { loadConfig } from "../core/config";
-import { formatHookResult, runHooks } from "../core/hooks/engine";
+import { approvalsDirectory, grantApproval } from "../core/hooks/approvals";
+import { auditFilePath } from "../core/hooks/audit";
+import { assertHooksAllowed, auditHookResult, formatHookResult, hookExitCode, runHooks } from "../core/hooks/engine";
 import { loadHookPolicy, parseHookProfile, saveHookProfile } from "../core/hooks/policy-loader";
-import type { HookContext, HookEvent } from "../core/hooks/types";
+import type { HookContext, HookEvent, HookResult } from "../core/hooks/types";
 import { isSandbox } from "../core/paths";
 import { resolveCanonicalProjectKey, resolveProject } from "../core/project";
 
@@ -14,7 +16,10 @@ export interface HooksOptions {
   paths: string | undefined;
   profile: string | undefined;
   project: string | undefined;
+  scope: string | undefined;
   confirm: string | undefined;
+  approval: string | undefined;
+  ttl: string | undefined;
   json: boolean;
 }
 
@@ -31,6 +36,9 @@ export function runHooksCommand(options: HooksOptions): void {
     case "status":
       printHooksStatus(options);
       return;
+    case "approval":
+      printApproval(options);
+      return;
     case "profile":
       printHooksProfile(options);
       return;
@@ -40,14 +48,21 @@ export function runHooksCommand(options: HooksOptions): void {
       printHooksHelp();
       return;
     default:
-      throw new Error(`Comando hooks invalido: ${action}. Usa check, events o help.`);
+      throw new Error(`Comando hooks invalido: ${action}. Usa check, approval, events, status, profile o help.`);
   }
 }
 
-function printHookCheck(options: HooksOptions): void {
+interface ResolvedHookContext {
+  config: ReturnType<typeof loadConfig>;
+  projectKey: string;
+  policyLoad: ReturnType<typeof loadHookPolicy>;
+  context: HookContext;
+}
+
+function resolveHookContext(options: HooksOptions, eventValue = options.args[0]): ResolvedHookContext {
   const config = loadConfig();
   const project = resolveProject(config.paths.cwd, config.projects.aliases);
-  const event = parseHookEvent(options.args[0]);
+  const event = parseHookEvent(eventValue);
   const projectKey = options.project ? resolveCanonicalProjectKey(options.project, config.projects.aliases) : project.canonicalKey;
   const profileOverride = options.profile ? parseHookProfile(options.profile) : undefined;
   const policyLoad = loadHookPolicy(config.paths, projectKey, profileOverride);
@@ -61,28 +76,111 @@ function printHookCheck(options: HooksOptions): void {
     malahorHome: config.paths.malahorHome,
     project: projectKey,
     policy: policyLoad.policy,
+    security: policyLoad.security,
+    policyMeta: policyLoad.policyMeta,
     command: options.command,
     targetPaths,
+    memoryScope: options.scope,
     confirmation: options.confirm,
+    approval: options.approval,
     destructive: event.includes(".apply") || event.startsWith("git.reset") || event.startsWith("git.checkout"),
     metadata: metadataForEvent(event, options.confirm),
   };
-  const result = runHooks(context);
+
+  return { config, projectKey, policyLoad, context };
+}
+
+function printHookCheck(options: HooksOptions): void {
+  const { config, projectKey, policyLoad, context } = resolveHookContext(options);
+  let result: HookResult;
+  if (options.approval) {
+    try {
+      result = assertHooksAllowed(context);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`${message}\n`);
+      process.exitCode = 2;
+      return;
+    }
+  } else {
+    result = auditHookResult(context, runHooks(context));
+  }
 
   if (options.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else {
     process.stdout.write(`\nmalahor-ai hooks\n================\n`);
     process.stdout.write(`Project: ${projectKey}\n`);
-    process.stdout.write(`Project root: ${project.root}\n`);
+    process.stdout.write(`Project root: ${context.projectRoot}\n`);
     process.stdout.write(`Policy sources: ${policyLoad.sources.length > 0 ? policyLoad.sources.join(", ") : "defaults"}\n`);
+    process.stdout.write(`Policy hash: ${policyLoad.policyHash}\n`);
+    process.stdout.write(`Corporate policy: ${policyLoad.policyMeta.corporateStatus}${policyLoad.corporatePath ? ` (${policyLoad.corporatePath})` : ""}\n`);
+    if (policyLoad.policyMeta.criticalGaps.length > 0) {
+      process.stdout.write(`Critical gaps: ${policyLoad.policyMeta.criticalGaps.join(", ")}\n`);
+    }
+    if (policyLoad.warnings.length > 0) {
+      process.stdout.write(`Warnings:\n- ${policyLoad.warnings.join("\n- ")}\n`);
+    }
     process.stdout.write(`Sandbox: ${isSandbox(config.paths) ? "yes" : "no"}\n`);
     process.stdout.write(`${formatHookResult(result)}\n`);
   }
 
-  if (result.decision === "deny") {
-    process.exitCode = 2;
+  process.exitCode = hookExitCode(result.decision);
+}
+
+function printApproval(options: HooksOptions): void {
+  const subcommand = options.args[0] ?? "help";
+  if (subcommand !== "grant") {
+    throw new Error("Uso: malahor-ai hooks approval grant <event> --confirm APPROVE [--ttl <segundos>]");
   }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("La aprobacion requiere un canal TTY humano; no se acepta desde un proceso no interactivo.");
+  }
+  if (options.confirm !== "APPROVE") {
+    throw new Error("Falta confirmacion humana explicita: usa --confirm APPROVE.");
+  }
+
+  const { projectKey, policyLoad, context } = resolveHookContext(options, options.args[1]);
+  if (policyLoad.policyMeta.corporateStatus === "invalid"
+    || policyLoad.policyMeta.corporateStatus === "untrusted"
+    || policyLoad.policyMeta.corporateStatus === "required-missing"
+    || policyLoad.policyMeta.corporateStatus === "unsupported") {
+    throw new Error("No se emiten aprobaciones con una politica corporativa invalida o no confiable.");
+  }
+  if (policyLoad.policyMeta.criticalGaps.length > 0) {
+    throw new Error(`No se emiten aprobaciones mientras existan brechas criticas: ${policyLoad.policyMeta.criticalGaps.join(", ")}`);
+  }
+
+  const record = grantApproval(context, {
+    channel: "cli-tty",
+    ttlSeconds: parseApprovalTtl(options.ttl),
+  });
+
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
+    return;
+  }
+
+  process.stdout.write(`\nmalahor-ai hooks approval\n=========================\n`);
+  process.stdout.write(`Project: ${projectKey}\n`);
+  process.stdout.write(`Operation: ${record.operation}\n`);
+  process.stdout.write(`Resources: ${record.resources.length > 0 ? record.resources.join(", ") : "none"}\n`);
+  process.stdout.write(`Command bound: ${record.commandHash ? "yes" : "no"}\n`);
+  process.stdout.write(`Policy hash: ${record.policyHash}\n`);
+  process.stdout.write(`Expires: ${record.expiresAt}\n`);
+  if (record.auditWarning) {
+    process.stderr.write(`WARN auditoria auxiliar no disponible: ${record.auditWarning}\n`);
+  }
+  process.stdout.write(`Nonce: ${record.nonce}\n`);
+}
+
+function parseApprovalTtl(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const ttl = Number(value);
+  if (!Number.isInteger(ttl) || ttl <= 0) {
+    throw new Error(`TTL de aprobacion invalido: ${value}`);
+  }
+  return ttl;
 }
 
 function printHooksStatus(options: HooksOptions): void {
@@ -96,7 +194,15 @@ function printHooksStatus(options: HooksOptions): void {
   process.stdout.write(`Profile: ${policyLoad.policy.profile}\n`);
   process.stdout.write(`Default policy: ${policyLoad.defaultPath}\n`);
   process.stdout.write(`Project policy: ${policyLoad.projectPath ?? "none"}\n`);
+  process.stdout.write(`Corporate policy: ${policyLoad.policyMeta.corporateStatus}${policyLoad.corporatePath ? ` (${policyLoad.corporatePath})` : ""}\n`);
+  process.stdout.write(`Policy hash: ${policyLoad.policyHash}\n`);
   process.stdout.write(`Sources: ${policyLoad.sources.length > 0 ? policyLoad.sources.join(", ") : "built-in defaults"}\n`);
+  process.stdout.write(`Audit file: ${auditFilePath(config.paths.malahorHome)}\n`);
+  process.stdout.write(`Approvals dir: ${approvalsDirectory(config.paths.malahorHome)}\n`);
+  process.stdout.write(`Approval channel: cli-tty (TTY requerida)\n`);
+  if (policyLoad.policyMeta.criticalGaps.length > 0) {
+    process.stdout.write(`Critical gaps: ${policyLoad.policyMeta.criticalGaps.join(", ")}\n`);
+  }
   if (policyLoad.warnings.length > 0) {
     process.stdout.write(`Warnings:\n- ${policyLoad.warnings.join("\n- ")}\n`);
   }
@@ -216,7 +322,8 @@ function printEvents(): void {
 function printHooksHelp(): void {
   process.stdout.write(`
 Usage:
-  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--confirm TOKEN] [--json]
+  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--scope <scope>] [--confirm TOKEN] [--approval <nonce>] [--json]
+  malahor-ai hooks approval grant <event> --confirm APPROVE [--ttl <segundos>] [--command <cmd>] [--paths a,b] [--scope <scope>] [--json]
   malahor-ai hooks status [--project <key>]
   malahor-ai hooks profile get [--project <key>]
   malahor-ai hooks profile set off|light|standard|strict|release [--project <key>]
@@ -224,14 +331,16 @@ Usage:
 
 Ejemplos:
   malahor-ai hooks check git.commit.before
-  malahor-ai hooks check git.push.before --confirm CHECKS_OK
+  malahor-ai hooks check git.push.before --profile release
   malahor-ai hooks check git.reset.before --command "git reset --hard"
   malahor-ai hooks check file.stage.before --paths .env,src/index.ts
+  malahor-ai hooks approval grant git.push.before --profile release --confirm APPROVE --ttl 300
 
 Decisiones:
   allow: sin hallazgos
   warn: continuar con cuidado
-  ask: requiere confirmacion humana o evidencia
+  ask: requiere aprobacion humana verificable; bloqueado por defecto, salida 3
   deny: bloqueado; salida 2
+  --approval consume la aprobacion una sola vez; no se reutiliza.
 `);
 }

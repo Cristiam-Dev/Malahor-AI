@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
-import { runHooks } from "../src/cli/core/hooks/engine";
-import type { HookContext } from "../src/cli/core/hooks/types";
+import { assertHooksAllowed, evaluateHookRules, hookExitCode, runHooks } from "../src/cli/core/hooks/engine";
+import type { HookContext, HookPolicyMeta, HookRule } from "../src/cli/core/hooks/types";
 import { callTool } from "../src/mnemo/tools";
 
 const baseContext = (overrides: Partial<HookContext>): HookContext => ({
@@ -12,6 +12,21 @@ const baseContext = (overrides: Partial<HookContext>): HookContext => ({
   cwd: process.cwd(),
   projectRoot: process.cwd(),
   malahorHome: path.join(process.cwd(), ".sandbox", "home", ".malahor"),
+  audit: { enabled: false },
+  ...overrides,
+});
+
+const policyMeta = (overrides: Partial<HookPolicyMeta>): HookPolicyMeta => ({
+  contractVersion: 1,
+  schemaVersion: 1,
+  policyVersion: "test",
+  issuer: "test",
+  policyHash: "test",
+  sources: [],
+  corporateStatus: "absent",
+  corporateRequired: false,
+  criticalGaps: [],
+  warnings: [],
   ...overrides,
 });
 
@@ -144,6 +159,97 @@ describe("malahor hooks", () => {
 
     expect(result.decision).toBe("deny");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-STAGE-CONSENT")).toBe(true);
+  });
+
+  test("profile off no desactiva el suelo critico", () => {
+    const result = runHooks(baseContext({
+      event: "git.reset.before",
+      command: "git reset --hard HEAD~1",
+      profile: "off",
+    }));
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE")).toBe(true);
+  });
+
+  test("assertHooksAllowed bloquea ask pendiente", () => {
+    expect(() => assertHooksAllowed(baseContext({
+      event: "git.push.before",
+      profile: "release",
+    }))).toThrow(/ASK pendiente/);
+  });
+
+  test("ask pendiente no se autoriza con CHECKS_OK", () => {
+    const result = runHooks(baseContext({
+      event: "git.push.before",
+      profile: "release",
+      confirmation: "CHECKS_OK",
+    }));
+
+    expect(result.decision).toBe("ask");
+    expect(() => assertHooksAllowed(baseContext({
+      event: "git.push.before",
+      profile: "release",
+      confirmation: "CHECKS_OK",
+    }))).toThrow(/ASK pendiente/);
+  });
+
+  test("USER_REQUESTED_COMMIT no autoriza un ask de mensaje", () => {
+    const context = baseContext({
+      event: "git.commit.before",
+      command: "git commit -m 'update stuff'",
+      profile: "release",
+      confirmation: "USER_REQUESTED_COMMIT",
+    });
+
+    expect(runHooks(context).decision).toBe("ask");
+    expect(() => assertHooksAllowed(context)).toThrow(/ASK pendiente/);
+  });
+
+  test("hookExitCode distingue deny, ask y allow", () => {
+    expect(hookExitCode("deny")).toBe(2);
+    expect(hookExitCode("ask")).toBe(3);
+    expect(hookExitCode("warn")).toBe(0);
+    expect(hookExitCode("allow")).toBe(0);
+  });
+
+  test("error de control critico deniega y error auxiliar solo advierte", () => {
+    const critical: HookRule[] = [{
+      id: "control-critico",
+      run: () => { throw new Error("timeout"); },
+    }];
+    const auxiliary: HookRule[] = [{
+      id: "control-auxiliar",
+      critical: false,
+      run: () => { throw new Error("lectura opcional"); },
+    }];
+
+    const criticalResult = evaluateHookRules(baseContext({}), critical);
+    const auxiliaryResult = evaluateHookRules(baseContext({}), auxiliary);
+
+    expect(criticalResult[0]?.id).toBe("MAL-HOOK-CONTROL-ERROR");
+    expect(criticalResult[0]?.decision).toBe("deny");
+    expect(auxiliaryResult[0]?.id).toBe("MAL-HOOK-CONTROL-WARN");
+    expect(auxiliaryResult[0]?.decision).toBe("warn");
+  });
+
+  test("politica corporativa no evaluable bloquea la operacion", () => {
+    const result = runHooks(baseContext({
+      policyMeta: policyMeta({ corporateStatus: "untrusted" }),
+    }));
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-POLICY-CORPORATE")).toBe(true);
+  });
+
+  test("control exigido sin mediacion bloquea la operacion afectada", () => {
+    const result = runHooks(baseContext({
+      event: "git.push.before",
+      policyMeta: policyMeta({ criticalGaps: ["corporate:git.requirePushApproval"] }),
+    }));
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-POLICY-GAP")).toBe(true);
   });
 
   test("expone hook check por MCP", () => {

@@ -177,7 +177,7 @@ export const toolDefinitions = [
         profile: { type: "string", description: "off|light|standard|strict|release. Default standard." },
         command: { type: "string", description: "Comando shell que se planea ejecutar, si aplica." },
         paths: { type: "array", items: { type: "string" }, description: "Archivos objetivo a revisar." },
-        confirm: { type: "string", description: "Confirmacion/evidencia fuerte, por ejemplo CHECKS_OK." },
+        confirm: { type: "string", description: "Confirmacion exacta para operaciones destructivas; CHECKS_OK no autoriza una operacion ask." },
         metadata: { type: "object", description: "Metadatos del evento (previewToken, requiresConfirmation, writesMalahorData, etc.)." },
       },
       required: ["event"],

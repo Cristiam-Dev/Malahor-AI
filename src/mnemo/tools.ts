@@ -1,5 +1,5 @@
 import { toolDefinitions } from "./tool-definitions";
-import { runHooks } from "../cli/core/hooks/engine";
+import { auditHookResult, runHooks } from "../cli/core/hooks/engine";
 import { loadHookPolicy, parseHookProfile } from "../cli/core/hooks/policy-loader";
 import type { HookEvent } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
@@ -74,20 +74,23 @@ function checkMalahorHooks(args: Record<string, unknown>): unknown {
   const project = resolveProject(paths.cwd);
   const profileOverride = typeof args.profile === "string" && args.profile.trim() ? parseHookProfile(args.profile) : undefined;
   const policyLoad = loadHookPolicy(paths, project.canonicalKey, profileOverride);
-  return runHooks({
+  const context = {
     event: hookEventArg(args.event),
-    harness: "mcp",
+    harness: "mcp" as const,
     profile: policyLoad.policy.profile,
     cwd: paths.cwd,
     projectRoot: project.root,
     malahorHome: paths.malahorHome,
     project: project.canonicalKey,
     policy: policyLoad.policy,
+    security: policyLoad.security,
+    policyMeta: policyLoad.policyMeta,
     command: optionalStringArg(args.command),
     targetPaths: stringListArg(args.paths),
     confirmation: optionalStringArg(args.confirm),
     metadata: recordArg(args.metadata),
-  });
+  };
+  return auditHookResult(context, runHooks(context));
 }
 
 function stringArg(value: unknown, fallback?: string): string {

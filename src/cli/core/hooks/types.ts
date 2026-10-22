@@ -25,6 +25,194 @@ export interface HookPolicy {
   };
 }
 
+export interface FilesControls {
+  enforceRoots?: boolean;
+  allowedReadRoots?: string[];
+  allowedWriteRoots?: string[];
+  deniedPathGlobs?: string[];
+  resolveSymlinks?: boolean;
+  excludeSecretsFromContext?: boolean;
+  excludeSecretsFromIndex?: boolean;
+  requireApprovalOutsideRoots?: boolean;
+}
+
+export interface ShellControls {
+  enforceCommandAllowlist?: boolean;
+  allowedCommands?: string[];
+  deniedCommands?: string[];
+  minimizeEnvironment?: boolean;
+  denyCredentialEnv?: boolean;
+  enforceTimeout?: boolean;
+  timeoutSeconds?: number;
+  inspectIndirectExecution?: boolean;
+  blockUnapprovedScripts?: boolean;
+}
+
+export interface GitControls {
+  requireStageConsent?: boolean;
+  requireCommitConsent?: boolean;
+  requirePushApproval?: boolean;
+  scanStagedContent?: boolean;
+  scanOutgoingCommits?: boolean;
+  requireChecksBeforePush?: boolean;
+  bindChecksToRevision?: boolean;
+  blockDestructive?: boolean;
+}
+
+export interface MemoryControls {
+  requireClientOnEveryOperation?: boolean;
+  requireProjectOnEveryOperation?: boolean;
+  enforceClientIsolation?: boolean;
+  denyCrossClientRelated?: boolean;
+  restrictSearchToAuthorizedScopes?: boolean;
+  allowedClients?: string[];
+  allowedProjects?: string[];
+  allowedRoots?: string[];
+  adminRequiresApproval?: boolean;
+  requireGlobalScopeApproval?: boolean;
+}
+
+export interface PersistenceControls {
+  requireClassificationBeforePersist?: boolean;
+  blockSecrets?: boolean;
+  blockPersonalData?: boolean;
+  redactSensitiveData?: boolean;
+  blockUnclassifiedContext?: boolean;
+  captureSubagentsOptIn?: boolean;
+  exportRequiresApproval?: boolean;
+  logsExcludePayloads?: boolean;
+}
+
+export interface DestructiveControls {
+  requirePreview?: boolean;
+  requireBackup?: boolean;
+  requireApproval?: boolean;
+  revalidateBeforeApply?: boolean;
+  bindApprovalToVersion?: boolean;
+  requireConditionalWrites?: boolean;
+  blockSilentDelete?: boolean;
+}
+
+export interface EgressControls {
+  enforceProviderAllowlist?: boolean;
+  allowedProviders?: string[];
+  allowedEndpoints?: string[];
+  allowedProtocols?: string[];
+  requireTls?: boolean;
+  requireIdentityVerification?: boolean;
+  coverPromptAttachments?: boolean;
+  coverContinuationsTitlesCompaction?: boolean;
+  coverMcpShellFetch?: boolean;
+  blockUnmeasurableChannels?: boolean;
+  blockAutoModelSelection?: boolean;
+}
+
+export interface IntegrationControls {
+  enforceMcpToolAllowlist?: boolean;
+  allowedMcpTools?: string[];
+  requireMcpIntegrity?: boolean;
+  allowedSkills?: string[];
+  allowedPlugins?: string[];
+  requirePluginIntegrity?: boolean;
+  subagentsSameFloor?: boolean;
+  treatRepoTextAsUntrusted?: boolean;
+  blockUnapprovedIntegrations?: boolean;
+}
+
+export interface ApprovalControls {
+  requireHumanChannel?: boolean;
+  allowedChannels?: string[];
+  askWithoutChannel?: "deny";
+  oneTime?: boolean;
+  maxTtlSeconds?: number;
+  bindOperation?: boolean;
+  bindResources?: boolean;
+  bindClient?: boolean;
+  bindPolicyHash?: boolean;
+  bindContractVersion?: boolean;
+  invalidateOnStateChange?: boolean;
+}
+
+export interface AuditControls {
+  required?: boolean;
+  path?: string;
+  fileMode?: string;
+  directoryMode?: string;
+  appendOnly?: boolean;
+  includeDecision?: boolean;
+  includeRuleIds?: boolean;
+  includeResourceRefs?: boolean;
+  includePayloads?: false;
+  retentionDays?: number;
+  maxFiles?: number;
+  failClosedIfUnavailable?: boolean;
+  corporateOverridePath?: string;
+}
+
+export interface HostControls {
+  requiredControls?: string[];
+  doctorMayCertify?: false;
+  declaredLimits?: string[];
+}
+
+export interface SecurityControls {
+  files?: FilesControls;
+  shell?: ShellControls;
+  git?: GitControls;
+  memory?: MemoryControls;
+  persistence?: PersistenceControls;
+  destructive?: DestructiveControls;
+  egress?: EgressControls;
+  integrations?: IntegrationControls;
+  approval?: ApprovalControls;
+  audit?: AuditControls;
+  host?: HostControls;
+}
+
+export interface SecurityLayer {
+  schemaVersion: 1;
+  contractVersion: 1;
+  policyVersion: string;
+  issuer: string;
+  issuedAt: string;
+  profile?: HookProfile;
+  controls: SecurityControls;
+}
+
+export type HookPolicySourceKind = "built-in" | "corporate" | "project" | "local";
+
+export interface HookPolicySource {
+  kind: HookPolicySourceKind;
+  /** 0 = built-in; a mayor numero, menor autoridad. */
+  authority: number;
+  path?: string;
+  status: "valid" | "invalid" | "untrusted" | "ignored";
+  schemaVersion?: number;
+  contractVersion?: number;
+  policyVersion?: string;
+  issuer?: string;
+  issuedAt?: string;
+  sha256?: string;
+  message?: string;
+}
+
+export type CorporatePolicyStatus = "absent" | "valid" | "invalid" | "untrusted" | "required-missing" | "unsupported";
+
+export interface HookPolicyMeta {
+  contractVersion: number;
+  schemaVersion: number;
+  policyVersion: string;
+  issuer: string;
+  issuedAt?: string;
+  policyHash: string;
+  sources: HookPolicySource[];
+  corporateStatus: CorporatePolicyStatus;
+  corporateRequired: boolean;
+  corporatePath?: string;
+  criticalGaps: string[];
+  warnings: string[];
+}
+
 export type HookEvent =
   | "project.resolve.before"
   | "context.recover.before"
@@ -61,11 +249,19 @@ export interface HookContext {
   projectRoot: string;
   malahorHome: string;
   project?: string;
+  client?: string;
   policy?: HookPolicy;
+  security?: SecurityControls;
+  policyMeta?: HookPolicyMeta;
   command?: string;
   targetPaths?: string[];
   memoryScope?: string;
   confirmation?: string;
+  approval?: string;
+  audit?: {
+    enabled?: boolean;
+    required?: boolean;
+  };
   dryRun?: boolean;
   destructive?: boolean;
   metadata?: Record<string, unknown>;
@@ -83,9 +279,12 @@ export interface HookResult {
   profile: HookProfile;
   decision: HookDecision;
   violations: HookViolation[];
+  policy?: HookPolicyMeta;
+  approvalRef?: string;
 }
 
 export interface HookRule {
   id: string;
+  critical?: boolean;
   run: (context: HookContext) => HookViolation[];
 }

@@ -13,6 +13,7 @@ import { detectEnvironment, type DetectionResult } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
+import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { describePluginSync, syncManagedPlugin } from "../core/managed-plugin";
@@ -20,6 +21,7 @@ import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
+import { resolveProject } from "../core/project";
 import type { MalahorPackagePaths } from "../core/package";
 import { validateInstallation } from "../core/validate";
 
@@ -108,13 +110,19 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   validateBeforePolicy(paths, packagePaths, options);
 
   const execution = await resolveFinalPolicy(config.execution, options);
+  const project = resolveProject(paths.cwd, config.projects.aliases);
+  const policyLoad = loadHookPolicy(paths, project.canonicalKey);
   assertHooksAllowed({
     event: "install.beforePolicy",
     harness: "cli",
-    profile: "release",
+    profile: policyLoad.policy.profile,
     cwd: paths.cwd,
     projectRoot: packagePaths.root,
     malahorHome: paths.malahorHome,
+    project: project.canonicalKey,
+    policy: policyLoad.policy,
+    security: policyLoad.security,
+    policyMeta: policyLoad.policyMeta,
     metadata: {
       appliesPolicyBeforeValidation: false,
       bashDenyTotal: false,

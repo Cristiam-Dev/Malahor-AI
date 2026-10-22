@@ -67,16 +67,17 @@ function printGitHelp(): void {
   process.stdout.write(`
 Usage:
   malahor-ai git precommit [--message <mensaje>] [--profile standard|strict|release] [--json]
-  malahor-ai git prepush [--profile release] [--confirm CHECKS_OK] [--json]
+  malahor-ai git prepush [--profile release] [--json]
   malahor-ai git commit-message [resumen...] [--type feat|fix|docs|test|chore] [--scope <scope>] [--icon <emoji>] [--json]
 
 Ejemplos:
   malahor-ai git commit-message agrega flujo git asistido --type feat --scope hooks
   malahor-ai git precommit --message "✨ feat(hooks): agrega flujo git asistido"
-  malahor-ai git prepush --confirm CHECKS_OK
+  malahor-ai git prepush --profile release
 
 Notas:
   - No ejecuta git add, git commit ni git push.
-  - DENY devuelve exit 2; ASK devuelve exit 3 para bloquear hooks locales hasta resolver evidencia.
+  - DENY devuelve exit 2; ASK devuelve exit 3 y requiere aprobacion verificable.
+  - CHECKS_OK no autoriza por si solo una operacion ASK.
 `);
 }

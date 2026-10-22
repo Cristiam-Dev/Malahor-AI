@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { loadConfig } from "./config";
-import { runHooks } from "./hooks/engine";
+import { auditHookResult, runHooks } from "./hooks/engine";
 import { loadHookPolicy, parseHookProfile } from "./hooks/policy-loader";
-import type { HookResult } from "./hooks/types";
+import type { HookContext, HookEvent, HookResult } from "./hooks/types";
 import { isSandbox } from "./paths";
 import { resolveCanonicalProjectKey, resolveProject } from "./project";
 import { composeCommitMessage } from "./git-commit-message";
@@ -53,15 +53,8 @@ function runPrecommit(options: GitWorkflowOptions): GitWorkflowResult {
   const targetPaths = stagedFiles(context.project.root, true);
   const message = options.message?.trim() || summaryFromArgs(options.args);
   const command = message ? `git commit -m ${quoteShell(message)}` : undefined;
-  const hookResult = runHooks({
+  const hookResult = evaluateWorkflowHook(context, {
     event: "git.commit.before",
-    harness: "cli",
-    profile: context.policy.profile,
-    cwd: context.config.paths.cwd,
-    projectRoot: context.project.root,
-    malahorHome: context.config.paths.malahorHome,
-    project: context.projectKey,
-    policy: context.policy,
     command,
     targetPaths,
     metadata: { validationOnly: true },
@@ -76,21 +69,14 @@ function runPrecommit(options: GitWorkflowOptions): GitWorkflowResult {
 function runPrepush(options: GitWorkflowOptions): GitWorkflowResult {
   const context = resolveWorkflowContext(options, "release");
   const targetPaths = filesToPush(context.project.root);
-  const hookResult = runHooks({
+  const hookResult = evaluateWorkflowHook(context, {
     event: "git.push.before",
-    harness: "cli",
-    profile: context.policy.profile,
-    cwd: context.config.paths.cwd,
-    projectRoot: context.project.root,
-    malahorHome: context.config.paths.malahorHome,
-    project: context.projectKey,
-    policy: context.policy,
     command: "git push",
     targetPaths,
     confirmation: options.confirm,
   });
   const notes = [
-    "Usa --confirm CHECKS_OK solo despues de correr tests/build relevantes.",
+    "ASK requiere aprobacion verificable; CHECKS_OK no autoriza por si solo.",
     targetPaths.length > 0 ? `${targetPaths.length} archivo(s) detectado(s) entre HEAD y upstream.` : "No se detectaron archivos pendientes contra upstream; si ya validaste, confirma segun politica.",
   ];
 
@@ -108,8 +94,28 @@ function runCommitMessage(options: GitWorkflowOptions): GitWorkflowResult {
     paths: targetPaths,
   });
   const command = `git commit -m ${quoteShell(message)}`;
-  const hookResult = runHooks({
+  const hookResult = evaluateWorkflowHook(context, {
     event: "git.commit.before",
+    command,
+    targetPaths,
+    metadata: { validationOnly: true },
+  });
+
+  return workflowResult(context, "commit-message", targetPaths, ["Mensaje generado; Malahor no ejecuta git commit por ti."], hookResult, message, command);
+}
+
+function evaluateWorkflowHook(
+  context: ReturnType<typeof resolveWorkflowContext>,
+  values: {
+    event: HookEvent;
+    command?: string;
+    targetPaths: string[];
+    confirmation?: string;
+    metadata?: Record<string, unknown>;
+  },
+): HookResult {
+  const hookContext: HookContext = {
+    event: values.event,
     harness: "cli",
     profile: context.policy.profile,
     cwd: context.config.paths.cwd,
@@ -117,12 +123,15 @@ function runCommitMessage(options: GitWorkflowOptions): GitWorkflowResult {
     malahorHome: context.config.paths.malahorHome,
     project: context.projectKey,
     policy: context.policy,
-    command,
-    targetPaths,
-    metadata: { validationOnly: true },
-  });
+    security: context.security,
+    policyMeta: context.policyMeta,
+    command: values.command,
+    targetPaths: values.targetPaths,
+    confirmation: values.confirmation,
+    metadata: values.metadata,
+  };
 
-  return workflowResult(context, "commit-message", targetPaths, ["Mensaje generado; Malahor no ejecuta git commit por ti."], hookResult, message, command);
+  return auditHookResult(hookContext, runHooks(hookContext));
 }
 
 function resolveWorkflowContext(options: GitWorkflowOptions, fallbackProfile?: string) {
@@ -132,7 +141,16 @@ function resolveWorkflowContext(options: GitWorkflowOptions, fallbackProfile?: s
   const profileOverride = options.profile ? parseHookProfile(options.profile) : fallbackProfile ? parseHookProfile(fallbackProfile) : undefined;
   const policyLoad = loadHookPolicy(config.paths, projectKey, profileOverride);
 
-  return { config, project, projectKey, policy: policyLoad.policy, sources: policyLoad.sources };
+  return {
+    config,
+    project,
+    projectKey,
+    policy: policyLoad.policy,
+    security: policyLoad.security,
+    policyMeta: policyLoad.policyMeta,
+    policyHash: policyLoad.policyHash,
+    sources: policyLoad.sources,
+  };
 }
 
 function workflowResult(

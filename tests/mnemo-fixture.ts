@@ -7,16 +7,19 @@ export interface TestEnvSnapshot {
   root: string;
   previousMalahorHome: string | undefined;
   previousMalahorConfig: string | undefined;
+  previousMalahorOpenCodeDir: string | undefined;
 }
 
 export function setupTestEnv(): TestEnvSnapshot {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "malahor-mnemo-scopes-"));
   const previousMalahorHome = process.env.MALAHOR_HOME;
   const previousMalahorConfig = process.env.MALAHOR_CONFIG;
+  const previousMalahorOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
   process.env.MALAHOR_HOME = path.join(root, ".malahor");
   process.env.MALAHOR_CONFIG = path.join(root, "config.jsonc");
+  process.env.MALAHOR_OPENCODE_DIR = path.join(root, "opencode");
   fs.writeFileSync(process.env.MALAHOR_CONFIG, "{}\n", "utf8");
-  return { root, previousMalahorHome, previousMalahorConfig };
+  return { root, previousMalahorHome, previousMalahorConfig, previousMalahorOpenCodeDir };
 }
 
 export function cleanupTestEnv(snapshot: TestEnvSnapshot): void {
@@ -24,6 +27,8 @@ export function cleanupTestEnv(snapshot: TestEnvSnapshot): void {
   else process.env.MALAHOR_HOME = snapshot.previousMalahorHome;
   if (snapshot.previousMalahorConfig === undefined) delete process.env.MALAHOR_CONFIG;
   else process.env.MALAHOR_CONFIG = snapshot.previousMalahorConfig;
+  if (snapshot.previousMalahorOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
+  else process.env.MALAHOR_OPENCODE_DIR = snapshot.previousMalahorOpenCodeDir;
   fs.rmSync(snapshot.root, { recursive: true, force: true });
 }
 

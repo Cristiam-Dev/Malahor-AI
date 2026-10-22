@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { HookContext, HookProfile, HookRule, HookViolation } from "./types";
+import type { HookContext, HookEvent, HookProfile, HookRule, HookViolation } from "./types";
 
 export const builtInHookRules: HookRule[] = [
+  { id: "policy-integrity", run: policyIntegrityGuard },
   { id: "repo-boundary", run: repoBoundaryGuard },
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
@@ -10,8 +11,35 @@ export const builtInHookRules: HookRule[] = [
   { id: "git-consent", run: gitConsentGuard },
   { id: "commit-message", run: commitMessageGuard },
   { id: "secret-scan", run: secretScanGuard },
-  { id: "programming-quality", run: programmingQualityGuard },
+  { id: "push-checks", run: pushChecksGuard },
+  { id: "programming-quality", critical: false, run: programmingQualityGuard },
 ];
+
+function policyIntegrityGuard(context: HookContext): HookViolation[] {
+  const meta = context.policyMeta;
+  if (!meta) return [];
+
+  if (meta.corporateStatus === "invalid" || meta.corporateStatus === "untrusted" || meta.corporateStatus === "required-missing" || meta.corporateStatus === "unsupported") {
+    return [{
+      id: "MAL-HOOK-POLICY-CORPORATE",
+      decision: "deny",
+      message: `Politica corporativa no evaluable (${meta.corporateStatus}); la operacion sensible no puede ejecutarse.`,
+      fix: "Corrige la politica corporativa administrada o solicita intervencion del host; no uses un bypass local.",
+    }];
+  }
+
+  const relevant = meta.criticalGaps.filter((gap) => controlAffectsEvent(gap, context.event));
+  if (relevant.length > 0) {
+    return [{
+      id: "MAL-HOOK-POLICY-GAP",
+      decision: "deny",
+      message: `Controles exigidos sin mediacion real para ${context.event}: ${relevant.join(", ")}`,
+      fix: "Implementa el adaptador de mediacion antes del efecto o retira el control de la politica efectiva.",
+    }];
+  }
+
+  return [];
+}
 
 function repoBoundaryGuard(context: HookContext): HookViolation[] {
   const writesMalahorData = Boolean(context.metadata?.writesMalahorData);
@@ -32,7 +60,9 @@ function repoBoundaryGuard(context: HookContext): HookViolation[] {
 }
 
 function destructiveMemoryGuard(context: HookContext): HookViolation[] {
-  if (context.policy?.memory.destructiveRequiresPreview === false) return [];
+  const requirePreview = context.security?.destructive?.requirePreview
+    ?? context.policy?.memory.destructiveRequiresPreview;
+  if (requirePreview === false) return [];
   const destructiveEvents = new Set(["memory.delete.apply", "memory.move.apply", "memory.restore.apply"]);
   if (!destructiveEvents.has(context.event)) return [];
 
@@ -86,7 +116,9 @@ function policySafetyGuard(context: HookContext): HookViolation[] {
 }
 
 function dangerousGitGuard(context: HookContext): HookViolation[] {
-  if (context.policy?.git.blockDestructiveCommands === false) return [];
+  const blockDestructive = context.security?.git?.blockDestructive
+    ?? context.policy?.git.blockDestructiveCommands;
+  if (blockDestructive === false) return [];
   const command = (context.command ?? "").trim();
   if (!command && !context.event.startsWith("git.")) return [];
 
@@ -147,7 +179,10 @@ function commitMessageGuard(context: HookContext): HookViolation[] {
 }
 
 function secretScanGuard(context: HookContext): HookViolation[] {
-  if (context.policy?.secrets.scanBeforeCommit === false) return [];
+  const scan = context.security
+    ? context.security.git?.scanStagedContent !== false || context.security.persistence?.blockSecrets !== false
+    : context.policy?.secrets.scanBeforeCommit !== false;
+  if (!scan) return [];
   const paths = readableTargetPaths(context);
   const leaks = paths.flatMap((targetPath) => scanFileForSecrets(targetPath));
 
@@ -161,18 +196,22 @@ function secretScanGuard(context: HookContext): HookViolation[] {
   }];
 }
 
+function pushChecksGuard(context: HookContext): HookViolation[] {
+  const requireChecks = context.security?.git?.requireChecksBeforePush
+    ?? context.policy?.git.requireChecksBeforePush;
+  if (requireChecks === false || context.event !== "git.push.before") return [];
+
+  return [{
+    id: "MAL-HOOK-PUSH-CHECKS",
+    decision: strictness(context.profile, "ask"),
+    message: "Push sin evidencia de checks vinculada a la revision.",
+    fix: "Corre tests/build y registra evidencia verificable; CHECKS_OK no autoriza por si solo.",
+  }];
+}
+
 function programmingQualityGuard(context: HookContext): HookViolation[] {
   const violations: HookViolation[] = [];
   const files = context.targetPaths ?? [];
-
-  if (context.policy?.git.requireChecksBeforePush !== false && context.event === "git.push.before" && context.confirmation !== "CHECKS_OK") {
-    violations.push({
-      id: "MAL-HOOK-PUSH-CHECKS",
-      decision: strictness(context.profile, "ask"),
-      message: "Push sin evidencia de checks recientes.",
-      fix: "Corre tests/build relevantes o pasa confirmacion CHECKS_OK si ya validaste.",
-    });
-  }
 
   const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
@@ -238,6 +277,23 @@ function fileSize(filePath: string): number {
   } catch {
     return 0;
   }
+}
+
+function controlAffectsEvent(gap: string, event: HookEvent): boolean {
+  const control = gap.replace(/^(built-in|corporate|project|local):/, "");
+
+  if (control.startsWith("host.") || control.startsWith("approval.") || control.startsWith("audit.")) return true;
+  if (control.startsWith("git.")) return event.startsWith("git.") || event === "file.stage.before";
+  if (control.startsWith("destructive.")) {
+    return event.includes(".apply") || event === "git.reset.before" || event === "git.checkout.before" || event === "git.rebase.before";
+  }
+  if (control.startsWith("persistence.") || control.startsWith("memory.")) {
+    return event.startsWith("memory.") || event.startsWith("context.");
+  }
+  if (control.startsWith("files.")) {
+    return event.startsWith("context.") || event.startsWith("memory.") || event === "file.stage.before" || event === "obsidian.write.before" || event === "graphify.generate.before" || event === "database.change.before";
+  }
+  return true;
 }
 
 function isInside(targetPath: string, rootPath: string): boolean {
