@@ -40,7 +40,7 @@ function v2Context(overrides: Record<string, unknown> = {}): Record<string, unkn
     permission: { hook: () => undefined },
     tool: { hook: () => undefined },
     shell: { hook: () => undefined },
-    event: { subscribe: () => undefined },
+    event: { subscribe: () => (async function* () {})() },
     storage: { get: async () => undefined, set: async () => undefined },
     ...overrides,
   };
@@ -61,7 +61,7 @@ describe("scaffold del plugin", () => {
     expect(fs.existsSync(stateFile())).toBe(false);
   });
 
-  test("V2 completo registra hooks criticos y degrada event", async () => {
+  test("V2 completo registra hooks criticos y stream de eventos", async () => {
     await plugin.setup(v2Context());
 
     const state = readState();
@@ -69,7 +69,7 @@ describe("scaffold del plugin", () => {
     expect(state.plugin).toBe("malahor");
     expect(state.schema).toBe(1);
     expect(state.criticalGaps).toEqual([]);
-    expect(state.degraded).toEqual(["event"]);
+    expect(state.degraded).toEqual([]);
     expect(state.capabilities).toMatchObject({
       session: true,
       permission: true,
@@ -78,7 +78,7 @@ describe("scaffold del plugin", () => {
       command: true,
       skill: true,
       tool: true,
-      event: false,
+      event: true,
       storage: true,
       "permission.evaluate": true,
       "tool.execute.before": true,

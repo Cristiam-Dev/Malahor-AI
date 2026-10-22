@@ -3,7 +3,7 @@
 // src/plugin/index.ts
 import fs6 from "node:fs";
 import os2 from "node:os";
-import path8 from "node:path";
+import path9 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -219,202 +219,60 @@ function mergeAliases(base, extra) {
   return merged;
 }
 
-// src/plugin/compaction.ts
-var MALAHOR_COMPACTION_MARKER = "<!-- malahor-compaction-protocol:v1 -->";
-async function checkpointBeforeCompaction(input, storage, options) {
-  const sessionID = stringValue(input.sessionID);
-  if (!sessionID)
-    return { ok: false, reason: "sessionID ausente" };
-  const directory = await resolveDirectory(sessionID, options);
-  const messageCount = Array.isArray(input.messages) ? input.messages.length : 0;
-  const value = {
-    schema: 1,
-    kind: "compaction.pending",
-    sessionID,
-    directory,
-    messageCount,
-    createdAt: new Date().toISOString(),
-    memoryTool: "mem_session_summary",
-    status: "pending"
-  };
-  const key = `compaction/${sessionID}`;
-  try {
-    await storage.set(key, value);
-    return { ok: true, key };
-  } catch (error) {
-    return { ok: false, key, reason: error instanceof Error ? error.message : String(error) };
-  }
-}
-function injectCompactionInstructions(input) {
-  const system = Array.isArray(input.system) ? input.system : [];
-  if (system.some((part) => isTextPart(part) && part.text.includes(MALAHOR_COMPACTION_MARKER)))
-    return false;
-  const instructions = `${MALAHOR_COMPACTION_MARKER}
-CHECKPOINT DE COMPACTACIÓN MALAHOR
-- Antes de continuar después de esta compactación, guarda un mem_session_summary en el scope activo.
-- Incluye objetivo, estado, decisiones, archivos relevantes, validaciones, bloqueos y próximo paso exacto.
-- No persistas secretos, tokens, passwords, PII innecesaria ni llaves privadas.
-- No afirmes que la memoria fue guardada hasta que mem_session_summary confirme éxito.`;
-  const last = system.at(-1);
-  if (isTextPart(last)) {
-    last.text = `${last.text}
-
-${instructions}`;
-  } else {
-    system.push({ type: "text", text: instructions });
-  }
-  input.system = system;
-  return true;
-}
-async function resolveDirectory(sessionID, options) {
-  if (options.resolveSessionDirectory) {
-    try {
-      const directory = await options.resolveSessionDirectory(sessionID);
-      if (directory)
-        return directory;
-    } catch {}
-  }
-  return options.cwd;
-}
-function stringValue(value) {
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-function isTextPart(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "text" && typeof value.text === "string";
-}
-
-// src/plugin/memory-nudge.ts
-import path3 from "node:path";
-var MALAHOR_MEMORY_NUDGE_MARKER = "<!-- malahor-memory-nudge:v1 -->";
-var DEFAULT_MEMORY_STALE_MINUTES = 15;
-async function maybeInjectMemoryNudge(input, storage, options) {
-  if (typeof storage.get !== "function")
-    return { ok: false, injected: false, reason: "ctx.storage.get no disponible" };
-  const sessionID = stringValue2(input.sessionID);
-  if (!sessionID)
-    return { ok: false, injected: false, reason: "sessionID ausente" };
-  const now = options.now ?? Date.now;
-  const timestamp = now();
-  const directory = await resolveDirectory2(sessionID, options);
-  const project = resolveProject(directory).canonicalKey;
-  const thresholdMs = staleMinutes(options) * 60000;
-  const sessionKey = `memory/nudge/${encodeURIComponent(sessionID)}`;
-  const freshnessKey = `memory/freshness/${encodeURIComponent(project)}`;
-  try {
-    const [sessionRecord, freshnessRecord] = await Promise.all([
-      storage.get(sessionKey),
-      storage.get(freshnessKey)
-    ]);
-    const session = recordValue(sessionRecord);
-    const freshness = recordValue(freshnessRecord);
-    const startedAt = timestampValue(session?.startedAt) ?? timestamp;
-    const lastNudgedAt = timestampValue(session?.lastNudgedAt);
-    const lastPersistedAt = timestampValue(freshness?.lastPersistedAt);
-    const reference = Math.max(startedAt, lastPersistedAt ?? 0);
-    if (!lastNudgedAt && !session) {
-      await storage.set(sessionKey, { schema: 1, sessionID, project, startedAt: new Date(timestamp).toISOString() });
-    }
-    if (timestamp - reference < thresholdMs || lastNudgedAt !== undefined && timestamp - lastNudgedAt < thresholdMs) {
-      return { ok: true, injected: false };
-    }
-    const injected = injectMemoryNudge(input, staleMinutes(options));
-    if (!injected)
-      return { ok: true, injected: false };
-    await storage.set(sessionKey, {
-      schema: 1,
-      sessionID,
-      project,
-      startedAt: new Date(startedAt).toISOString(),
-      lastNudgedAt: new Date(timestamp).toISOString()
-    });
-    return { ok: true, injected: true };
-  } catch (error) {
-    return { ok: false, injected: false, reason: error instanceof Error ? error.message : String(error) };
-  }
-}
-async function markMemoryPersisted(input, storage, options) {
-  const tool = stringValue2(input.tool)?.toLowerCase() ?? "";
-  if (input.status !== "completed" || !isMemoryPersistenceTool(tool))
-    return { ok: true, marked: false };
-  const sessionID = stringValue2(input.sessionID);
-  if (!sessionID)
-    return { ok: false, marked: false, reason: "sessionID ausente" };
-  const directory = await resolveDirectory2(sessionID, options);
-  const project = resolveProject(directory).canonicalKey;
-  const now = (options.now ?? Date.now)();
-  const key = `memory/freshness/${encodeURIComponent(project)}`;
-  try {
-    await storage.set(key, {
-      schema: 1,
-      project,
-      lastPersistedAt: new Date(now).toISOString(),
-      source: tool
-    });
-    return { ok: true, marked: true };
-  } catch (error) {
-    return { ok: false, marked: false, reason: error instanceof Error ? error.message : String(error) };
-  }
-}
-function injectMemoryNudge(input, minutes) {
-  const system = Array.isArray(input.system) ? input.system : [];
-  if (system.some((part) => isTextPart2(part) && part.text.includes(MALAHOR_MEMORY_NUDGE_MARKER)))
-    return false;
-  const instructions = `${MALAHOR_MEMORY_NUDGE_MARKER}
-RECORDATORIO DE MEMORIA MALAHOR
-La memoria operativa lleva más de ${minutes} minutos sin persistencia confirmada.
-Antes de continuar, guarda un mem_session_summary con objetivo, estado, decisiones, validaciones, bloqueos y próximo paso exacto. No guardes secretos ni PII innecesaria.`;
-  const last = system.at(-1);
-  if (isTextPart2(last))
-    last.text = `${last.text}
-
-${instructions}`;
-  else
-    system.push({ type: "text", text: instructions });
-  input.system = system;
-  return true;
-}
-function isMemoryPersistenceTool(tool) {
-  return tool.includes("mem_session_summary") || tool.includes("mem_save");
-}
-function staleMinutes(options) {
-  const configured = options.staleMinutes ?? Number(options.env?.MALAHOR_MEMORY_STALE_MINUTES);
-  if (!Number.isFinite(configured))
-    return DEFAULT_MEMORY_STALE_MINUTES;
-  return Math.min(24 * 60, Math.max(1, Math.floor(configured)));
-}
-async function resolveDirectory2(sessionID, options) {
-  if (options.resolveSessionDirectory) {
-    try {
-      const directory = await options.resolveSessionDirectory(sessionID);
-      if (directory)
-        return path3.resolve(directory);
-    } catch {}
-  }
-  return path3.resolve(options.cwd);
-}
-function timestampValue(value) {
-  if (typeof value !== "string")
-    return;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : undefined;
-}
-function stringValue2(value) {
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-function recordValue(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
-}
-function isTextPart2(value) {
-  const record = recordValue(value);
-  return record?.type === "text" && typeof record.text === "string";
-}
-
-// src/cli/core/hooks/plugin-adapter.ts
-import path7 from "node:path";
-
-// src/cli/core/hooks/audit.ts
+// src/cli/core/hooks/policy-loader.ts
 import fs3 from "node:fs";
-import path4 from "node:path";
+import path3 from "node:path";
+
+// src/cli/core/jsonc.ts
+function stripJsonComments(input) {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let index = 0;index < input.length; index += 1) {
+    const current = input[index];
+    const next = input[index + 1];
+    if (inLineComment) {
+      if (current === `
+`) {
+        inLineComment = false;
+        output += current;
+      }
+      continue;
+    }
+    if (inBlockComment) {
+      if (current === "*" && next === "/") {
+        inBlockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (!inString && current === "/" && next === "/") {
+      inLineComment = true;
+      index += 1;
+      continue;
+    }
+    if (!inString && current === "/" && next === "*") {
+      inBlockComment = true;
+      index += 1;
+      continue;
+    }
+    output += current;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (current === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (current === '"') {
+      inString = !inString;
+    }
+  }
+  return output;
+}
 
 // src/cli/core/hooks/security-policy.ts
 import { createHash } from "node:crypto";
@@ -711,17 +569,17 @@ function validateSecurityLayer(value, options) {
     const group = {};
     for (const [controlName, controlValue] of Object.entries(rawGroup)) {
       const expected = groupSchema[controlName];
-      const path4 = `${groupName}.${controlName}`;
+      const path3 = `${groupName}.${controlName}`;
       if (!expected) {
-        const message = `control desconocido: ${path4}`;
+        const message = `control desconocido: ${path3}`;
         if (options.strict)
           errors.push(message);
         else
           warnings.push(`${message}; se ignora.`);
         continue;
       }
-      if (!validControlValue(path4, controlValue, expected)) {
-        errors.push(`control invalido: ${path4}`);
+      if (!validControlValue(path3, controlValue, expected)) {
+        errors.push(`control invalido: ${path3}`);
         continue;
       }
       group[controlName] = controlValue;
@@ -758,30 +616,30 @@ function mergeSecurityLayers(layers) {
         const expected = groupSchema[controlName];
         if (!expected)
           continue;
-        const path4 = `${groupName}.${controlName}`;
+        const path3 = `${groupName}.${controlName}`;
         const current = target[controlName];
         if (expected === "const")
           continue;
         if (expected === "boolean") {
           if (current === true && value === false) {
-            warnings.push(`${sourceLabel(source)} intenta aflojar ${path4}; se conserva true.`);
+            warnings.push(`${sourceLabel(source)} intenta aflojar ${path3}; se conserva true.`);
           }
           target[controlName] = current === true || value === true;
           continue;
         }
         if (expected === "stringArray") {
-          const next = mergeArray(current, value, ARRAY_MODES[path4] ?? "intersect", path4, source, warnings);
+          const next = mergeArray(current, value, ARRAY_MODES[path3] ?? "intersect", path3, source, warnings);
           target[controlName] = next;
           continue;
         }
         if (expected === "integer") {
-          const mode = INTEGER_MODES[path4] ?? "min";
+          const mode = INTEGER_MODES[path3] ?? "min";
           if (current === undefined) {
             target[controlName] = value;
           } else {
             const next = mode === "min" ? Math.min(current, value) : Math.max(current, value);
             if (next !== value)
-              warnings.push(`${sourceLabel(source)} intenta aflojar ${path4}; se conserva ${next}.`);
+              warnings.push(`${sourceLabel(source)} intenta aflojar ${path3}; se conserva ${next}.`);
             target[controlName] = next;
           }
           continue;
@@ -789,7 +647,7 @@ function mergeSecurityLayers(layers) {
         if (current === undefined) {
           target[controlName] = value;
         } else if (current !== value) {
-          warnings.push(`${sourceLabel(source)} intenta cambiar ${path4}; se conserva ${String(current)}.`);
+          warnings.push(`${sourceLabel(source)} intenta cambiar ${path3}; se conserva ${String(current)}.`);
         }
       }
     }
@@ -797,7 +655,7 @@ function mergeSecurityLayers(layers) {
   return { controls, warnings, enabledPaths: enabledControlPaths(controls) };
 }
 function unenforcedControlPaths(layer) {
-  const paths = enabledControlPaths(layer.controls).filter((path4) => !ENFORCED_CONTROL_PATHS.has(path4));
+  const paths = enabledControlPaths(layer.controls).filter((path3) => !ENFORCED_CONTROL_PATHS.has(path3));
   for (const required of layer.controls.host?.requiredControls ?? []) {
     if (!ENFORCED_CONTROL_PATHS.has(required)) {
       paths.push(`host.required[${required}]`);
@@ -812,13 +670,13 @@ function enabledControlPaths(controls) {
     if (!group)
       continue;
     for (const [controlName, expected] of Object.entries(groupSchema)) {
-      const path4 = `${groupName}.${controlName}`;
-      if (IGNORED_GAP_PATHS.has(path4))
+      const path3 = `${groupName}.${controlName}`;
+      if (IGNORED_GAP_PATHS.has(path3))
         continue;
       const value = group[controlName];
       if (value === undefined || value === false)
         continue;
-      const gate = CONTROL_GATES[path4];
+      const gate = CONTROL_GATES[path3];
       if (gate) {
         const [gateGroup, gateControl] = gate.split(".");
         const gateValue = controls[gateGroup]?.[gateControl];
@@ -826,15 +684,15 @@ function enabledControlPaths(controls) {
           continue;
       }
       if (expected === "boolean") {
-        result.push(path4);
+        result.push(path3);
         continue;
       }
       if (expected === "stringArray") {
         if (Array.isArray(value) && value.length > 0)
-          result.push(path4);
+          result.push(path3);
         continue;
       }
-      result.push(path4);
+      result.push(path3);
     }
   }
   return result;
@@ -876,22 +734,22 @@ function canonicalJson(value) {
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
-function mergeArray(current, next, mode, path4, source, warnings) {
+function mergeArray(current, next, mode, path3, source, warnings) {
   if (current === undefined)
     return uniqueStrings(next);
   if (mode === "intersect") {
     const allowed = new Set(next);
     const result = current.filter((value) => allowed.has(value));
     if (next.some((value) => !current.includes(value))) {
-      warnings.push(`${sourceLabel(source)} intenta ampliar ${path4}; se conserva la interseccion.`);
+      warnings.push(`${sourceLabel(source)} intenta ampliar ${path3}; se conserva la interseccion.`);
     }
     return result;
   }
   return uniqueStrings([...current, ...next]);
 }
-function validControlValue(path4, value, expected) {
+function validControlValue(path3, value, expected) {
   if (expected === "const")
-    return Object.is(value, CONTROL_CONSTRAINTS[path4]);
+    return Object.is(value, CONTROL_CONSTRAINTS[path3]);
   if (expected === "boolean")
     return typeof value === "boolean";
   if (expected === "integer")
@@ -940,7 +798,697 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+// src/cli/core/hooks/policy-loader.ts
+var HOOK_PROFILES = ["off", "light", "standard", "strict", "release"];
+var PROFILE_RANK = {
+  off: 0,
+  light: 1,
+  standard: 2,
+  strict: 3,
+  release: 4
+};
+function loadHookPolicy(paths, project, profileOverride, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const defaultPath = hookDefaultPolicyPath(paths);
+  const projectPath = project ? hookProjectPolicyPath(paths, project) : null;
+  const sources = [];
+  const warnings = [];
+  const layerInputs = [];
+  const sourceMeta = [builtInSource()];
+  const criticalGaps = [];
+  const corp = resolveCorporatePolicyPath(options, env, platform);
+  const explicitCorporate = options.corporatePath !== undefined && options.corporatePath !== null || Boolean(env.MALAHOR_CORPORATE_POLICY);
+  const corporateRequired = options.corporateRequired ?? (explicitCorporate || env.MALAHOR_CORPORATE_POLICY_REQUIRED === "1");
+  let corporateStatus = "absent";
+  let corporateLayer;
+  let corporateProfileFloor;
+  let merged = defaultPolicy(profileOverride ?? "standard");
+  if (corp.path && fs3.existsSync(corp.path)) {
+    const trust = verifyCorporatePolicyTrust(corp.path, platform);
+    if (!trust.ok) {
+      corporateStatus = "untrusted";
+      warnings.push(`${corp.path}: politica corporativa no confiable: ${trust.reason}`);
+      sourceMeta.push(corporateSource(corp.path, "untrusted", trust.reason));
+    } else {
+      const read = readPolicyFile(corp.path, true, true, warnings);
+      if (read?.kind === "security") {
+        corporateStatus = "valid";
+        corporateLayer = read.layer;
+        corporateProfileFloor = read.layer.profile;
+        if (read.layer.profile === "off") {
+          warnings.push(`${corp.path}: perfil corporativo off no desactiva controles criticos.`);
+        }
+        for (const gap of unenforcedControlPaths(read.layer)) {
+          criticalGaps.push(`corporate:${gap}`);
+        }
+        layerInputs.push({
+          layer: read.layer,
+          source: corporateSource(corp.path, "valid", undefined, read)
+        });
+        sourceMeta.push(corporateSource(corp.path, "valid", undefined, read));
+        sources.push(corp.path);
+      } else {
+        corporateStatus = "invalid";
+        const message = read?.kind === "invalid" ? read.message : "la politica corporativa debe ser v1";
+        warnings.push(`${corp.path}: politica corporativa invalida: ${message}`);
+        sourceMeta.push(corporateSource(corp.path, "invalid", message, read));
+      }
+    }
+  } else if (corporateRequired) {
+    corporateStatus = "required-missing";
+    warnings.push("politica corporativa obligatoria ausente; las operaciones sensibles quedan bloqueadas.");
+    sourceMeta.push(corporateSource(corp.path ?? "<required>", "invalid", "archivo obligatorio ausente"));
+  }
+  const defaultFile = readPolicyFile(defaultPath, false, false, warnings);
+  if (defaultFile) {
+    merged = mergePolicyFile("local", defaultPath, defaultFile, layerInputs, sourceMeta, sources, criticalGaps, warnings, merged);
+  }
+  if (projectPath) {
+    const projectFile = readPolicyFile(projectPath, false, false, warnings);
+    if (projectFile) {
+      merged = mergePolicyFile("project", projectPath, projectFile, layerInputs, sourceMeta, sources, criticalGaps, warnings, merged);
+    }
+  }
+  if (profileOverride) {
+    if (profileOverride === "off") {
+      warnings.push("perfil off no desactiva controles criticos; se conserva el suelo.");
+    }
+    merged = mergePolicy(merged, { profile: profileOverride });
+  }
+  if (corporateProfileFloor && PROFILE_RANK[merged.profile] < PROFILE_RANK[corporateProfileFloor]) {
+    warnings.push(`perfil corporativo ${corporateProfileFloor}: no se permite bajarlo a ${merged.profile}.`);
+    merged = mergePolicy(merged, { profile: corporateProfileFloor });
+  }
+  const securityMerge = mergeSecurityLayers(layerInputs);
+  warnings.push(...securityMerge.warnings);
+  merged = applyLegacySecurityFloor(merged, securityMerge.controls);
+  const policyHash = securityControlsHash(securityMerge.controls, merged.profile);
+  const policyMeta = {
+    contractVersion: 1,
+    schemaVersion: 1,
+    policyVersion: corporateLayer?.policyVersion ?? latestSecurityLayer(layerInputs)?.policyVersion ?? "built-in",
+    issuer: corporateLayer?.issuer ?? latestSecurityLayer(layerInputs)?.issuer ?? "malahor-built-in",
+    issuedAt: corporateLayer?.issuedAt ?? latestSecurityLayer(layerInputs)?.issuedAt,
+    policyHash,
+    sources: sourceMeta,
+    corporateStatus,
+    corporateRequired,
+    corporatePath: corp.path ?? undefined,
+    criticalGaps: uniqueStrings2(criticalGaps),
+    warnings: uniqueStrings2(warnings)
+  };
+  return {
+    policy: merged,
+    security: securityMerge.controls,
+    policyMeta,
+    policyHash,
+    defaultPath,
+    projectPath,
+    corporatePath: corp.path ?? null,
+    sources,
+    warnings: policyMeta.warnings
+  };
+}
+function hookDefaultPolicyPath(paths) {
+  return path3.join(paths.malahorHome, "policies", "default.jsonc");
+}
+function hookProjectPolicyPath(paths, project) {
+  return path3.join(paths.malahorHome, "policies", "projects", `${projectLookupKey(project) || "project"}.jsonc`);
+}
+function parseHookProfile(value) {
+  if (HOOK_PROFILES.includes(value))
+    return value;
+  throw new Error(`Perfil hooks invalido: ${value}. Usa ${HOOK_PROFILES.join(", ")}.`);
+}
+function mergePolicyFile(kind, filePath, read, layerInputs, sourceMeta, sources, criticalGaps, warnings, currentPolicy) {
+  if (read.kind === "invalid") {
+    warnings.push(`${filePath}: ${read.message}; se ignora la capa.`);
+    sourceMeta.push({
+      kind,
+      authority: kind === "project" ? 2 : 3,
+      path: filePath,
+      status: "invalid",
+      sha256: read.rawHash,
+      message: read.message
+    });
+    return currentPolicy;
+  }
+  if (read.kind === "security") {
+    const source = sourceForLayer(kind, filePath, read);
+    layerInputs.push({ layer: read.layer, source });
+    sourceMeta.push(source);
+    sources.push(filePath);
+    for (const gap of unenforcedControlPaths(read.layer)) {
+      criticalGaps.push(`${kind}:${gap}`);
+    }
+    if (read.layer.profile) {
+      if (read.layer.profile === "off") {
+        warnings.push(`${filePath}: profile off no desactiva controles criticos; se conserva el suelo.`);
+      }
+      return mergePolicy(currentPolicy, { profile: read.layer.profile });
+    }
+    return currentPolicy;
+  }
+  warnLegacyLoosening(filePath, read.file, currentPolicy, warnings);
+  sourceMeta.push({
+    kind,
+    authority: kind === "project" ? 2 : 3,
+    path: filePath,
+    status: "valid",
+    schemaVersion: 0,
+    contractVersion: 0,
+    sha256: read.rawHash
+  });
+  sources.push(filePath);
+  return mergePolicy(currentPolicy, read.file);
+}
+function readPolicyFile(filePath, strictSecurity, requireSecurity, warnings) {
+  if (!fs3.existsSync(filePath))
+    return null;
+  let raw;
+  try {
+    raw = fs3.readFileSync(filePath, "utf8").trim();
+  } catch (error) {
+    return { kind: "invalid", message: error.message };
+  }
+  if (!raw) {
+    return requireSecurity ? { kind: "invalid", message: "la politica corporativa esta vacia", rawHash: sha256("") } : { kind: "legacy", file: {}, rawHash: sha256("") };
+  }
+  const rawHash = sha256(raw);
+  let parsed;
+  try {
+    parsed = JSON.parse(stripJsonComments(raw));
+  } catch (error) {
+    return { kind: "invalid", message: `JSON invalido: ${error.message}`, rawHash };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { kind: "invalid", message: "la raiz debe ser un objeto JSON", rawHash };
+  }
+  const record = parsed;
+  if (record.schemaVersion !== undefined) {
+    const validated = validateSecurityLayer(parsed, { strict: strictSecurity });
+    warnings.push(...validated.warnings.map((warning) => `${filePath}: ${warning}`));
+    if (!validated.ok || !validated.layer) {
+      return { kind: "invalid", message: validated.errors.join("; "), rawHash };
+    }
+    return { kind: "security", layer: validated.layer, rawHash };
+  }
+  if (requireSecurity) {
+    return { kind: "invalid", message: "la politica corporativa debe declarar schemaVersion: 1", rawHash };
+  }
+  if (record.controls !== undefined || record.contractVersion !== undefined || record.issuer !== undefined || record.issuedAt !== undefined || record.policyVersion !== undefined) {
+    return { kind: "invalid", message: "la politica declara campos v1 pero falta schemaVersion: 1", rawHash };
+  }
+  if (typeof record.profile === "string" && !HOOK_PROFILES.includes(record.profile)) {
+    warnings.push(`${filePath}: profile invalido ${record.profile}; se ignora.`);
+    delete record.profile;
+  }
+  return { kind: "legacy", file: record, rawHash };
+}
+function resolveCorporatePolicyPath(options, env, platform) {
+  if (options.corporatePath === null)
+    return { path: null };
+  const configured = options.corporatePath ?? env.MALAHOR_CORPORATE_POLICY ?? defaultCorporatePolicyPath(platform, env);
+  return { path: configured ? path3.resolve(configured) : null };
+}
+function defaultCorporatePolicyPath(platform = process.platform, env = process.env) {
+  if (platform === "win32") {
+    return path3.win32.join(env.ProgramData ?? "C:\\ProgramData", "Malahor", "security-policy.json");
+  }
+  if (platform === "darwin") {
+    return "/Library/Application Support/Malahor/security-policy.json";
+  }
+  return "/etc/malahor/security-policy.json";
+}
+function verifyCorporatePolicyTrust(filePath, platform) {
+  if (platform === "win32") {
+    return { ok: false, reason: "verificacion de ACL de Windows pendiente; se aplica fail-closed" };
+  }
+  try {
+    const stat = fs3.lstatSync(filePath);
+    if (stat.isSymbolicLink())
+      return { ok: false, reason: "el archivo no puede ser un symlink" };
+    if (!stat.isFile())
+      return { ok: false, reason: "no es un archivo regular" };
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (uid === undefined)
+      return { ok: false, reason: "no se puede verificar el propietario" };
+    if (stat.uid !== 0)
+      return { ok: false, reason: "debe ser propiedad de root/administrador" };
+    if ((stat.mode & 18) !== 0)
+      return { ok: false, reason: "no debe ser escribible por grupo/otros" };
+    const parent = fs3.lstatSync(path3.dirname(filePath));
+    if (parent.uid !== 0)
+      return { ok: false, reason: "el directorio contenedor debe ser propiedad de root/administrador" };
+    if ((parent.mode & 18) !== 0)
+      return { ok: false, reason: "el directorio contenedor no debe ser escribible por grupo/otros" };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: error.message };
+  }
+}
+function builtInSource() {
+  return {
+    kind: "built-in",
+    authority: 0,
+    status: "valid",
+    schemaVersion: 1,
+    contractVersion: 1,
+    policyVersion: "built-in",
+    issuer: "malahor",
+    sha256: securityControlsHash(BUILT_IN_SECURITY_CONTROLS)
+  };
+}
+function corporateSource(filePath, status, message, read) {
+  return {
+    kind: "corporate",
+    authority: 1,
+    path: filePath,
+    status,
+    schemaVersion: read?.kind === "security" ? 1 : undefined,
+    contractVersion: read?.kind === "security" ? 1 : undefined,
+    policyVersion: read?.kind === "security" ? read.layer.policyVersion : undefined,
+    issuer: read?.kind === "security" ? read.layer.issuer : undefined,
+    issuedAt: read?.kind === "security" ? read.layer.issuedAt : undefined,
+    sha256: read?.rawHash,
+    message
+  };
+}
+function sourceForLayer(kind, filePath, read) {
+  return {
+    kind,
+    authority: kind === "project" ? 2 : 3,
+    path: filePath,
+    status: "valid",
+    schemaVersion: 1,
+    contractVersion: 1,
+    policyVersion: read.layer.policyVersion,
+    issuer: read.layer.issuer,
+    issuedAt: read.layer.issuedAt,
+    sha256: read.rawHash
+  };
+}
+function latestSecurityLayer(layers) {
+  return layers.at(-1)?.layer;
+}
+function defaultPolicy(profile) {
+  const enabled = profile !== "off";
+  const standardOrHigher = profile === "standard" || profile === "strict" || profile === "release";
+  const strictOrRelease = profile === "strict" || profile === "release";
+  return {
+    profile,
+    git: {
+      blockDestructiveCommands: enabled,
+      requireChecksBeforePush: strictOrRelease,
+      validateCommitMessage: standardOrHigher
+    },
+    secrets: {
+      scanBeforeCommit: enabled
+    },
+    memory: {
+      destructiveRequiresPreview: enabled
+    },
+    policy: {
+      enforceDeferredPolicy: enabled,
+      blockTotalBashDeny: enabled
+    },
+    quality: {
+      warnLargeFiles: standardOrHigher,
+      warnGenericModules: profile === "strict" || profile === "release"
+    }
+  };
+}
+function mergePolicy(base, file) {
+  const profile = typeof file.profile === "string" ? parseHookProfile(file.profile) : base.profile;
+  const withProfile = profile === base.profile ? base : defaultPolicy(profile);
+  return {
+    profile,
+    git: {
+      ...withProfile.git,
+      ...booleanRecord(file.git, withProfile.git)
+    },
+    secrets: {
+      ...withProfile.secrets,
+      ...booleanRecord(file.secrets, withProfile.secrets)
+    },
+    memory: {
+      ...withProfile.memory,
+      ...booleanRecord(file.memory, withProfile.memory)
+    },
+    policy: {
+      ...withProfile.policy,
+      ...booleanRecord(file.policy, withProfile.policy)
+    },
+    quality: {
+      ...withProfile.quality,
+      ...booleanRecord(file.quality, withProfile.quality)
+    }
+  };
+}
+function warnLegacyLoosening(filePath, file, current, warnings) {
+  if (file.profile === "off" && current.profile !== "off") {
+    warnings.push(`${filePath}: profile off no desactiva controles criticos; se conserva el suelo.`);
+  }
+  const critical = [
+    ["git.blockDestructiveCommands", file.git?.blockDestructiveCommands, current.git.blockDestructiveCommands],
+    ["secrets.scanBeforeCommit", file.secrets?.scanBeforeCommit, current.secrets.scanBeforeCommit],
+    ["memory.destructiveRequiresPreview", file.memory?.destructiveRequiresPreview, current.memory.destructiveRequiresPreview],
+    ["policy.enforceDeferredPolicy", file.policy?.enforceDeferredPolicy, current.policy.enforceDeferredPolicy],
+    ["policy.blockTotalBashDeny", file.policy?.blockTotalBashDeny, current.policy.blockTotalBashDeny]
+  ];
+  for (const [key, value, previous] of critical) {
+    if (value === false && previous) {
+      warnings.push(`${filePath}: intento de aflojar ${key}; se conserva el suelo.`);
+    }
+  }
+}
+function booleanRecord(value, shape) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return {};
+  const result = {};
+  for (const key of Object.keys(shape)) {
+    const next = value[String(key)];
+    if (typeof next === "boolean") {
+      result[key] = next;
+    }
+  }
+  return result;
+}
+function uniqueStrings2(values) {
+  return [...new Set(values)];
+}
+
+// src/plugin/compaction.ts
+var MALAHOR_COMPACTION_MARKER = "<!-- malahor-compaction-protocol:v1 -->";
+async function checkpointBeforeCompaction(input, storage, options) {
+  const sessionID = stringValue(input.sessionID);
+  if (!sessionID)
+    return { ok: false, reason: "sessionID ausente" };
+  const directory = await resolveDirectory(sessionID, options);
+  const messageCount = Array.isArray(input.messages) ? input.messages.length : 0;
+  const value = {
+    schema: 1,
+    kind: "compaction.pending",
+    sessionID,
+    directory,
+    messageCount,
+    createdAt: new Date().toISOString(),
+    memoryTool: "mem_session_summary",
+    status: "pending"
+  };
+  const key = `compaction/${sessionID}`;
+  try {
+    await storage.set(key, value);
+    return { ok: true, key };
+  } catch (error) {
+    return { ok: false, key, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+function injectCompactionInstructions(input) {
+  const system = Array.isArray(input.system) ? input.system : [];
+  if (system.some((part) => isTextPart(part) && part.text.includes(MALAHOR_COMPACTION_MARKER)))
+    return false;
+  const instructions = `${MALAHOR_COMPACTION_MARKER}
+CHECKPOINT DE COMPACTACIÓN MALAHOR
+- Antes de continuar después de esta compactación, guarda un mem_session_summary en el scope activo.
+- Incluye objetivo, estado, decisiones, archivos relevantes, validaciones, bloqueos y próximo paso exacto.
+- No persistas secretos, tokens, passwords, PII innecesaria ni llaves privadas.
+- No afirmes que la memoria fue guardada hasta que mem_session_summary confirme éxito.`;
+  const last = system.at(-1);
+  if (isTextPart(last)) {
+    last.text = `${last.text}
+
+${instructions}`;
+  } else {
+    system.push({ type: "text", text: instructions });
+  }
+  input.system = system;
+  return true;
+}
+async function resolveDirectory(sessionID, options) {
+  if (options.resolveSessionDirectory) {
+    try {
+      const directory = await options.resolveSessionDirectory(sessionID);
+      if (directory)
+        return directory;
+    } catch {}
+  }
+  return options.cwd;
+}
+function stringValue(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+function isTextPart(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "text" && typeof value.text === "string";
+}
+
+// src/plugin/memory-nudge.ts
+import path4 from "node:path";
+var MALAHOR_MEMORY_NUDGE_MARKER = "<!-- malahor-memory-nudge:v1 -->";
+var DEFAULT_MEMORY_STALE_MINUTES = 15;
+async function maybeInjectMemoryNudge(input, storage, options) {
+  if (typeof storage.get !== "function")
+    return { ok: false, injected: false, reason: "ctx.storage.get no disponible" };
+  const sessionID = stringValue2(input.sessionID);
+  if (!sessionID)
+    return { ok: false, injected: false, reason: "sessionID ausente" };
+  const now = options.now ?? Date.now;
+  const timestamp = now();
+  const directory = await resolveDirectory2(sessionID, options);
+  const project = resolveProject(directory).canonicalKey;
+  const thresholdMs = staleMinutes(options) * 60000;
+  const sessionKey = `memory/nudge/${encodeURIComponent(sessionID)}`;
+  const freshnessKey = `memory/freshness/${encodeURIComponent(project)}`;
+  try {
+    const [sessionRecord, freshnessRecord] = await Promise.all([
+      storage.get(sessionKey),
+      storage.get(freshnessKey)
+    ]);
+    const session = recordValue(sessionRecord);
+    const freshness = recordValue(freshnessRecord);
+    const startedAt = timestampValue(session?.startedAt) ?? timestamp;
+    const lastNudgedAt = timestampValue(session?.lastNudgedAt);
+    const lastPersistedAt = timestampValue(freshness?.lastPersistedAt);
+    const reference = Math.max(startedAt, lastPersistedAt ?? 0);
+    if (!lastNudgedAt && !session) {
+      await storage.set(sessionKey, { schema: 1, sessionID, project, startedAt: new Date(timestamp).toISOString() });
+    }
+    if (timestamp - reference < thresholdMs || lastNudgedAt !== undefined && timestamp - lastNudgedAt < thresholdMs) {
+      return { ok: true, injected: false };
+    }
+    const injected = injectMemoryNudge(input, staleMinutes(options));
+    if (!injected)
+      return { ok: true, injected: false };
+    await storage.set(sessionKey, {
+      schema: 1,
+      sessionID,
+      project,
+      startedAt: new Date(startedAt).toISOString(),
+      lastNudgedAt: new Date(timestamp).toISOString()
+    });
+    return { ok: true, injected: true };
+  } catch (error) {
+    return { ok: false, injected: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function markMemoryPersisted(input, storage, options) {
+  const tool = stringValue2(input.tool)?.toLowerCase() ?? "";
+  if (input.status !== "completed" || !isMemoryPersistenceTool(tool))
+    return { ok: true, marked: false };
+  const sessionID = stringValue2(input.sessionID);
+  if (!sessionID)
+    return { ok: false, marked: false, reason: "sessionID ausente" };
+  const directory = await resolveDirectory2(sessionID, options);
+  const project = resolveProject(directory).canonicalKey;
+  const now = (options.now ?? Date.now)();
+  const key = `memory/freshness/${encodeURIComponent(project)}`;
+  try {
+    await storage.set(key, {
+      schema: 1,
+      project,
+      lastPersistedAt: new Date(now).toISOString(),
+      source: tool
+    });
+    return { ok: true, marked: true };
+  } catch (error) {
+    return { ok: false, marked: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+function injectMemoryNudge(input, minutes) {
+  const system = Array.isArray(input.system) ? input.system : [];
+  if (system.some((part) => isTextPart2(part) && part.text.includes(MALAHOR_MEMORY_NUDGE_MARKER)))
+    return false;
+  const instructions = `${MALAHOR_MEMORY_NUDGE_MARKER}
+RECORDATORIO DE MEMORIA MALAHOR
+La memoria operativa lleva más de ${minutes} minutos sin persistencia confirmada.
+Antes de continuar, guarda un mem_session_summary con objetivo, estado, decisiones, validaciones, bloqueos y próximo paso exacto. No guardes secretos ni PII innecesaria.`;
+  const last = system.at(-1);
+  if (isTextPart2(last))
+    last.text = `${last.text}
+
+${instructions}`;
+  else
+    system.push({ type: "text", text: instructions });
+  input.system = system;
+  return true;
+}
+function isMemoryPersistenceTool(tool) {
+  return tool.includes("mem_session_summary") || tool.includes("mem_save");
+}
+function staleMinutes(options) {
+  const configured = options.staleMinutes ?? Number(options.env?.MALAHOR_MEMORY_STALE_MINUTES);
+  if (!Number.isFinite(configured))
+    return DEFAULT_MEMORY_STALE_MINUTES;
+  return Math.min(24 * 60, Math.max(1, Math.floor(configured)));
+}
+async function resolveDirectory2(sessionID, options) {
+  if (options.resolveSessionDirectory) {
+    try {
+      const directory = await options.resolveSessionDirectory(sessionID);
+      if (directory)
+        return path4.resolve(directory);
+    } catch {}
+  }
+  return path4.resolve(options.cwd);
+}
+function timestampValue(value) {
+  if (typeof value !== "string")
+    return;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+function stringValue2(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+function recordValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function isTextPart2(value) {
+  const record = recordValue(value);
+  return record?.type === "text" && typeof record.text === "string";
+}
+
+// src/plugin/events.ts
+import path5 from "node:path";
+var SESSION_LIFECYCLE_EVENTS = new Set([
+  "session.created",
+  "session.execution.started",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+  "session.idle",
+  "session.compaction.ended",
+  "session.compaction.failed",
+  "session.deleted",
+  "session.forked",
+  "session.tool.success",
+  "session.tool.failed"
+]);
+function startEventCapture(domain, storage, options) {
+  const controller = new AbortController;
+  try {
+    const stream = domain.subscribe({ signal: controller.signal });
+    if (!stream || typeof stream[Symbol.asyncIterator] !== "function") {
+      return { ok: false, cleanup: () => controller.abort(), done: Promise.resolve() };
+    }
+    const done = consumeEvents(stream, storage, options).catch((error) => {
+      options.onError?.(error instanceof Error ? error.message : String(error));
+    });
+    return { ok: true, cleanup: () => controller.abort(), done };
+  } catch (error) {
+    options.onError?.(error instanceof Error ? error.message : String(error));
+    return { ok: false, cleanup: () => controller.abort(), done: Promise.resolve() };
+  }
+}
+async function consumeEvents(stream, storage, options) {
+  for await (const event of stream) {
+    const record = await eventRecord(event, options);
+    if (!record)
+      continue;
+    try {
+      await storage.set(record.key, record.value);
+    } catch (error) {
+      options.onError?.(`persistencia de evento degradada: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+async function eventRecord(value, options) {
+  const event = recordValue2(value);
+  if (!event || typeof event.type !== "string" || !SESSION_LIFECYCLE_EVENTS.has(event.type))
+    return null;
+  const data = recordValue2(event.data) ?? {};
+  const sessionID = stringValue3(data.sessionID) ?? stringValue3(event.aggregateID);
+  if (!sessionID)
+    return null;
+  const parentID = stringValue3(data.parentID);
+  const agent = stringValue3(data.agent);
+  const subagent = Boolean(parentID) || Boolean(agent?.startsWith("malahor-"));
+  if (subagent && !options.captureSubagentsOptIn)
+    return null;
+  const directory = stringValue3(recordValue2(data.location)?.directory) ?? stringValue3(recordValue2(event.location)?.directory) ?? await resolveDirectory3(sessionID, options);
+  const project = resolveProject(directory).canonicalKey;
+  const eventID = stringValue3(event.id) ?? stringValue3(event.seq) ?? `${event.type}:${sessionID}:${event.created ?? Date.now()}`;
+  const key = `session/events/${encodeURIComponent(project)}/${encodeURIComponent(eventID)}`;
+  return {
+    key,
+    value: {
+      schema: 1,
+      kind: "session.event",
+      type: event.type,
+      eventID,
+      sessionID,
+      project,
+      ...agent ? { agent } : {},
+      ...parentID ? { parentID } : {},
+      subagent,
+      occurredAt: new Date(timestampValue2(event.created) ?? Date.now()).toISOString(),
+      status: statusForEvent(event.type)
+    }
+  };
+}
+async function resolveDirectory3(sessionID, options) {
+  if (options.resolveSessionDirectory) {
+    try {
+      const directory = await options.resolveSessionDirectory(sessionID);
+      if (directory)
+        return path5.resolve(directory);
+    } catch {}
+  }
+  return path5.resolve(options.cwd);
+}
+function statusForEvent(type) {
+  if (type.endsWith(".succeeded") || type.endsWith(".success") || type === "session.idle")
+    return "succeeded";
+  if (type.endsWith(".failed"))
+    return "failed";
+  if (type.endsWith(".interrupted"))
+    return "interrupted";
+  return "observed";
+}
+function timestampValue2(value) {
+  if (typeof value === "number" && Number.isFinite(value))
+    return value;
+  if (typeof value === "string") {
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp))
+      return timestamp;
+  }
+  return;
+}
+function stringValue3(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+function recordValue2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+// src/cli/core/hooks/plugin-adapter.ts
+import path8 from "node:path";
+
 // src/cli/core/hooks/audit.ts
+import fs4 from "node:fs";
+import path6 from "node:path";
 var AUDIT_VERSION = 1;
 var MAX_AUDIT_BYTES = 5 * 1024 * 1024;
 var DEFAULT_MAX_FILES = 10;
@@ -955,17 +1503,17 @@ function writeAudit(context, result, options = {}) {
     return { ok: true, skipped: true, required, path: filePath };
   }
   try {
-    const directory = path4.dirname(filePath);
+    const directory = path6.dirname(filePath);
     const directoryMode = parseMode(context.security?.audit?.directoryMode, 448);
     const fileMode = parseMode(context.security?.audit?.fileMode, 384);
     const prefix = auditFilePrefix(filePath);
     ensureAuditDirectory(directory, directoryMode, context.malahorHome);
     rotateIfNeeded(filePath, directory, options.now ?? new Date, fileMode, prefix);
     const entry = buildAuditEntry(context, result, options.now ?? new Date);
-    fs3.appendFileSync(filePath, `${JSON.stringify(entry)}
+    fs4.appendFileSync(filePath, `${JSON.stringify(entry)}
 `, { encoding: "utf8", mode: fileMode, flag: "a" });
     secureChmod(filePath, fileMode);
-    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path4.basename(filePath), prefix);
+    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path6.basename(filePath), prefix);
     return { ok: true, skipped: false, required, path: filePath };
   } catch (error) {
     return {
@@ -982,18 +1530,18 @@ function approvalRefForAudit(nonce) {
 }
 function auditFilePath(malahorHome, overridePath, cwd = process.cwd()) {
   if (overridePath) {
-    const expanded = overridePath.startsWith("~/") ? path4.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
-    return path4.resolve(cwd, expanded);
+    const expanded = overridePath.startsWith("~/") ? path6.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
+    return path6.resolve(cwd, expanded);
   }
-  return path4.join(malahorHome, "audit", "security.jsonl");
+  return path6.join(malahorHome, "audit", "security.jsonl");
 }
 function auditFilePrefix(filePath) {
-  const base = path4.basename(filePath);
+  const base = path6.basename(filePath);
   return base.endsWith(".jsonl") ? base.slice(0, -6) : base;
 }
 function buildAuditEntry(context, result, now = new Date) {
   const policy = result.policy ?? context.policyMeta;
-  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(path4.normalize(path4.resolve(context.cwd, target)))}`))].sort();
+  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(path6.normalize(path6.resolve(context.cwd, target)))}`))].sort();
   const policyHash = policy?.policyHash ? `sha256:${policy.policyHash}` : "sha256:unknown";
   return {
     auditVersion: AUDIT_VERSION,
@@ -1022,52 +1570,52 @@ function auditHost() {
   return process.platform;
 }
 function ensureAuditDirectory(directory, mode, managedRoot) {
-  if (fs3.existsSync(directory)) {
-    const stat = fs3.lstatSync(directory);
+  if (fs4.existsSync(directory)) {
+    const stat = fs4.lstatSync(directory);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error("directorio de auditoria invalido");
     }
     if (isWithin(directory, managedRoot))
       secureChmod(directory, mode);
   } else {
-    fs3.mkdirSync(directory, { recursive: true, mode });
+    fs4.mkdirSync(directory, { recursive: true, mode });
     secureChmod(directory, mode);
   }
 }
 function isWithin(target, root) {
-  const relative = path4.relative(path4.resolve(root), path4.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path4.isAbsolute(relative);
+  const relative = path6.relative(path6.resolve(root), path6.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path6.isAbsolute(relative);
 }
 function rotateIfNeeded(filePath, directory, now, fileMode, prefix) {
-  if (!fs3.existsSync(filePath))
+  if (!fs4.existsSync(filePath))
     return;
-  const stat = fs3.lstatSync(filePath);
+  const stat = fs4.lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error("archivo de auditoria invalido");
   }
   if (stat.size < MAX_AUDIT_BYTES)
     return;
-  const base = path4.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
+  const base = path6.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
   let rotated = `${base}.jsonl`;
   let suffix = 1;
-  while (fs3.existsSync(rotated)) {
+  while (fs4.existsSync(rotated)) {
     rotated = `${base}.${suffix}.jsonl`;
     suffix += 1;
   }
-  fs3.renameSync(filePath, rotated);
+  fs4.renameSync(filePath, rotated);
   secureChmod(rotated, fileMode);
 }
 function pruneAuditFiles(directory, maxFiles, retentionDays, now, activeName, prefix) {
   const keep = Math.max(1, maxFiles);
   const cutoff = now.getTime() - Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
-  const entries = fs3.readdirSync(directory).filter((name) => name !== activeName && name.startsWith(`${prefix}.`) && name.endsWith(".jsonl")).map((name) => {
-    const filePath = path4.join(directory, name);
-    const stat = fs3.statSync(filePath);
+  const entries = fs4.readdirSync(directory).filter((name) => name !== activeName && name.startsWith(`${prefix}.`) && name.endsWith(".jsonl")).map((name) => {
+    const filePath = path6.join(directory, name);
+    const stat = fs4.statSync(filePath);
     return { filePath, mtime: stat.mtimeMs };
   }).sort((left, right) => right.mtime - left.mtime);
   for (const [index, entry] of entries.entries()) {
     if (index >= keep - 1 || entry.mtime < cutoff) {
-      fs3.unlinkSync(entry.filePath);
+      fs4.unlinkSync(entry.filePath);
     }
   }
 }
@@ -1083,7 +1631,7 @@ function parseMode(value, fallback) {
 }
 function secureChmod(target, mode) {
   try {
-    fs3.chmodSync(target, mode);
+    fs4.chmodSync(target, mode);
   } catch (error) {
     if (process.platform !== "win32")
       throw error;
@@ -1095,8 +1643,8 @@ var TRUSTED_CHANNELS = new Set(["cli-tty", "opencode-ui", "host-ui"]);
 
 // src/cli/core/hooks/rules.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
-import fs4 from "node:fs";
-import path5 from "node:path";
+import fs5 from "node:fs";
+import path7 from "node:path";
 
 // src/cli/core/hooks/types.ts
 var CODE_MODE_TOOL_NAMES = new Set([
@@ -1156,7 +1704,7 @@ function repoBoundaryGuard(context) {
   const writesMalahorData = Boolean(context.metadata?.writesMalahorData);
   if (!writesMalahorData || !context.targetPaths || context.targetPaths.length === 0)
     return [];
-  const unsafe = context.targetPaths.map((targetPath) => path5.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
+  const unsafe = context.targetPaths.map((targetPath) => path7.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
   if (unsafe.length === 0)
     return [];
   return [{
@@ -1387,13 +1935,13 @@ function fileBoundaryGuard(context) {
   if (context.event !== "file.read.before" && context.event !== "file.write.before")
     return [];
   const controls = context.security?.files;
-  const paths = (context.targetPaths ?? []).map((target) => path5.resolve(context.cwd, target));
+  const paths = (context.targetPaths ?? []).map((target) => path7.resolve(context.cwd, target));
   if (paths.length === 0)
     return [];
   const violations = [];
   const write = context.event === "file.write.before";
   const roots = (write ? controls?.allowedWriteRoots : controls?.allowedReadRoots) ?? [];
-  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path5.resolve(context.cwd, root));
+  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path7.resolve(context.cwd, root));
   const enforceRoots = controls?.enforceRoots === true;
   for (const target of paths) {
     const canonical = resolveTargetPath(target, controls?.resolveSymlinks !== false);
@@ -1415,7 +1963,7 @@ function fileBoundaryGuard(context) {
         fix: "Limita la operacion al proyecto/raiz aprobada o genera aprobacion vinculada."
       });
     }
-    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path5.basename(canonical)));
+    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path7.basename(canonical)));
     if (denied) {
       violations.push({
         id: "MAL-HOOK-FILE-DENYLIST",
@@ -1625,25 +2173,25 @@ function isIndirectExecution(command) {
 }
 function resolveTargetPath(target, followSymlinks) {
   try {
-    if (fs4.existsSync(target)) {
-      return followSymlinks ? fs4.realpathSync(target) : path5.resolve(target);
+    if (fs5.existsSync(target)) {
+      return followSymlinks ? fs5.realpathSync(target) : path7.resolve(target);
     }
-    let parent = path5.dirname(target);
-    while (!fs4.existsSync(parent)) {
-      const next = path5.dirname(parent);
+    let parent = path7.dirname(target);
+    while (!fs5.existsSync(parent)) {
+      const next = path7.dirname(parent);
       if (next === parent)
         return null;
       parent = next;
     }
-    const canonicalParent = followSymlinks ? fs4.realpathSync(parent) : path5.resolve(parent);
-    return path5.join(canonicalParent, path5.relative(parent, target));
+    const canonicalParent = followSymlinks ? fs5.realpathSync(parent) : path7.resolve(parent);
+    return path7.join(canonicalParent, path7.relative(parent, target));
   } catch {
     return null;
   }
 }
 function isSecretPath(target) {
   const normalized = target.replaceAll("\\", "/");
-  const base = path5.basename(normalized);
+  const base = path7.basename(normalized);
   if (base === ".env.example")
     return false;
   return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
@@ -1663,7 +2211,7 @@ function parseHttpUrl(value) {
 function programmingQualityGuard(context) {
   const violations = [];
   const files = context.targetPaths ?? [];
-  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path5.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path7.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -1684,7 +2232,7 @@ function programmingQualityGuard(context) {
   return violations;
 }
 function readableTargetPaths(context) {
-  return (context.targetPaths ?? []).map((targetPath) => path5.resolve(context.cwd, targetPath)).filter((targetPath) => fs4.existsSync(targetPath) && fs4.statSync(targetPath).isFile() && fs4.statSync(targetPath).size <= 512 * 1024);
+  return (context.targetPaths ?? []).map((targetPath) => path7.resolve(context.cwd, targetPath)).filter((targetPath) => fs5.existsSync(targetPath) && fs5.statSync(targetPath).isFile() && fs5.statSync(targetPath).size <= 512 * 1024);
 }
 function scanStagedSecrets(cwd, includeWorktree = false) {
   const commands = [
@@ -1706,8 +2254,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
       return null;
     }
     for (const relative of output.split("\x00").filter(Boolean)) {
-      const file = path5.resolve(cwd, relative);
-      if (!fs4.existsSync(file))
+      const file = path7.resolve(cwd, relative);
+      if (!fs5.existsSync(file))
         continue;
       try {
         leaks.push(...scanFileForSecrets(file));
@@ -1720,8 +2268,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
 }
 var PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function scanFileForSecrets(filePath) {
-  const basename = path5.basename(filePath);
-  const content = fs4.readFileSync(filePath, "utf8");
+  const basename = path7.basename(filePath);
+  const content = fs5.readFileSync(filePath, "utf8");
   const patterns = [
     [PRIVATE_KEY_PATTERN, "private-key"],
     [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
@@ -1748,7 +2296,7 @@ function strictness(profile, fallback) {
 }
 function fileSize(filePath) {
   try {
-    return fs4.statSync(filePath).size;
+    return fs5.statSync(filePath).size;
   } catch {
     return 0;
   }
@@ -1778,12 +2326,12 @@ function controlAffectsEvent(gap, event) {
   return true;
 }
 function isWithin2(targetPath, rootPath) {
-  const relative = path5.relative(path5.resolve(rootPath), path5.resolve(targetPath));
-  return relative === "" || !relative.startsWith("..") && !path5.isAbsolute(relative);
+  const relative = path7.relative(path7.resolve(rootPath), path7.resolve(targetPath));
+  return relative === "" || !relative.startsWith("..") && !path7.isAbsolute(relative);
 }
 function isInside(targetPath, rootPath) {
-  const relative = path5.relative(path5.resolve(rootPath), path5.resolve(targetPath));
-  return Boolean(relative) && !relative.startsWith("..") && !path5.isAbsolute(relative);
+  const relative = path7.relative(path7.resolve(rootPath), path7.resolve(targetPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path7.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/engine.ts
@@ -1857,447 +2405,11 @@ function strongestDecision(violations) {
   return violations.reduce((current, violation) => DECISION_WEIGHT[violation.decision] > DECISION_WEIGHT[current] ? violation.decision : current, "allow");
 }
 
-// src/cli/core/hooks/policy-loader.ts
-import fs5 from "node:fs";
-import path6 from "node:path";
-
-// src/cli/core/jsonc.ts
-function stripJsonComments(input) {
-  let output = "";
-  let inString = false;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-  for (let index = 0;index < input.length; index += 1) {
-    const current = input[index];
-    const next = input[index + 1];
-    if (inLineComment) {
-      if (current === `
-`) {
-        inLineComment = false;
-        output += current;
-      }
-      continue;
-    }
-    if (inBlockComment) {
-      if (current === "*" && next === "/") {
-        inBlockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-    if (!inString && current === "/" && next === "/") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-    if (!inString && current === "/" && next === "*") {
-      inBlockComment = true;
-      index += 1;
-      continue;
-    }
-    output += current;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (current === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (current === '"') {
-      inString = !inString;
-    }
-  }
-  return output;
-}
-
-// src/cli/core/hooks/policy-loader.ts
-var HOOK_PROFILES = ["off", "light", "standard", "strict", "release"];
-var PROFILE_RANK = {
-  off: 0,
-  light: 1,
-  standard: 2,
-  strict: 3,
-  release: 4
-};
-function loadHookPolicy(paths, project, profileOverride, options = {}) {
-  const platform = options.platform ?? process.platform;
-  const env = options.env ?? process.env;
-  const defaultPath = hookDefaultPolicyPath(paths);
-  const projectPath = project ? hookProjectPolicyPath(paths, project) : null;
-  const sources = [];
-  const warnings = [];
-  const layerInputs = [];
-  const sourceMeta = [builtInSource()];
-  const criticalGaps = [];
-  const corp = resolveCorporatePolicyPath(options, env, platform);
-  const explicitCorporate = options.corporatePath !== undefined && options.corporatePath !== null || Boolean(env.MALAHOR_CORPORATE_POLICY);
-  const corporateRequired = options.corporateRequired ?? (explicitCorporate || env.MALAHOR_CORPORATE_POLICY_REQUIRED === "1");
-  let corporateStatus = "absent";
-  let corporateLayer;
-  let corporateProfileFloor;
-  let merged = defaultPolicy(profileOverride ?? "standard");
-  if (corp.path && fs5.existsSync(corp.path)) {
-    const trust = verifyCorporatePolicyTrust(corp.path, platform);
-    if (!trust.ok) {
-      corporateStatus = "untrusted";
-      warnings.push(`${corp.path}: politica corporativa no confiable: ${trust.reason}`);
-      sourceMeta.push(corporateSource(corp.path, "untrusted", trust.reason));
-    } else {
-      const read = readPolicyFile(corp.path, true, true, warnings);
-      if (read?.kind === "security") {
-        corporateStatus = "valid";
-        corporateLayer = read.layer;
-        corporateProfileFloor = read.layer.profile;
-        if (read.layer.profile === "off") {
-          warnings.push(`${corp.path}: perfil corporativo off no desactiva controles criticos.`);
-        }
-        for (const gap of unenforcedControlPaths(read.layer)) {
-          criticalGaps.push(`corporate:${gap}`);
-        }
-        layerInputs.push({
-          layer: read.layer,
-          source: corporateSource(corp.path, "valid", undefined, read)
-        });
-        sourceMeta.push(corporateSource(corp.path, "valid", undefined, read));
-        sources.push(corp.path);
-      } else {
-        corporateStatus = "invalid";
-        const message = read?.kind === "invalid" ? read.message : "la politica corporativa debe ser v1";
-        warnings.push(`${corp.path}: politica corporativa invalida: ${message}`);
-        sourceMeta.push(corporateSource(corp.path, "invalid", message, read));
-      }
-    }
-  } else if (corporateRequired) {
-    corporateStatus = "required-missing";
-    warnings.push("politica corporativa obligatoria ausente; las operaciones sensibles quedan bloqueadas.");
-    sourceMeta.push(corporateSource(corp.path ?? "<required>", "invalid", "archivo obligatorio ausente"));
-  }
-  const defaultFile = readPolicyFile(defaultPath, false, false, warnings);
-  if (defaultFile) {
-    merged = mergePolicyFile("local", defaultPath, defaultFile, layerInputs, sourceMeta, sources, criticalGaps, warnings, merged);
-  }
-  if (projectPath) {
-    const projectFile = readPolicyFile(projectPath, false, false, warnings);
-    if (projectFile) {
-      merged = mergePolicyFile("project", projectPath, projectFile, layerInputs, sourceMeta, sources, criticalGaps, warnings, merged);
-    }
-  }
-  if (profileOverride) {
-    if (profileOverride === "off") {
-      warnings.push("perfil off no desactiva controles criticos; se conserva el suelo.");
-    }
-    merged = mergePolicy(merged, { profile: profileOverride });
-  }
-  if (corporateProfileFloor && PROFILE_RANK[merged.profile] < PROFILE_RANK[corporateProfileFloor]) {
-    warnings.push(`perfil corporativo ${corporateProfileFloor}: no se permite bajarlo a ${merged.profile}.`);
-    merged = mergePolicy(merged, { profile: corporateProfileFloor });
-  }
-  const securityMerge = mergeSecurityLayers(layerInputs);
-  warnings.push(...securityMerge.warnings);
-  merged = applyLegacySecurityFloor(merged, securityMerge.controls);
-  const policyHash = securityControlsHash(securityMerge.controls, merged.profile);
-  const policyMeta = {
-    contractVersion: 1,
-    schemaVersion: 1,
-    policyVersion: corporateLayer?.policyVersion ?? latestSecurityLayer(layerInputs)?.policyVersion ?? "built-in",
-    issuer: corporateLayer?.issuer ?? latestSecurityLayer(layerInputs)?.issuer ?? "malahor-built-in",
-    issuedAt: corporateLayer?.issuedAt ?? latestSecurityLayer(layerInputs)?.issuedAt,
-    policyHash,
-    sources: sourceMeta,
-    corporateStatus,
-    corporateRequired,
-    corporatePath: corp.path ?? undefined,
-    criticalGaps: uniqueStrings2(criticalGaps),
-    warnings: uniqueStrings2(warnings)
-  };
-  return {
-    policy: merged,
-    security: securityMerge.controls,
-    policyMeta,
-    policyHash,
-    defaultPath,
-    projectPath,
-    corporatePath: corp.path ?? null,
-    sources,
-    warnings: policyMeta.warnings
-  };
-}
-function hookDefaultPolicyPath(paths) {
-  return path6.join(paths.malahorHome, "policies", "default.jsonc");
-}
-function hookProjectPolicyPath(paths, project) {
-  return path6.join(paths.malahorHome, "policies", "projects", `${projectLookupKey(project) || "project"}.jsonc`);
-}
-function parseHookProfile(value) {
-  if (HOOK_PROFILES.includes(value))
-    return value;
-  throw new Error(`Perfil hooks invalido: ${value}. Usa ${HOOK_PROFILES.join(", ")}.`);
-}
-function mergePolicyFile(kind, filePath, read, layerInputs, sourceMeta, sources, criticalGaps, warnings, currentPolicy) {
-  if (read.kind === "invalid") {
-    warnings.push(`${filePath}: ${read.message}; se ignora la capa.`);
-    sourceMeta.push({
-      kind,
-      authority: kind === "project" ? 2 : 3,
-      path: filePath,
-      status: "invalid",
-      sha256: read.rawHash,
-      message: read.message
-    });
-    return currentPolicy;
-  }
-  if (read.kind === "security") {
-    const source = sourceForLayer(kind, filePath, read);
-    layerInputs.push({ layer: read.layer, source });
-    sourceMeta.push(source);
-    sources.push(filePath);
-    for (const gap of unenforcedControlPaths(read.layer)) {
-      criticalGaps.push(`${kind}:${gap}`);
-    }
-    if (read.layer.profile) {
-      if (read.layer.profile === "off") {
-        warnings.push(`${filePath}: profile off no desactiva controles criticos; se conserva el suelo.`);
-      }
-      return mergePolicy(currentPolicy, { profile: read.layer.profile });
-    }
-    return currentPolicy;
-  }
-  warnLegacyLoosening(filePath, read.file, currentPolicy, warnings);
-  sourceMeta.push({
-    kind,
-    authority: kind === "project" ? 2 : 3,
-    path: filePath,
-    status: "valid",
-    schemaVersion: 0,
-    contractVersion: 0,
-    sha256: read.rawHash
-  });
-  sources.push(filePath);
-  return mergePolicy(currentPolicy, read.file);
-}
-function readPolicyFile(filePath, strictSecurity, requireSecurity, warnings) {
-  if (!fs5.existsSync(filePath))
-    return null;
-  let raw;
-  try {
-    raw = fs5.readFileSync(filePath, "utf8").trim();
-  } catch (error) {
-    return { kind: "invalid", message: error.message };
-  }
-  if (!raw) {
-    return requireSecurity ? { kind: "invalid", message: "la politica corporativa esta vacia", rawHash: sha256("") } : { kind: "legacy", file: {}, rawHash: sha256("") };
-  }
-  const rawHash = sha256(raw);
-  let parsed;
-  try {
-    parsed = JSON.parse(stripJsonComments(raw));
-  } catch (error) {
-    return { kind: "invalid", message: `JSON invalido: ${error.message}`, rawHash };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { kind: "invalid", message: "la raiz debe ser un objeto JSON", rawHash };
-  }
-  const record = parsed;
-  if (record.schemaVersion !== undefined) {
-    const validated = validateSecurityLayer(parsed, { strict: strictSecurity });
-    warnings.push(...validated.warnings.map((warning) => `${filePath}: ${warning}`));
-    if (!validated.ok || !validated.layer) {
-      return { kind: "invalid", message: validated.errors.join("; "), rawHash };
-    }
-    return { kind: "security", layer: validated.layer, rawHash };
-  }
-  if (requireSecurity) {
-    return { kind: "invalid", message: "la politica corporativa debe declarar schemaVersion: 1", rawHash };
-  }
-  if (record.controls !== undefined || record.contractVersion !== undefined || record.issuer !== undefined || record.issuedAt !== undefined || record.policyVersion !== undefined) {
-    return { kind: "invalid", message: "la politica declara campos v1 pero falta schemaVersion: 1", rawHash };
-  }
-  if (typeof record.profile === "string" && !HOOK_PROFILES.includes(record.profile)) {
-    warnings.push(`${filePath}: profile invalido ${record.profile}; se ignora.`);
-    delete record.profile;
-  }
-  return { kind: "legacy", file: record, rawHash };
-}
-function resolveCorporatePolicyPath(options, env, platform) {
-  if (options.corporatePath === null)
-    return { path: null };
-  const configured = options.corporatePath ?? env.MALAHOR_CORPORATE_POLICY ?? defaultCorporatePolicyPath(platform, env);
-  return { path: configured ? path6.resolve(configured) : null };
-}
-function defaultCorporatePolicyPath(platform = process.platform, env = process.env) {
-  if (platform === "win32") {
-    return path6.win32.join(env.ProgramData ?? "C:\\ProgramData", "Malahor", "security-policy.json");
-  }
-  if (platform === "darwin") {
-    return "/Library/Application Support/Malahor/security-policy.json";
-  }
-  return "/etc/malahor/security-policy.json";
-}
-function verifyCorporatePolicyTrust(filePath, platform) {
-  if (platform === "win32") {
-    return { ok: false, reason: "verificacion de ACL de Windows pendiente; se aplica fail-closed" };
-  }
-  try {
-    const stat = fs5.lstatSync(filePath);
-    if (stat.isSymbolicLink())
-      return { ok: false, reason: "el archivo no puede ser un symlink" };
-    if (!stat.isFile())
-      return { ok: false, reason: "no es un archivo regular" };
-    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-    if (uid === undefined)
-      return { ok: false, reason: "no se puede verificar el propietario" };
-    if (stat.uid !== 0)
-      return { ok: false, reason: "debe ser propiedad de root/administrador" };
-    if ((stat.mode & 18) !== 0)
-      return { ok: false, reason: "no debe ser escribible por grupo/otros" };
-    const parent = fs5.lstatSync(path6.dirname(filePath));
-    if (parent.uid !== 0)
-      return { ok: false, reason: "el directorio contenedor debe ser propiedad de root/administrador" };
-    if ((parent.mode & 18) !== 0)
-      return { ok: false, reason: "el directorio contenedor no debe ser escribible por grupo/otros" };
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, reason: error.message };
-  }
-}
-function builtInSource() {
-  return {
-    kind: "built-in",
-    authority: 0,
-    status: "valid",
-    schemaVersion: 1,
-    contractVersion: 1,
-    policyVersion: "built-in",
-    issuer: "malahor",
-    sha256: securityControlsHash(BUILT_IN_SECURITY_CONTROLS)
-  };
-}
-function corporateSource(filePath, status, message, read) {
-  return {
-    kind: "corporate",
-    authority: 1,
-    path: filePath,
-    status,
-    schemaVersion: read?.kind === "security" ? 1 : undefined,
-    contractVersion: read?.kind === "security" ? 1 : undefined,
-    policyVersion: read?.kind === "security" ? read.layer.policyVersion : undefined,
-    issuer: read?.kind === "security" ? read.layer.issuer : undefined,
-    issuedAt: read?.kind === "security" ? read.layer.issuedAt : undefined,
-    sha256: read?.rawHash,
-    message
-  };
-}
-function sourceForLayer(kind, filePath, read) {
-  return {
-    kind,
-    authority: kind === "project" ? 2 : 3,
-    path: filePath,
-    status: "valid",
-    schemaVersion: 1,
-    contractVersion: 1,
-    policyVersion: read.layer.policyVersion,
-    issuer: read.layer.issuer,
-    issuedAt: read.layer.issuedAt,
-    sha256: read.rawHash
-  };
-}
-function latestSecurityLayer(layers) {
-  return layers.at(-1)?.layer;
-}
-function defaultPolicy(profile) {
-  const enabled = profile !== "off";
-  const standardOrHigher = profile === "standard" || profile === "strict" || profile === "release";
-  const strictOrRelease = profile === "strict" || profile === "release";
-  return {
-    profile,
-    git: {
-      blockDestructiveCommands: enabled,
-      requireChecksBeforePush: strictOrRelease,
-      validateCommitMessage: standardOrHigher
-    },
-    secrets: {
-      scanBeforeCommit: enabled
-    },
-    memory: {
-      destructiveRequiresPreview: enabled
-    },
-    policy: {
-      enforceDeferredPolicy: enabled,
-      blockTotalBashDeny: enabled
-    },
-    quality: {
-      warnLargeFiles: standardOrHigher,
-      warnGenericModules: profile === "strict" || profile === "release"
-    }
-  };
-}
-function mergePolicy(base, file) {
-  const profile = typeof file.profile === "string" ? parseHookProfile(file.profile) : base.profile;
-  const withProfile = profile === base.profile ? base : defaultPolicy(profile);
-  return {
-    profile,
-    git: {
-      ...withProfile.git,
-      ...booleanRecord(file.git, withProfile.git)
-    },
-    secrets: {
-      ...withProfile.secrets,
-      ...booleanRecord(file.secrets, withProfile.secrets)
-    },
-    memory: {
-      ...withProfile.memory,
-      ...booleanRecord(file.memory, withProfile.memory)
-    },
-    policy: {
-      ...withProfile.policy,
-      ...booleanRecord(file.policy, withProfile.policy)
-    },
-    quality: {
-      ...withProfile.quality,
-      ...booleanRecord(file.quality, withProfile.quality)
-    }
-  };
-}
-function warnLegacyLoosening(filePath, file, current, warnings) {
-  if (file.profile === "off" && current.profile !== "off") {
-    warnings.push(`${filePath}: profile off no desactiva controles criticos; se conserva el suelo.`);
-  }
-  const critical = [
-    ["git.blockDestructiveCommands", file.git?.blockDestructiveCommands, current.git.blockDestructiveCommands],
-    ["secrets.scanBeforeCommit", file.secrets?.scanBeforeCommit, current.secrets.scanBeforeCommit],
-    ["memory.destructiveRequiresPreview", file.memory?.destructiveRequiresPreview, current.memory.destructiveRequiresPreview],
-    ["policy.enforceDeferredPolicy", file.policy?.enforceDeferredPolicy, current.policy.enforceDeferredPolicy],
-    ["policy.blockTotalBashDeny", file.policy?.blockTotalBashDeny, current.policy.blockTotalBashDeny]
-  ];
-  for (const [key, value, previous] of critical) {
-    if (value === false && previous) {
-      warnings.push(`${filePath}: intento de aflojar ${key}; se conserva el suelo.`);
-    }
-  }
-}
-function booleanRecord(value, shape) {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    return {};
-  const result = {};
-  for (const key of Object.keys(shape)) {
-    const next = value[String(key)];
-    if (typeof next === "boolean") {
-      result[key] = next;
-    }
-  }
-  return result;
-}
-function uniqueStrings2(values) {
-  return [...new Set(values)];
-}
-
 // src/cli/core/hooks/plugin-adapter.ts
 async function evaluatePermission(input, options) {
-  const action = stringValue3(input.action) || "unknown";
+  const action = stringValue4(input.action) || "unknown";
   const resources = stringArray(input.resources);
-  const metadata = recordValue2(input.metadata) ?? {};
+  const metadata = recordValue3(input.metadata) ?? {};
   const generic = action === "*";
   const details = permissionDetails(action, resources, metadata);
   const scope = await resolveEvaluationScope(input, options, details.cwd);
@@ -2325,7 +2437,7 @@ async function evaluatePermission(input, options) {
   return { result, effect };
 }
 async function evaluateToolHook(input, options) {
-  const tool = stringValue3(input.tool) || "unknown";
+  const tool = stringValue4(input.tool) || "unknown";
   const toolInput = input.input;
   const mapped = toolDetails(tool, toolInput, options);
   const scope = await resolveEvaluationScope(input, options, mapped.cwd);
@@ -2341,10 +2453,10 @@ async function evaluateToolHook(input, options) {
   return built?.context ? evaluate(built.context) : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
 }
 async function evaluateShellHook(input, options) {
-  const command = stringValue3(input.command) || "";
+  const command = stringValue4(input.command) || "";
   const originalTimeout = numberValue(input.timeout, 0);
   const env = {};
-  const rawEnv = recordValue2(input.env);
+  const rawEnv = recordValue3(input.env);
   if (rawEnv) {
     for (const [key, value] of Object.entries(rawEnv)) {
       if (typeof value === "string" || value === undefined)
@@ -2354,12 +2466,12 @@ async function evaluateShellHook(input, options) {
   let timeout = originalTimeout;
   let envChanged = false;
   let timeoutChanged = false;
-  const scope = await resolveEvaluationScope(input, options, stringValue3(input.cwd));
+  const scope = await resolveEvaluationScope(input, options, stringValue4(input.cwd));
   const built = scope.error ? undefined : buildContext("shell.exec.before", scope.options, {
     command,
     metadata: {
       origin: "opencode-v2",
-      shell: stringValue3(input.shell),
+      shell: stringValue4(input.shell),
       cwd: scope.options.cwd,
       timeoutSeconds: timeout
     }
@@ -2416,15 +2528,15 @@ async function evaluateShellHook(input, options) {
   return { result, env, timeout };
 }
 async function evaluateSessionHook(event, input, options) {
-  const model = recordValue2(input.model);
-  const request = recordValue2(input.request);
+  const model = recordValue3(input.model);
+  const request = recordValue3(input.request);
   const metadata = {
     origin: "opencode-v2",
-    providerID: stringValue3(model?.providerID),
-    kind: stringValue3(input.kind)
+    providerID: stringValue4(model?.providerID),
+    kind: stringValue4(input.kind)
   };
-  const baseURL = stringValue3(input.baseURL);
-  const requestURL = stringValue3(request?.url);
+  const baseURL = stringValue4(input.baseURL);
+  const requestURL = stringValue4(request?.url);
   if (baseURL)
     metadata.url = baseURL;
   if (requestURL)
@@ -2459,14 +2571,14 @@ function evaluate(context) {
   return auditHookResult(context, runHooks(context));
 }
 async function resolveEvaluationScope(input, options, operationCwd) {
-  const fallback = path7.resolve(options.cwd);
+  const fallback = path8.resolve(options.cwd);
   if (operationCwd) {
-    return { options: { ...options, cwd: path7.resolve(fallback, operationCwd) } };
+    return { options: { ...options, cwd: path8.resolve(fallback, operationCwd) } };
   }
   if (!options.resolveSessionDirectory) {
     return { options: { ...options, cwd: fallback } };
   }
-  const sessionID = stringValue3(input.sessionID);
+  const sessionID = stringValue4(input.sessionID);
   if (!sessionID) {
     return {
       options: { ...options, cwd: fallback },
@@ -2481,7 +2593,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
         error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
       };
     }
-    return { options: { ...options, cwd: path7.resolve(directory) } };
+    return { options: { ...options, cwd: path8.resolve(directory) } };
   } catch (error) {
     return {
       options: { ...options, cwd: fallback },
@@ -2490,7 +2602,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
   }
 }
 function buildContext(event, options, details) {
-  const cwd = path7.resolve(options.cwd);
+  const cwd = path8.resolve(options.cwd);
   const env = options.env ?? process.env;
   try {
     const paths = pluginPaths(cwd, env);
@@ -2534,7 +2646,7 @@ function policyFailure(event, options, detail) {
     }]
   };
   try {
-    const cwd = path7.resolve(options.cwd);
+    const cwd = path8.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
     const project = resolveProject(cwd);
     const context = {
@@ -2558,7 +2670,7 @@ function pluginPaths(cwd, env) {
 }
 function permissionDetails(action, resources, metadata) {
   const normalized = action.toLowerCase();
-  const metadataCommand = stringValue3(metadata.command) || stringValue3(metadata.cmd);
+  const metadataCommand = stringValue4(metadata.command) || stringValue4(metadata.cmd);
   if (normalized === "bash" || normalized === "shell" || normalized === "command") {
     return {
       event: "shell.exec.before",
@@ -2575,7 +2687,7 @@ function permissionDetails(action, resources, metadata) {
   if (normalized === "webfetch" || normalized === "fetch" || normalized === "http") {
     return {
       event: "session.http-request.before",
-      metadata: { ...metadata, url: resources[0] ?? stringValue3(metadata.url) }
+      metadata: { ...metadata, url: resources[0] ?? stringValue4(metadata.url) }
     };
   }
   if (normalized === "external_directory") {
@@ -2604,15 +2716,15 @@ function permissionDetails(action, resources, metadata) {
 }
 function toolDetails(tool, input, options) {
   const normalized = tool.toLowerCase();
-  const args = recordValue2(input) ?? {};
+  const args = recordValue3(input) ?? {};
   if (normalized === "bash") {
     if (options.shellRegistered) {
       return { event: "tool.execute.before", metadata: { tool } };
     }
     return {
       event: "shell.exec.before",
-      cwd: stringValue3(args.cwd) || stringValue3(args.workdir),
-      command: stringValue3(args.command) || stringValue3(args.cmd),
+      cwd: stringValue4(args.cwd) || stringValue4(args.workdir),
+      command: stringValue4(args.command) || stringValue4(args.cmd),
       metadata: { tool, timeoutSeconds: numberValue(args.timeout, 0) }
     };
   }
@@ -2625,7 +2737,7 @@ function toolDetails(tool, input, options) {
   if (normalized === "webfetch") {
     return {
       event: "session.http-request.before",
-      metadata: { tool, url: stringValue3(args.url) }
+      metadata: { tool, url: stringValue4(args.url) }
     };
   }
   return { event: "tool.execute.before", metadata: { tool } };
@@ -2638,10 +2750,10 @@ var KNOWN_TOOLS = new Set([
   "invalid"
 ]);
 function pathValues(value) {
-  const record = recordValue2(value);
+  const record = recordValue3(value);
   if (!record)
     return [];
-  const direct = ["filePath", "file_path", "path", "targetPath", "target_path", "directory"].map((key) => stringValue3(record[key])).filter((item) => Boolean(item));
+  const direct = ["filePath", "file_path", "path", "targetPath", "target_path", "directory"].map((key) => stringValue4(record[key])).filter((item) => Boolean(item));
   const arrays = ["paths", "files"].flatMap((key) => stringArray(record[key]));
   const nested = ["arguments", "args", "input"].flatMap((key) => pathValues(record[key]));
   return [...new Set([...direct, ...arrays, ...nested])];
@@ -2677,7 +2789,7 @@ function collectStrings(value, depth = 0, output = []) {
       collectStrings(item, depth + 1, output);
     return output;
   }
-  const record = recordValue2(value);
+  const record = recordValue3(value);
   if (record) {
     for (const item of Object.values(record))
       collectStrings(item, depth + 1, output);
@@ -2717,7 +2829,7 @@ function pluginMessage(result) {
   return `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
 }
 function mergeMessage(current, next) {
-  const prefix = stringValue3(current);
+  const prefix = stringValue4(current);
   return prefix ? `${prefix} ${next}` : next;
 }
 function isCredentialEnvKey(key) {
@@ -2726,7 +2838,7 @@ function isCredentialEnvKey(key) {
 function isSafeEnvKey(key) {
   return /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|COLORTERM|NO_COLOR|LANG|LC_.*|TZ|TMPDIR|PWD|XDG_.*|CI|NODE_ENV|BUN_ENV)$/.test(key);
 }
-function stringValue3(value) {
+function stringValue4(value) {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 function numberValue(value, fallback) {
@@ -2735,7 +2847,7 @@ function numberValue(value, fallback) {
 function stringArray(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
-function recordValue2(value) {
+function recordValue3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 
@@ -2947,21 +3059,21 @@ async function setupV2(context) {
     criticalGaps.push("tool.hook");
   }
   if (session) {
-    for (const event of SESSION_HOOKS) {
-      const registered = await registerHook(session, hookNameForEvent(event), async (input) => {
-        const result = await evaluateSessionHook(event, input, options);
-        if (event === "session.http-response.after")
+    for (const event2 of SESSION_HOOKS) {
+      const registered = await registerHook(session, hookNameForEvent(event2), async (input) => {
+        const result = await evaluateSessionHook(event2, input, options);
+        if (event2 === "session.http-response.after")
           return;
         if (result.decision === "deny" || result.decision === "ask") {
           throw new Error(formatPluginBlock(result));
         }
       }, cleanups);
-      capabilities[event] = registered;
+      capabilities[event2] = registered;
       if (!registered) {
-        if (event === "session.http-response.after")
-          degraded.push(event);
+        if (event2 === "session.http-response.after")
+          degraded.push(event2);
         else
-          criticalGaps.push(event);
+          criticalGaps.push(event2);
       }
     }
     const protocolRegistered = await registerHook(session, "context", async (input) => {
@@ -3001,16 +3113,30 @@ async function setupV2(context) {
       degraded.push("memory.nudge");
   } else {
     capabilities.session = false;
-    for (const event of SESSION_HOOKS)
-      capabilities[event] = false;
+    for (const event2 of SESSION_HOOKS)
+      capabilities[event2] = false;
     capabilities["protocol.context"] = false;
     capabilities["compaction.checkpoint"] = false;
     capabilities["memory.nudge"] = false;
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);
-  capabilities.event = false;
-  degraded.push("event");
+  const event = eventDomain(context.event);
+  if (event && storage) {
+    const capture = startEventCapture(event, storage, {
+      cwd,
+      captureSubagentsOptIn: captureSubagentsOptIn(cwd, process.env),
+      resolveSessionDirectory: options.resolveSessionDirectory,
+      onError: (message) => warn(message)
+    });
+    capabilities.event = capture.ok;
+    cleanups.push(capture.cleanup);
+    if (!capture.ok)
+      degraded.push("event");
+  } else {
+    capabilities.event = false;
+    degraded.push("event");
+  }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
     const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord3(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
@@ -3142,6 +3268,21 @@ function storageDomain(value) {
     return;
   return value;
 }
+function eventDomain(value) {
+  if (!isRecord3(value) || typeof value.subscribe !== "function")
+    return;
+  return value;
+}
+function captureSubagentsOptIn(cwd, env) {
+  try {
+    const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
+    const project = resolveProject(cwd);
+    const loaded = loadHookPolicy(paths, project.canonicalKey);
+    return loaded.security?.persistence?.captureSubagentsOptIn === true;
+  } catch {
+    return false;
+  }
+}
 async function registerMcpTransform(domain, cwd, env, cleanups) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
@@ -3189,7 +3330,7 @@ function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path8.resolve(paths.opencodeDir, item) === path8.resolve(paths.mnemoIndex));
+  return command.some((item) => path9.resolve(paths.opencodeDir, item) === path9.resolve(paths.mnemoIndex));
 }
 function projectObsidianEnabled(paths, cwd) {
   try {
@@ -3212,7 +3353,7 @@ function sessionLocationDirectory(value) {
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path8.join(directory, "plugin-state.json");
+  const file = path9.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -3225,7 +3366,7 @@ function recordState(inspection) {
   };
   try {
     fs6.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path8.join(directory, `.plugin-state.${process.pid}.tmp`);
+    const temporary = path9.join(directory, `.plugin-state.${process.pid}.tmp`);
     fs6.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
@@ -3242,8 +3383,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path8.resolve(override);
-  return path8.join(os2.homedir(), ".malahor");
+    return path9.resolve(override);
+  return path9.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))

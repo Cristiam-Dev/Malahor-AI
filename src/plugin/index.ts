@@ -9,12 +9,14 @@ import path from "node:path";
 
 import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
 import { resolveProject } from "../cli/core/project";
+import { loadHookPolicy } from "../cli/core/hooks/policy-loader";
 import {
   checkpointBeforeCompaction,
   injectCompactionInstructions,
   type CompactionStorage,
 } from "./compaction";
 import { markMemoryPersisted, maybeInjectMemoryNudge } from "./memory-nudge";
+import { startEventCapture, type EventDomain } from "./events";
 import {
   evaluatePermission,
   evaluateSessionHook,
@@ -259,10 +261,21 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   }
   capabilities.session = Boolean(session);
 
-  // `event.subscribe` es un stream de auditoria, no un hook previo. No se marca
-  // como cobertura registrada: la auditoria obligatoria la escribe cada hook.
-  capabilities.event = false;
-  degraded.push("event");
+  const event = eventDomain(context.event);
+  if (event && storage) {
+    const capture = startEventCapture(event, storage, {
+      cwd,
+      captureSubagentsOptIn: captureSubagentsOptIn(cwd, process.env),
+      resolveSessionDirectory: options.resolveSessionDirectory,
+      onError: (message) => warn(message),
+    });
+    capabilities.event = capture.ok;
+    cleanups.push(capture.cleanup);
+    if (!capture.ok) degraded.push("event");
+  } else {
+    capabilities.event = false;
+    degraded.push("event");
+  }
 
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"] as const;
   for (const name of auxiliary) {
@@ -406,6 +419,22 @@ function transformDomain(value: unknown): McpTransformDomain | undefined {
 function storageDomain(value: unknown): StorageDomain | undefined {
   if (!isRecord(value) || typeof value.set !== "function") return undefined;
   return value as unknown as StorageDomain;
+}
+
+function eventDomain(value: unknown): EventDomain | undefined {
+  if (!isRecord(value) || typeof value.subscribe !== "function") return undefined;
+  return value as unknown as EventDomain;
+}
+
+function captureSubagentsOptIn(cwd: string, env: NodeJS.ProcessEnv): boolean {
+  try {
+    const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
+    const project = resolveProject(cwd);
+    const loaded = loadHookPolicy(paths, project.canonicalKey);
+    return loaded.security?.persistence?.captureSubagentsOptIn === true;
+  } catch {
+    return false;
+  }
 }
 
 async function registerMcpTransform(

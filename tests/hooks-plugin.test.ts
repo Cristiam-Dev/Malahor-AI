@@ -19,6 +19,7 @@ import {
   markMemoryPersisted,
   maybeInjectMemoryNudge,
 } from "../src/plugin/memory-nudge";
+import { startEventCapture } from "../src/plugin/events";
 import { MALAHOR_PROTOCOL_MARKER, injectMalahorProtocol } from "../src/plugin/protocol";
 
 let root: string;
@@ -134,6 +135,45 @@ describe("adaptador de plugin V2", () => {
       system: [{ type: "text", text: "fresh context" }],
     };
     expect((await maybeInjectMemoryNudge(freshInput, storage, options)).injected).toBe(false);
+  });
+
+  test("eventos de sesion guardan metadatos y capturan subagentes solo con opt-in", async () => {
+    const values = new Map<string, Record<string, unknown>>();
+    const storage = {
+      set: async (key: string, value: Record<string, unknown>) => { values.set(key, value); },
+    };
+    const primary = {
+      id: "evt-primary",
+      type: "session.execution.succeeded",
+      created: Date.parse("2026-10-22T00:00:00.000Z"),
+      data: { sessionID: "ses_primary", location: { directory: repo }, agent: "malahor" },
+    };
+    const child = {
+      id: "evt-child",
+      type: "session.execution.succeeded",
+      created: Date.parse("2026-10-22T00:01:00.000Z"),
+      data: { sessionID: "ses_child", parentID: "ses_primary", location: { directory: repo }, agent: "malahor-testing" },
+    };
+    const stream = (events: unknown[]): AsyncIterable<unknown> => (async function* () {
+      for (const event of events) yield event;
+    })();
+
+    const excluded = startEventCapture({ subscribe: () => stream([primary, child]) }, storage, {
+      cwd: repo,
+      captureSubagentsOptIn: false,
+    });
+    await excluded.done;
+    expect(values.has("session/events/demo/evt-primary")).toBe(true);
+    expect(values.has("session/events/demo/evt-child")).toBe(false);
+    expect(JSON.stringify([...values.values()])).not.toContain("location");
+
+    const included = startEventCapture({ subscribe: () => stream([child]) }, storage, {
+      cwd: repo,
+      captureSubagentsOptIn: true,
+    });
+    await included.done;
+    expect(values.has("session/events/demo/evt-child")).toBe(true);
+    included.cleanup();
   });
   test("permission.evaluate convierte git destructivo en deny y no lo rebaja", async () => {
     const input: Record<string, unknown> = {
