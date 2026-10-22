@@ -10,6 +10,11 @@ import path from "node:path";
 import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
 import { resolveProject } from "../cli/core/project";
 import {
+  checkpointBeforeCompaction,
+  injectCompactionInstructions,
+  type CompactionStorage,
+} from "./compaction";
+import {
   evaluatePermission,
   evaluateSessionHook,
   evaluateShellHook,
@@ -58,6 +63,8 @@ type McpEditor = {
 type McpTransformDomain = {
   transform: (callback: (editor: McpEditor) => void) => Promise<unknown> | unknown;
 };
+
+type StorageDomain = CompactionStorage;
 
 const SESSION_HOOKS: HookEvent[] = [
   "session.prompt.before",
@@ -119,6 +126,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   }
 
   const session = domain("session");
+  const storage = storageDomain(context.storage);
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {
       const value = await session.get?.({ sessionID });
@@ -196,10 +204,28 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     }, cleanups);
     capabilities["protocol.context"] = protocolRegistered;
     if (!protocolRegistered) degraded.push("protocol.context");
+
+    const compactionRegistered = await registerHook(session, "compaction", async (input) => {
+      if (storage) {
+        const checkpoint = await checkpointBeforeCompaction(input, storage, {
+          cwd,
+          resolveSessionDirectory: options.resolveSessionDirectory,
+        });
+        if (!checkpoint.ok) {
+          warn(`checkpoint de compaction degradado${checkpoint.reason ? `: ${checkpoint.reason}` : ""}`);
+        }
+      } else {
+        warn("checkpoint de compaction degradado: ctx.storage no disponible");
+      }
+      injectCompactionInstructions(input);
+    }, cleanups);
+    capabilities["compaction.checkpoint"] = compactionRegistered && Boolean(storage);
+    if (!compactionRegistered || !storage) degraded.push("compaction.checkpoint");
   } else {
     capabilities.session = false;
     for (const event of SESSION_HOOKS) capabilities[event] = false;
     capabilities["protocol.context"] = false;
+    capabilities["compaction.checkpoint"] = false;
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);
@@ -346,6 +372,11 @@ function locationDirectory(context: Record<string, unknown>): string | undefined
 function transformDomain(value: unknown): McpTransformDomain | undefined {
   if (!isRecord(value) || typeof value.transform !== "function") return undefined;
   return value as unknown as McpTransformDomain;
+}
+
+function storageDomain(value: unknown): StorageDomain | undefined {
+  if (!isRecord(value) || typeof value.set !== "function") return undefined;
+  return value as unknown as StorageDomain;
 }
 
 async function registerMcpTransform(

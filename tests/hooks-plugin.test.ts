@@ -9,6 +9,11 @@ import {
   evaluateShellHook,
   evaluateToolHook,
 } from "../src/cli/core/hooks/plugin-adapter";
+import {
+  MALAHOR_COMPACTION_MARKER,
+  checkpointBeforeCompaction,
+  injectCompactionInstructions,
+} from "../src/plugin/compaction";
 import { MALAHOR_PROTOCOL_MARKER, injectMalahorProtocol } from "../src/plugin/protocol";
 
 let root: string;
@@ -65,6 +70,31 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toContain(MALAHOR_PROTOCOL_MARKER);
     expect(system[0]?.text).toContain("mem_brief");
     expect(system[0]?.text).toContain("Principio de socio");
+  });
+
+  test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {
+    let saved: { key: string; value: Record<string, unknown> } | undefined;
+    const input: Record<string, unknown> = {
+      sessionID: "ses_compact",
+      messages: [{ role: "user" }, { role: "assistant" }],
+      system: [{ type: "text", text: "contexto base" }],
+    };
+
+    const checkpoint = await checkpointBeforeCompaction(input, {
+      set: async (key, value) => { saved = { key, value }; },
+    }, {
+      cwd: repo,
+      resolveSessionDirectory: async () => repo,
+    });
+    expect(checkpoint.ok).toBe(true);
+    expect(saved?.key).toBe("compaction/ses_compact");
+    expect(saved?.value.messageCount).toBe(2);
+
+    expect(injectCompactionInstructions(input)).toBe(true);
+    expect(injectCompactionInstructions(input)).toBe(false);
+    const system = input.system as Array<{ text: string }>;
+    expect(system[0]?.text).toContain(MALAHOR_COMPACTION_MARKER);
+    expect(system[0]?.text).toContain("mem_session_summary");
   });
   test("permission.evaluate convierte git destructivo en deny y no lo rebaja", async () => {
     const input: Record<string, unknown> = {
@@ -340,6 +370,7 @@ describe("adaptador de plugin V2", () => {
   test("plugin registra hooks V2 reales y setup devuelve cleanup", async () => {
     const calls: Array<{ domain: string; name: string; callback: (input: Record<string, unknown>) => Promise<void> | void }> = [];
     const disposed: string[] = [];
+    const storageWrites: Array<{ key: string; value: Record<string, unknown> }> = [];
     const hook = (domain: string) => (name: string, callback: (input: Record<string, unknown>) => Promise<void> | void) => {
       calls.push({ domain, name, callback });
       return { dispose: () => { disposed.push(`${domain}.${name}`); } };
@@ -374,7 +405,9 @@ describe("adaptador de plugin V2", () => {
         command: { transform: () => undefined },
         skill: { transform: () => undefined },
         event: { subscribe: () => undefined },
-        storage: {},
+        storage: {
+          set: async (key: string, value: Record<string, unknown>) => { storageWrites.push({ key, value }); },
+        },
       });
 
       expect(typeof cleanup).toBe("function");
@@ -413,6 +446,16 @@ describe("adaptador de plugin V2", () => {
       const system = contextInput.system as Array<{ text: string }>;
       expect(system).toHaveLength(1);
       expect(system[0]?.text).toContain(MALAHOR_PROTOCOL_MARKER);
+
+      const compactionHooks = calls.filter((call) => call.domain === "session" && call.name === "compaction");
+      const compactionInput: Record<string, unknown> = {
+        sessionID: "ses_demo",
+        messages: [],
+        system: [{ type: "text", text: "base" }],
+      };
+      await compactionHooks.at(-1)?.callback(compactionInput);
+      expect(storageWrites.at(-1)?.key).toBe("compaction/ses_demo");
+      expect((compactionInput.system as Array<{ text: string }>)[0]?.text).toContain(MALAHOR_COMPACTION_MARKER);
 
       await (cleanup as () => Promise<void>)();
       expect(disposed).toContain("permission.evaluate");

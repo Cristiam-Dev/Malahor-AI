@@ -219,6 +219,70 @@ function mergeAliases(base, extra) {
   return merged;
 }
 
+// src/plugin/compaction.ts
+var MALAHOR_COMPACTION_MARKER = "<!-- malahor-compaction-protocol:v1 -->";
+async function checkpointBeforeCompaction(input, storage, options) {
+  const sessionID = stringValue(input.sessionID);
+  if (!sessionID)
+    return { ok: false, reason: "sessionID ausente" };
+  const directory = await resolveDirectory(sessionID, options);
+  const messageCount = Array.isArray(input.messages) ? input.messages.length : 0;
+  const value = {
+    schema: 1,
+    kind: "compaction.pending",
+    sessionID,
+    directory,
+    messageCount,
+    createdAt: new Date().toISOString(),
+    memoryTool: "mem_session_summary",
+    status: "pending"
+  };
+  const key = `compaction/${sessionID}`;
+  try {
+    await storage.set(key, value);
+    return { ok: true, key };
+  } catch (error) {
+    return { ok: false, key, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+function injectCompactionInstructions(input) {
+  const system = Array.isArray(input.system) ? input.system : [];
+  if (system.some((part) => isTextPart(part) && part.text.includes(MALAHOR_COMPACTION_MARKER)))
+    return false;
+  const instructions = `${MALAHOR_COMPACTION_MARKER}
+CHECKPOINT DE COMPACTACIÓN MALAHOR
+- Antes de continuar después de esta compactación, guarda un mem_session_summary en el scope activo.
+- Incluye objetivo, estado, decisiones, archivos relevantes, validaciones, bloqueos y próximo paso exacto.
+- No persistas secretos, tokens, passwords, PII innecesaria ni llaves privadas.
+- No afirmes que la memoria fue guardada hasta que mem_session_summary confirme éxito.`;
+  const last = system.at(-1);
+  if (isTextPart(last)) {
+    last.text = `${last.text}
+
+${instructions}`;
+  } else {
+    system.push({ type: "text", text: instructions });
+  }
+  input.system = system;
+  return true;
+}
+async function resolveDirectory(sessionID, options) {
+  if (options.resolveSessionDirectory) {
+    try {
+      const directory = await options.resolveSessionDirectory(sessionID);
+      if (directory)
+        return directory;
+    } catch {}
+  }
+  return options.cwd;
+}
+function stringValue(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+function isTextPart(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "text" && typeof value.text === "string";
+}
+
 // src/cli/core/hooks/plugin-adapter.ts
 import path6 from "node:path";
 
@@ -2105,7 +2169,7 @@ function uniqueStrings2(values) {
 
 // src/cli/core/hooks/plugin-adapter.ts
 async function evaluatePermission(input, options) {
-  const action = stringValue(input.action) || "unknown";
+  const action = stringValue2(input.action) || "unknown";
   const resources = stringArray(input.resources);
   const metadata = recordValue(input.metadata) ?? {};
   const generic = action === "*";
@@ -2135,7 +2199,7 @@ async function evaluatePermission(input, options) {
   return { result, effect };
 }
 async function evaluateToolHook(input, options) {
-  const tool = stringValue(input.tool) || "unknown";
+  const tool = stringValue2(input.tool) || "unknown";
   const toolInput = input.input;
   const mapped = toolDetails(tool, toolInput, options);
   const scope = await resolveEvaluationScope(input, options, mapped.cwd);
@@ -2151,7 +2215,7 @@ async function evaluateToolHook(input, options) {
   return built?.context ? evaluate(built.context) : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
 }
 async function evaluateShellHook(input, options) {
-  const command = stringValue(input.command) || "";
+  const command = stringValue2(input.command) || "";
   const originalTimeout = numberValue(input.timeout, 0);
   const env = {};
   const rawEnv = recordValue(input.env);
@@ -2164,12 +2228,12 @@ async function evaluateShellHook(input, options) {
   let timeout = originalTimeout;
   let envChanged = false;
   let timeoutChanged = false;
-  const scope = await resolveEvaluationScope(input, options, stringValue(input.cwd));
+  const scope = await resolveEvaluationScope(input, options, stringValue2(input.cwd));
   const built = scope.error ? undefined : buildContext("shell.exec.before", scope.options, {
     command,
     metadata: {
       origin: "opencode-v2",
-      shell: stringValue(input.shell),
+      shell: stringValue2(input.shell),
       cwd: scope.options.cwd,
       timeoutSeconds: timeout
     }
@@ -2230,11 +2294,11 @@ async function evaluateSessionHook(event, input, options) {
   const request = recordValue(input.request);
   const metadata = {
     origin: "opencode-v2",
-    providerID: stringValue(model?.providerID),
-    kind: stringValue(input.kind)
+    providerID: stringValue2(model?.providerID),
+    kind: stringValue2(input.kind)
   };
-  const baseURL = stringValue(input.baseURL);
-  const requestURL = stringValue(request?.url);
+  const baseURL = stringValue2(input.baseURL);
+  const requestURL = stringValue2(request?.url);
   if (baseURL)
     metadata.url = baseURL;
   if (requestURL)
@@ -2276,7 +2340,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
   if (!options.resolveSessionDirectory) {
     return { options: { ...options, cwd: fallback } };
   }
-  const sessionID = stringValue(input.sessionID);
+  const sessionID = stringValue2(input.sessionID);
   if (!sessionID) {
     return {
       options: { ...options, cwd: fallback },
@@ -2368,7 +2432,7 @@ function pluginPaths(cwd, env) {
 }
 function permissionDetails(action, resources, metadata) {
   const normalized = action.toLowerCase();
-  const metadataCommand = stringValue(metadata.command) || stringValue(metadata.cmd);
+  const metadataCommand = stringValue2(metadata.command) || stringValue2(metadata.cmd);
   if (normalized === "bash" || normalized === "shell" || normalized === "command") {
     return {
       event: "shell.exec.before",
@@ -2385,7 +2449,7 @@ function permissionDetails(action, resources, metadata) {
   if (normalized === "webfetch" || normalized === "fetch" || normalized === "http") {
     return {
       event: "session.http-request.before",
-      metadata: { ...metadata, url: resources[0] ?? stringValue(metadata.url) }
+      metadata: { ...metadata, url: resources[0] ?? stringValue2(metadata.url) }
     };
   }
   if (normalized === "external_directory") {
@@ -2421,8 +2485,8 @@ function toolDetails(tool, input, options) {
     }
     return {
       event: "shell.exec.before",
-      cwd: stringValue(args.cwd) || stringValue(args.workdir),
-      command: stringValue(args.command) || stringValue(args.cmd),
+      cwd: stringValue2(args.cwd) || stringValue2(args.workdir),
+      command: stringValue2(args.command) || stringValue2(args.cmd),
       metadata: { tool, timeoutSeconds: numberValue(args.timeout, 0) }
     };
   }
@@ -2435,7 +2499,7 @@ function toolDetails(tool, input, options) {
   if (normalized === "webfetch") {
     return {
       event: "session.http-request.before",
-      metadata: { tool, url: stringValue(args.url) }
+      metadata: { tool, url: stringValue2(args.url) }
     };
   }
   return { event: "tool.execute.before", metadata: { tool } };
@@ -2451,7 +2515,7 @@ function pathValues(value) {
   const record = recordValue(value);
   if (!record)
     return [];
-  const direct = ["filePath", "file_path", "path", "targetPath", "target_path", "directory"].map((key) => stringValue(record[key])).filter((item) => Boolean(item));
+  const direct = ["filePath", "file_path", "path", "targetPath", "target_path", "directory"].map((key) => stringValue2(record[key])).filter((item) => Boolean(item));
   const arrays = ["paths", "files"].flatMap((key) => stringArray(record[key]));
   const nested = ["arguments", "args", "input"].flatMap((key) => pathValues(record[key]));
   return [...new Set([...direct, ...arrays, ...nested])];
@@ -2527,7 +2591,7 @@ function pluginMessage(result) {
   return `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
 }
 function mergeMessage(current, next) {
-  const prefix = stringValue(current);
+  const prefix = stringValue2(current);
   return prefix ? `${prefix} ${next}` : next;
 }
 function isCredentialEnvKey(key) {
@@ -2536,7 +2600,7 @@ function isCredentialEnvKey(key) {
 function isSafeEnvKey(key) {
   return /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|COLORTERM|NO_COLOR|LANG|LC_.*|TZ|TMPDIR|PWD|XDG_.*|CI|NODE_ENV|BUN_ENV)$/.test(key);
 }
-function stringValue(value) {
+function stringValue2(value) {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 function numberValue(value, fallback) {
@@ -2611,7 +2675,7 @@ function injectMalahorProtocol(input) {
   if (system.some((part) => textContainsMarker(part)))
     return false;
   const last = system.at(-1);
-  if (isTextPart(last)) {
+  if (isTextPart2(last)) {
     last.text = `${last.text}
 
 ${MALAHOR_RUNTIME_PROTOCOL}`;
@@ -2622,9 +2686,9 @@ ${MALAHOR_RUNTIME_PROTOCOL}`;
   return true;
 }
 function textContainsMarker(value) {
-  return isTextPart(value) && value.text.includes(MALAHOR_PROTOCOL_MARKER);
+  return isTextPart2(value) && value.text.includes(MALAHOR_PROTOCOL_MARKER);
 }
-function isTextPart(value) {
+function isTextPart2(value) {
   return isRecord2(value) && value.type === "text" && typeof value.text === "string";
 }
 function isRecord2(value) {
@@ -2685,6 +2749,7 @@ async function setupV2(context) {
     degraded.push("mcp.transform");
   }
   const session = domain("session");
+  const storage = storageDomain(context.storage);
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {
       const value = await session.get?.({ sessionID });
@@ -2766,11 +2831,29 @@ async function setupV2(context) {
     capabilities["protocol.context"] = protocolRegistered;
     if (!protocolRegistered)
       degraded.push("protocol.context");
+    const compactionRegistered = await registerHook(session, "compaction", async (input) => {
+      if (storage) {
+        const checkpoint = await checkpointBeforeCompaction(input, storage, {
+          cwd,
+          resolveSessionDirectory: options.resolveSessionDirectory
+        });
+        if (!checkpoint.ok) {
+          warn(`checkpoint de compaction degradado${checkpoint.reason ? `: ${checkpoint.reason}` : ""}`);
+        }
+      } else {
+        warn("checkpoint de compaction degradado: ctx.storage no disponible");
+      }
+      injectCompactionInstructions(input);
+    }, cleanups);
+    capabilities["compaction.checkpoint"] = compactionRegistered && Boolean(storage);
+    if (!compactionRegistered || !storage)
+      degraded.push("compaction.checkpoint");
   } else {
     capabilities.session = false;
     for (const event of SESSION_HOOKS)
       capabilities[event] = false;
     capabilities["protocol.context"] = false;
+    capabilities["compaction.checkpoint"] = false;
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);
@@ -2899,6 +2982,11 @@ function locationDirectory(context) {
 }
 function transformDomain(value) {
   if (!isRecord3(value) || typeof value.transform !== "function")
+    return;
+  return value;
+}
+function storageDomain(value) {
+  if (!isRecord3(value) || typeof value.set !== "function")
     return;
   return value;
 }
