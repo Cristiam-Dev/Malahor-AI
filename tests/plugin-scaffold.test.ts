@@ -41,7 +41,7 @@ function v2Context(overrides: Record<string, unknown> = {}): Record<string, unkn
     tool: { hook: () => undefined },
     shell: { hook: () => undefined },
     event: { subscribe: () => undefined },
-    storage: { set: async () => undefined },
+    storage: { get: async () => undefined, set: async () => undefined },
     ...overrides,
   };
 }

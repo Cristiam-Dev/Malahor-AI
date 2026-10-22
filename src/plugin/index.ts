@@ -14,6 +14,7 @@ import {
   injectCompactionInstructions,
   type CompactionStorage,
 } from "./compaction";
+import { markMemoryPersisted, maybeInjectMemoryNudge } from "./memory-nudge";
 import {
   evaluatePermission,
   evaluateSessionHook,
@@ -177,9 +178,23 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     capabilities.tool = true;
     capabilities["tool.execute.before"] = registered;
     if (!registered) criticalGaps.push("tool.execute.before");
+
+    const freshnessRegistered = storage && typeof storage.get === "function"
+      ? await registerHook(tool, "execute.after", async (input) => {
+        const marked = await markMemoryPersisted(input, storage, {
+          cwd,
+          env: process.env,
+          resolveSessionDirectory: options.resolveSessionDirectory,
+        });
+        if (!marked.ok) warn(`freshness de memoria degradada${marked.reason ? `: ${marked.reason}` : ""}`);
+      }, cleanups)
+      : false;
+    capabilities["memory.freshness"] = freshnessRegistered;
+    if (!freshnessRegistered) degraded.push("memory.freshness");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
+    capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
   }
 
@@ -221,11 +236,25 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     }, cleanups);
     capabilities["compaction.checkpoint"] = compactionRegistered && Boolean(storage);
     if (!compactionRegistered || !storage) degraded.push("compaction.checkpoint");
+
+    const nudgeRegistered = storage && typeof storage.get === "function"
+      ? await registerHook(session, "context", async (input) => {
+        const nudge = await maybeInjectMemoryNudge(input, storage, {
+          cwd,
+          env: process.env,
+          resolveSessionDirectory: options.resolveSessionDirectory,
+        });
+        if (!nudge.ok && nudge.reason) warn(`nudge de memoria degradado: ${nudge.reason}`);
+      }, cleanups)
+      : false;
+    capabilities["memory.nudge"] = nudgeRegistered;
+    if (!nudgeRegistered) degraded.push("memory.nudge");
   } else {
     capabilities.session = false;
     for (const event of SESSION_HOOKS) capabilities[event] = false;
     capabilities["protocol.context"] = false;
     capabilities["compaction.checkpoint"] = false;
+    capabilities["memory.nudge"] = false;
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);

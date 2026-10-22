@@ -3,7 +3,7 @@
 // src/plugin/index.ts
 import fs6 from "node:fs";
 import os2 from "node:os";
-import path7 from "node:path";
+import path8 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -283,12 +283,138 @@ function isTextPart(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) && value.type === "text" && typeof value.text === "string";
 }
 
+// src/plugin/memory-nudge.ts
+import path3 from "node:path";
+var MALAHOR_MEMORY_NUDGE_MARKER = "<!-- malahor-memory-nudge:v1 -->";
+var DEFAULT_MEMORY_STALE_MINUTES = 15;
+async function maybeInjectMemoryNudge(input, storage, options) {
+  if (typeof storage.get !== "function")
+    return { ok: false, injected: false, reason: "ctx.storage.get no disponible" };
+  const sessionID = stringValue2(input.sessionID);
+  if (!sessionID)
+    return { ok: false, injected: false, reason: "sessionID ausente" };
+  const now = options.now ?? Date.now;
+  const timestamp = now();
+  const directory = await resolveDirectory2(sessionID, options);
+  const project = resolveProject(directory).canonicalKey;
+  const thresholdMs = staleMinutes(options) * 60000;
+  const sessionKey = `memory/nudge/${encodeURIComponent(sessionID)}`;
+  const freshnessKey = `memory/freshness/${encodeURIComponent(project)}`;
+  try {
+    const [sessionRecord, freshnessRecord] = await Promise.all([
+      storage.get(sessionKey),
+      storage.get(freshnessKey)
+    ]);
+    const session = recordValue(sessionRecord);
+    const freshness = recordValue(freshnessRecord);
+    const startedAt = timestampValue(session?.startedAt) ?? timestamp;
+    const lastNudgedAt = timestampValue(session?.lastNudgedAt);
+    const lastPersistedAt = timestampValue(freshness?.lastPersistedAt);
+    const reference = Math.max(startedAt, lastPersistedAt ?? 0);
+    if (!lastNudgedAt && !session) {
+      await storage.set(sessionKey, { schema: 1, sessionID, project, startedAt: new Date(timestamp).toISOString() });
+    }
+    if (timestamp - reference < thresholdMs || lastNudgedAt !== undefined && timestamp - lastNudgedAt < thresholdMs) {
+      return { ok: true, injected: false };
+    }
+    const injected = injectMemoryNudge(input, staleMinutes(options));
+    if (!injected)
+      return { ok: true, injected: false };
+    await storage.set(sessionKey, {
+      schema: 1,
+      sessionID,
+      project,
+      startedAt: new Date(startedAt).toISOString(),
+      lastNudgedAt: new Date(timestamp).toISOString()
+    });
+    return { ok: true, injected: true };
+  } catch (error) {
+    return { ok: false, injected: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function markMemoryPersisted(input, storage, options) {
+  const tool = stringValue2(input.tool)?.toLowerCase() ?? "";
+  if (input.status !== "completed" || !isMemoryPersistenceTool(tool))
+    return { ok: true, marked: false };
+  const sessionID = stringValue2(input.sessionID);
+  if (!sessionID)
+    return { ok: false, marked: false, reason: "sessionID ausente" };
+  const directory = await resolveDirectory2(sessionID, options);
+  const project = resolveProject(directory).canonicalKey;
+  const now = (options.now ?? Date.now)();
+  const key = `memory/freshness/${encodeURIComponent(project)}`;
+  try {
+    await storage.set(key, {
+      schema: 1,
+      project,
+      lastPersistedAt: new Date(now).toISOString(),
+      source: tool
+    });
+    return { ok: true, marked: true };
+  } catch (error) {
+    return { ok: false, marked: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+function injectMemoryNudge(input, minutes) {
+  const system = Array.isArray(input.system) ? input.system : [];
+  if (system.some((part) => isTextPart2(part) && part.text.includes(MALAHOR_MEMORY_NUDGE_MARKER)))
+    return false;
+  const instructions = `${MALAHOR_MEMORY_NUDGE_MARKER}
+RECORDATORIO DE MEMORIA MALAHOR
+La memoria operativa lleva más de ${minutes} minutos sin persistencia confirmada.
+Antes de continuar, guarda un mem_session_summary con objetivo, estado, decisiones, validaciones, bloqueos y próximo paso exacto. No guardes secretos ni PII innecesaria.`;
+  const last = system.at(-1);
+  if (isTextPart2(last))
+    last.text = `${last.text}
+
+${instructions}`;
+  else
+    system.push({ type: "text", text: instructions });
+  input.system = system;
+  return true;
+}
+function isMemoryPersistenceTool(tool) {
+  return tool.includes("mem_session_summary") || tool.includes("mem_save");
+}
+function staleMinutes(options) {
+  const configured = options.staleMinutes ?? Number(options.env?.MALAHOR_MEMORY_STALE_MINUTES);
+  if (!Number.isFinite(configured))
+    return DEFAULT_MEMORY_STALE_MINUTES;
+  return Math.min(24 * 60, Math.max(1, Math.floor(configured)));
+}
+async function resolveDirectory2(sessionID, options) {
+  if (options.resolveSessionDirectory) {
+    try {
+      const directory = await options.resolveSessionDirectory(sessionID);
+      if (directory)
+        return path3.resolve(directory);
+    } catch {}
+  }
+  return path3.resolve(options.cwd);
+}
+function timestampValue(value) {
+  if (typeof value !== "string")
+    return;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+function stringValue2(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+function recordValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function isTextPart2(value) {
+  const record = recordValue(value);
+  return record?.type === "text" && typeof record.text === "string";
+}
+
 // src/cli/core/hooks/plugin-adapter.ts
-import path6 from "node:path";
+import path7 from "node:path";
 
 // src/cli/core/hooks/audit.ts
 import fs3 from "node:fs";
-import path3 from "node:path";
+import path4 from "node:path";
 
 // src/cli/core/hooks/security-policy.ts
 import { createHash } from "node:crypto";
@@ -585,17 +711,17 @@ function validateSecurityLayer(value, options) {
     const group = {};
     for (const [controlName, controlValue] of Object.entries(rawGroup)) {
       const expected = groupSchema[controlName];
-      const path3 = `${groupName}.${controlName}`;
+      const path4 = `${groupName}.${controlName}`;
       if (!expected) {
-        const message = `control desconocido: ${path3}`;
+        const message = `control desconocido: ${path4}`;
         if (options.strict)
           errors.push(message);
         else
           warnings.push(`${message}; se ignora.`);
         continue;
       }
-      if (!validControlValue(path3, controlValue, expected)) {
-        errors.push(`control invalido: ${path3}`);
+      if (!validControlValue(path4, controlValue, expected)) {
+        errors.push(`control invalido: ${path4}`);
         continue;
       }
       group[controlName] = controlValue;
@@ -632,30 +758,30 @@ function mergeSecurityLayers(layers) {
         const expected = groupSchema[controlName];
         if (!expected)
           continue;
-        const path3 = `${groupName}.${controlName}`;
+        const path4 = `${groupName}.${controlName}`;
         const current = target[controlName];
         if (expected === "const")
           continue;
         if (expected === "boolean") {
           if (current === true && value === false) {
-            warnings.push(`${sourceLabel(source)} intenta aflojar ${path3}; se conserva true.`);
+            warnings.push(`${sourceLabel(source)} intenta aflojar ${path4}; se conserva true.`);
           }
           target[controlName] = current === true || value === true;
           continue;
         }
         if (expected === "stringArray") {
-          const next = mergeArray(current, value, ARRAY_MODES[path3] ?? "intersect", path3, source, warnings);
+          const next = mergeArray(current, value, ARRAY_MODES[path4] ?? "intersect", path4, source, warnings);
           target[controlName] = next;
           continue;
         }
         if (expected === "integer") {
-          const mode = INTEGER_MODES[path3] ?? "min";
+          const mode = INTEGER_MODES[path4] ?? "min";
           if (current === undefined) {
             target[controlName] = value;
           } else {
             const next = mode === "min" ? Math.min(current, value) : Math.max(current, value);
             if (next !== value)
-              warnings.push(`${sourceLabel(source)} intenta aflojar ${path3}; se conserva ${next}.`);
+              warnings.push(`${sourceLabel(source)} intenta aflojar ${path4}; se conserva ${next}.`);
             target[controlName] = next;
           }
           continue;
@@ -663,7 +789,7 @@ function mergeSecurityLayers(layers) {
         if (current === undefined) {
           target[controlName] = value;
         } else if (current !== value) {
-          warnings.push(`${sourceLabel(source)} intenta cambiar ${path3}; se conserva ${String(current)}.`);
+          warnings.push(`${sourceLabel(source)} intenta cambiar ${path4}; se conserva ${String(current)}.`);
         }
       }
     }
@@ -671,7 +797,7 @@ function mergeSecurityLayers(layers) {
   return { controls, warnings, enabledPaths: enabledControlPaths(controls) };
 }
 function unenforcedControlPaths(layer) {
-  const paths = enabledControlPaths(layer.controls).filter((path3) => !ENFORCED_CONTROL_PATHS.has(path3));
+  const paths = enabledControlPaths(layer.controls).filter((path4) => !ENFORCED_CONTROL_PATHS.has(path4));
   for (const required of layer.controls.host?.requiredControls ?? []) {
     if (!ENFORCED_CONTROL_PATHS.has(required)) {
       paths.push(`host.required[${required}]`);
@@ -686,13 +812,13 @@ function enabledControlPaths(controls) {
     if (!group)
       continue;
     for (const [controlName, expected] of Object.entries(groupSchema)) {
-      const path3 = `${groupName}.${controlName}`;
-      if (IGNORED_GAP_PATHS.has(path3))
+      const path4 = `${groupName}.${controlName}`;
+      if (IGNORED_GAP_PATHS.has(path4))
         continue;
       const value = group[controlName];
       if (value === undefined || value === false)
         continue;
-      const gate = CONTROL_GATES[path3];
+      const gate = CONTROL_GATES[path4];
       if (gate) {
         const [gateGroup, gateControl] = gate.split(".");
         const gateValue = controls[gateGroup]?.[gateControl];
@@ -700,15 +826,15 @@ function enabledControlPaths(controls) {
           continue;
       }
       if (expected === "boolean") {
-        result.push(path3);
+        result.push(path4);
         continue;
       }
       if (expected === "stringArray") {
         if (Array.isArray(value) && value.length > 0)
-          result.push(path3);
+          result.push(path4);
         continue;
       }
-      result.push(path3);
+      result.push(path4);
     }
   }
   return result;
@@ -750,22 +876,22 @@ function canonicalJson(value) {
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
-function mergeArray(current, next, mode, path3, source, warnings) {
+function mergeArray(current, next, mode, path4, source, warnings) {
   if (current === undefined)
     return uniqueStrings(next);
   if (mode === "intersect") {
     const allowed = new Set(next);
     const result = current.filter((value) => allowed.has(value));
     if (next.some((value) => !current.includes(value))) {
-      warnings.push(`${sourceLabel(source)} intenta ampliar ${path3}; se conserva la interseccion.`);
+      warnings.push(`${sourceLabel(source)} intenta ampliar ${path4}; se conserva la interseccion.`);
     }
     return result;
   }
   return uniqueStrings([...current, ...next]);
 }
-function validControlValue(path3, value, expected) {
+function validControlValue(path4, value, expected) {
   if (expected === "const")
-    return Object.is(value, CONTROL_CONSTRAINTS[path3]);
+    return Object.is(value, CONTROL_CONSTRAINTS[path4]);
   if (expected === "boolean")
     return typeof value === "boolean";
   if (expected === "integer")
@@ -829,7 +955,7 @@ function writeAudit(context, result, options = {}) {
     return { ok: true, skipped: true, required, path: filePath };
   }
   try {
-    const directory = path3.dirname(filePath);
+    const directory = path4.dirname(filePath);
     const directoryMode = parseMode(context.security?.audit?.directoryMode, 448);
     const fileMode = parseMode(context.security?.audit?.fileMode, 384);
     const prefix = auditFilePrefix(filePath);
@@ -839,7 +965,7 @@ function writeAudit(context, result, options = {}) {
     fs3.appendFileSync(filePath, `${JSON.stringify(entry)}
 `, { encoding: "utf8", mode: fileMode, flag: "a" });
     secureChmod(filePath, fileMode);
-    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path3.basename(filePath), prefix);
+    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path4.basename(filePath), prefix);
     return { ok: true, skipped: false, required, path: filePath };
   } catch (error) {
     return {
@@ -856,18 +982,18 @@ function approvalRefForAudit(nonce) {
 }
 function auditFilePath(malahorHome, overridePath, cwd = process.cwd()) {
   if (overridePath) {
-    const expanded = overridePath.startsWith("~/") ? path3.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
-    return path3.resolve(cwd, expanded);
+    const expanded = overridePath.startsWith("~/") ? path4.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
+    return path4.resolve(cwd, expanded);
   }
-  return path3.join(malahorHome, "audit", "security.jsonl");
+  return path4.join(malahorHome, "audit", "security.jsonl");
 }
 function auditFilePrefix(filePath) {
-  const base = path3.basename(filePath);
+  const base = path4.basename(filePath);
   return base.endsWith(".jsonl") ? base.slice(0, -6) : base;
 }
 function buildAuditEntry(context, result, now = new Date) {
   const policy = result.policy ?? context.policyMeta;
-  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(path3.normalize(path3.resolve(context.cwd, target)))}`))].sort();
+  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(path4.normalize(path4.resolve(context.cwd, target)))}`))].sort();
   const policyHash = policy?.policyHash ? `sha256:${policy.policyHash}` : "sha256:unknown";
   return {
     auditVersion: AUDIT_VERSION,
@@ -909,8 +1035,8 @@ function ensureAuditDirectory(directory, mode, managedRoot) {
   }
 }
 function isWithin(target, root) {
-  const relative = path3.relative(path3.resolve(root), path3.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path3.isAbsolute(relative);
+  const relative = path4.relative(path4.resolve(root), path4.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path4.isAbsolute(relative);
 }
 function rotateIfNeeded(filePath, directory, now, fileMode, prefix) {
   if (!fs3.existsSync(filePath))
@@ -921,7 +1047,7 @@ function rotateIfNeeded(filePath, directory, now, fileMode, prefix) {
   }
   if (stat.size < MAX_AUDIT_BYTES)
     return;
-  const base = path3.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
+  const base = path4.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
   let rotated = `${base}.jsonl`;
   let suffix = 1;
   while (fs3.existsSync(rotated)) {
@@ -935,7 +1061,7 @@ function pruneAuditFiles(directory, maxFiles, retentionDays, now, activeName, pr
   const keep = Math.max(1, maxFiles);
   const cutoff = now.getTime() - Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
   const entries = fs3.readdirSync(directory).filter((name) => name !== activeName && name.startsWith(`${prefix}.`) && name.endsWith(".jsonl")).map((name) => {
-    const filePath = path3.join(directory, name);
+    const filePath = path4.join(directory, name);
     const stat = fs3.statSync(filePath);
     return { filePath, mtime: stat.mtimeMs };
   }).sort((left, right) => right.mtime - left.mtime);
@@ -970,7 +1096,7 @@ var TRUSTED_CHANNELS = new Set(["cli-tty", "opencode-ui", "host-ui"]);
 // src/cli/core/hooks/rules.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
 import fs4 from "node:fs";
-import path4 from "node:path";
+import path5 from "node:path";
 
 // src/cli/core/hooks/types.ts
 var CODE_MODE_TOOL_NAMES = new Set([
@@ -1030,7 +1156,7 @@ function repoBoundaryGuard(context) {
   const writesMalahorData = Boolean(context.metadata?.writesMalahorData);
   if (!writesMalahorData || !context.targetPaths || context.targetPaths.length === 0)
     return [];
-  const unsafe = context.targetPaths.map((targetPath) => path4.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
+  const unsafe = context.targetPaths.map((targetPath) => path5.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
   if (unsafe.length === 0)
     return [];
   return [{
@@ -1261,13 +1387,13 @@ function fileBoundaryGuard(context) {
   if (context.event !== "file.read.before" && context.event !== "file.write.before")
     return [];
   const controls = context.security?.files;
-  const paths = (context.targetPaths ?? []).map((target) => path4.resolve(context.cwd, target));
+  const paths = (context.targetPaths ?? []).map((target) => path5.resolve(context.cwd, target));
   if (paths.length === 0)
     return [];
   const violations = [];
   const write = context.event === "file.write.before";
   const roots = (write ? controls?.allowedWriteRoots : controls?.allowedReadRoots) ?? [];
-  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path4.resolve(context.cwd, root));
+  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path5.resolve(context.cwd, root));
   const enforceRoots = controls?.enforceRoots === true;
   for (const target of paths) {
     const canonical = resolveTargetPath(target, controls?.resolveSymlinks !== false);
@@ -1289,7 +1415,7 @@ function fileBoundaryGuard(context) {
         fix: "Limita la operacion al proyecto/raiz aprobada o genera aprobacion vinculada."
       });
     }
-    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path4.basename(canonical)));
+    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path5.basename(canonical)));
     if (denied) {
       violations.push({
         id: "MAL-HOOK-FILE-DENYLIST",
@@ -1500,24 +1626,24 @@ function isIndirectExecution(command) {
 function resolveTargetPath(target, followSymlinks) {
   try {
     if (fs4.existsSync(target)) {
-      return followSymlinks ? fs4.realpathSync(target) : path4.resolve(target);
+      return followSymlinks ? fs4.realpathSync(target) : path5.resolve(target);
     }
-    let parent = path4.dirname(target);
+    let parent = path5.dirname(target);
     while (!fs4.existsSync(parent)) {
-      const next = path4.dirname(parent);
+      const next = path5.dirname(parent);
       if (next === parent)
         return null;
       parent = next;
     }
-    const canonicalParent = followSymlinks ? fs4.realpathSync(parent) : path4.resolve(parent);
-    return path4.join(canonicalParent, path4.relative(parent, target));
+    const canonicalParent = followSymlinks ? fs4.realpathSync(parent) : path5.resolve(parent);
+    return path5.join(canonicalParent, path5.relative(parent, target));
   } catch {
     return null;
   }
 }
 function isSecretPath(target) {
   const normalized = target.replaceAll("\\", "/");
-  const base = path4.basename(normalized);
+  const base = path5.basename(normalized);
   if (base === ".env.example")
     return false;
   return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
@@ -1537,7 +1663,7 @@ function parseHttpUrl(value) {
 function programmingQualityGuard(context) {
   const violations = [];
   const files = context.targetPaths ?? [];
-  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path4.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path5.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -1558,7 +1684,7 @@ function programmingQualityGuard(context) {
   return violations;
 }
 function readableTargetPaths(context) {
-  return (context.targetPaths ?? []).map((targetPath) => path4.resolve(context.cwd, targetPath)).filter((targetPath) => fs4.existsSync(targetPath) && fs4.statSync(targetPath).isFile() && fs4.statSync(targetPath).size <= 512 * 1024);
+  return (context.targetPaths ?? []).map((targetPath) => path5.resolve(context.cwd, targetPath)).filter((targetPath) => fs4.existsSync(targetPath) && fs4.statSync(targetPath).isFile() && fs4.statSync(targetPath).size <= 512 * 1024);
 }
 function scanStagedSecrets(cwd, includeWorktree = false) {
   const commands = [
@@ -1580,7 +1706,7 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
       return null;
     }
     for (const relative of output.split("\x00").filter(Boolean)) {
-      const file = path4.resolve(cwd, relative);
+      const file = path5.resolve(cwd, relative);
       if (!fs4.existsSync(file))
         continue;
       try {
@@ -1594,7 +1720,7 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
 }
 var PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function scanFileForSecrets(filePath) {
-  const basename = path4.basename(filePath);
+  const basename = path5.basename(filePath);
   const content = fs4.readFileSync(filePath, "utf8");
   const patterns = [
     [PRIVATE_KEY_PATTERN, "private-key"],
@@ -1652,12 +1778,12 @@ function controlAffectsEvent(gap, event) {
   return true;
 }
 function isWithin2(targetPath, rootPath) {
-  const relative = path4.relative(path4.resolve(rootPath), path4.resolve(targetPath));
-  return relative === "" || !relative.startsWith("..") && !path4.isAbsolute(relative);
+  const relative = path5.relative(path5.resolve(rootPath), path5.resolve(targetPath));
+  return relative === "" || !relative.startsWith("..") && !path5.isAbsolute(relative);
 }
 function isInside(targetPath, rootPath) {
-  const relative = path4.relative(path4.resolve(rootPath), path4.resolve(targetPath));
-  return Boolean(relative) && !relative.startsWith("..") && !path4.isAbsolute(relative);
+  const relative = path5.relative(path5.resolve(rootPath), path5.resolve(targetPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path5.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/engine.ts
@@ -1733,7 +1859,7 @@ function strongestDecision(violations) {
 
 // src/cli/core/hooks/policy-loader.ts
 import fs5 from "node:fs";
-import path5 from "node:path";
+import path6 from "node:path";
 
 // src/cli/core/jsonc.ts
 function stripJsonComments(input) {
@@ -1899,10 +2025,10 @@ function loadHookPolicy(paths, project, profileOverride, options = {}) {
   };
 }
 function hookDefaultPolicyPath(paths) {
-  return path5.join(paths.malahorHome, "policies", "default.jsonc");
+  return path6.join(paths.malahorHome, "policies", "default.jsonc");
 }
 function hookProjectPolicyPath(paths, project) {
-  return path5.join(paths.malahorHome, "policies", "projects", `${projectLookupKey(project) || "project"}.jsonc`);
+  return path6.join(paths.malahorHome, "policies", "projects", `${projectLookupKey(project) || "project"}.jsonc`);
 }
 function parseHookProfile(value) {
   if (HOOK_PROFILES.includes(value))
@@ -1998,11 +2124,11 @@ function resolveCorporatePolicyPath(options, env, platform) {
   if (options.corporatePath === null)
     return { path: null };
   const configured = options.corporatePath ?? env.MALAHOR_CORPORATE_POLICY ?? defaultCorporatePolicyPath(platform, env);
-  return { path: configured ? path5.resolve(configured) : null };
+  return { path: configured ? path6.resolve(configured) : null };
 }
 function defaultCorporatePolicyPath(platform = process.platform, env = process.env) {
   if (platform === "win32") {
-    return path5.win32.join(env.ProgramData ?? "C:\\ProgramData", "Malahor", "security-policy.json");
+    return path6.win32.join(env.ProgramData ?? "C:\\ProgramData", "Malahor", "security-policy.json");
   }
   if (platform === "darwin") {
     return "/Library/Application Support/Malahor/security-policy.json";
@@ -2026,7 +2152,7 @@ function verifyCorporatePolicyTrust(filePath, platform) {
       return { ok: false, reason: "debe ser propiedad de root/administrador" };
     if ((stat.mode & 18) !== 0)
       return { ok: false, reason: "no debe ser escribible por grupo/otros" };
-    const parent = fs5.lstatSync(path5.dirname(filePath));
+    const parent = fs5.lstatSync(path6.dirname(filePath));
     if (parent.uid !== 0)
       return { ok: false, reason: "el directorio contenedor debe ser propiedad de root/administrador" };
     if ((parent.mode & 18) !== 0)
@@ -2169,9 +2295,9 @@ function uniqueStrings2(values) {
 
 // src/cli/core/hooks/plugin-adapter.ts
 async function evaluatePermission(input, options) {
-  const action = stringValue2(input.action) || "unknown";
+  const action = stringValue3(input.action) || "unknown";
   const resources = stringArray(input.resources);
-  const metadata = recordValue(input.metadata) ?? {};
+  const metadata = recordValue2(input.metadata) ?? {};
   const generic = action === "*";
   const details = permissionDetails(action, resources, metadata);
   const scope = await resolveEvaluationScope(input, options, details.cwd);
@@ -2199,7 +2325,7 @@ async function evaluatePermission(input, options) {
   return { result, effect };
 }
 async function evaluateToolHook(input, options) {
-  const tool = stringValue2(input.tool) || "unknown";
+  const tool = stringValue3(input.tool) || "unknown";
   const toolInput = input.input;
   const mapped = toolDetails(tool, toolInput, options);
   const scope = await resolveEvaluationScope(input, options, mapped.cwd);
@@ -2215,10 +2341,10 @@ async function evaluateToolHook(input, options) {
   return built?.context ? evaluate(built.context) : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
 }
 async function evaluateShellHook(input, options) {
-  const command = stringValue2(input.command) || "";
+  const command = stringValue3(input.command) || "";
   const originalTimeout = numberValue(input.timeout, 0);
   const env = {};
-  const rawEnv = recordValue(input.env);
+  const rawEnv = recordValue2(input.env);
   if (rawEnv) {
     for (const [key, value] of Object.entries(rawEnv)) {
       if (typeof value === "string" || value === undefined)
@@ -2228,12 +2354,12 @@ async function evaluateShellHook(input, options) {
   let timeout = originalTimeout;
   let envChanged = false;
   let timeoutChanged = false;
-  const scope = await resolveEvaluationScope(input, options, stringValue2(input.cwd));
+  const scope = await resolveEvaluationScope(input, options, stringValue3(input.cwd));
   const built = scope.error ? undefined : buildContext("shell.exec.before", scope.options, {
     command,
     metadata: {
       origin: "opencode-v2",
-      shell: stringValue2(input.shell),
+      shell: stringValue3(input.shell),
       cwd: scope.options.cwd,
       timeoutSeconds: timeout
     }
@@ -2290,15 +2416,15 @@ async function evaluateShellHook(input, options) {
   return { result, env, timeout };
 }
 async function evaluateSessionHook(event, input, options) {
-  const model = recordValue(input.model);
-  const request = recordValue(input.request);
+  const model = recordValue2(input.model);
+  const request = recordValue2(input.request);
   const metadata = {
     origin: "opencode-v2",
-    providerID: stringValue2(model?.providerID),
-    kind: stringValue2(input.kind)
+    providerID: stringValue3(model?.providerID),
+    kind: stringValue3(input.kind)
   };
-  const baseURL = stringValue2(input.baseURL);
-  const requestURL = stringValue2(request?.url);
+  const baseURL = stringValue3(input.baseURL);
+  const requestURL = stringValue3(request?.url);
   if (baseURL)
     metadata.url = baseURL;
   if (requestURL)
@@ -2333,14 +2459,14 @@ function evaluate(context) {
   return auditHookResult(context, runHooks(context));
 }
 async function resolveEvaluationScope(input, options, operationCwd) {
-  const fallback = path6.resolve(options.cwd);
+  const fallback = path7.resolve(options.cwd);
   if (operationCwd) {
-    return { options: { ...options, cwd: path6.resolve(fallback, operationCwd) } };
+    return { options: { ...options, cwd: path7.resolve(fallback, operationCwd) } };
   }
   if (!options.resolveSessionDirectory) {
     return { options: { ...options, cwd: fallback } };
   }
-  const sessionID = stringValue2(input.sessionID);
+  const sessionID = stringValue3(input.sessionID);
   if (!sessionID) {
     return {
       options: { ...options, cwd: fallback },
@@ -2355,7 +2481,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
         error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
       };
     }
-    return { options: { ...options, cwd: path6.resolve(directory) } };
+    return { options: { ...options, cwd: path7.resolve(directory) } };
   } catch (error) {
     return {
       options: { ...options, cwd: fallback },
@@ -2364,7 +2490,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
   }
 }
 function buildContext(event, options, details) {
-  const cwd = path6.resolve(options.cwd);
+  const cwd = path7.resolve(options.cwd);
   const env = options.env ?? process.env;
   try {
     const paths = pluginPaths(cwd, env);
@@ -2408,7 +2534,7 @@ function policyFailure(event, options, detail) {
     }]
   };
   try {
-    const cwd = path6.resolve(options.cwd);
+    const cwd = path7.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
     const project = resolveProject(cwd);
     const context = {
@@ -2432,7 +2558,7 @@ function pluginPaths(cwd, env) {
 }
 function permissionDetails(action, resources, metadata) {
   const normalized = action.toLowerCase();
-  const metadataCommand = stringValue2(metadata.command) || stringValue2(metadata.cmd);
+  const metadataCommand = stringValue3(metadata.command) || stringValue3(metadata.cmd);
   if (normalized === "bash" || normalized === "shell" || normalized === "command") {
     return {
       event: "shell.exec.before",
@@ -2449,7 +2575,7 @@ function permissionDetails(action, resources, metadata) {
   if (normalized === "webfetch" || normalized === "fetch" || normalized === "http") {
     return {
       event: "session.http-request.before",
-      metadata: { ...metadata, url: resources[0] ?? stringValue2(metadata.url) }
+      metadata: { ...metadata, url: resources[0] ?? stringValue3(metadata.url) }
     };
   }
   if (normalized === "external_directory") {
@@ -2478,15 +2604,15 @@ function permissionDetails(action, resources, metadata) {
 }
 function toolDetails(tool, input, options) {
   const normalized = tool.toLowerCase();
-  const args = recordValue(input) ?? {};
+  const args = recordValue2(input) ?? {};
   if (normalized === "bash") {
     if (options.shellRegistered) {
       return { event: "tool.execute.before", metadata: { tool } };
     }
     return {
       event: "shell.exec.before",
-      cwd: stringValue2(args.cwd) || stringValue2(args.workdir),
-      command: stringValue2(args.command) || stringValue2(args.cmd),
+      cwd: stringValue3(args.cwd) || stringValue3(args.workdir),
+      command: stringValue3(args.command) || stringValue3(args.cmd),
       metadata: { tool, timeoutSeconds: numberValue(args.timeout, 0) }
     };
   }
@@ -2499,7 +2625,7 @@ function toolDetails(tool, input, options) {
   if (normalized === "webfetch") {
     return {
       event: "session.http-request.before",
-      metadata: { tool, url: stringValue2(args.url) }
+      metadata: { tool, url: stringValue3(args.url) }
     };
   }
   return { event: "tool.execute.before", metadata: { tool } };
@@ -2512,10 +2638,10 @@ var KNOWN_TOOLS = new Set([
   "invalid"
 ]);
 function pathValues(value) {
-  const record = recordValue(value);
+  const record = recordValue2(value);
   if (!record)
     return [];
-  const direct = ["filePath", "file_path", "path", "targetPath", "target_path", "directory"].map((key) => stringValue2(record[key])).filter((item) => Boolean(item));
+  const direct = ["filePath", "file_path", "path", "targetPath", "target_path", "directory"].map((key) => stringValue3(record[key])).filter((item) => Boolean(item));
   const arrays = ["paths", "files"].flatMap((key) => stringArray(record[key]));
   const nested = ["arguments", "args", "input"].flatMap((key) => pathValues(record[key]));
   return [...new Set([...direct, ...arrays, ...nested])];
@@ -2551,7 +2677,7 @@ function collectStrings(value, depth = 0, output = []) {
       collectStrings(item, depth + 1, output);
     return output;
   }
-  const record = recordValue(value);
+  const record = recordValue2(value);
   if (record) {
     for (const item of Object.values(record))
       collectStrings(item, depth + 1, output);
@@ -2591,7 +2717,7 @@ function pluginMessage(result) {
   return `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
 }
 function mergeMessage(current, next) {
-  const prefix = stringValue2(current);
+  const prefix = stringValue3(current);
   return prefix ? `${prefix} ${next}` : next;
 }
 function isCredentialEnvKey(key) {
@@ -2600,7 +2726,7 @@ function isCredentialEnvKey(key) {
 function isSafeEnvKey(key) {
   return /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|COLORTERM|NO_COLOR|LANG|LC_.*|TZ|TMPDIR|PWD|XDG_.*|CI|NODE_ENV|BUN_ENV)$/.test(key);
 }
-function stringValue2(value) {
+function stringValue3(value) {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 function numberValue(value, fallback) {
@@ -2609,7 +2735,7 @@ function numberValue(value, fallback) {
 function stringArray(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
-function recordValue(value) {
+function recordValue2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 
@@ -2675,7 +2801,7 @@ function injectMalahorProtocol(input) {
   if (system.some((part) => textContainsMarker(part)))
     return false;
   const last = system.at(-1);
-  if (isTextPart2(last)) {
+  if (isTextPart3(last)) {
     last.text = `${last.text}
 
 ${MALAHOR_RUNTIME_PROTOCOL}`;
@@ -2686,9 +2812,9 @@ ${MALAHOR_RUNTIME_PROTOCOL}`;
   return true;
 }
 function textContainsMarker(value) {
-  return isTextPart2(value) && value.text.includes(MALAHOR_PROTOCOL_MARKER);
+  return isTextPart3(value) && value.text.includes(MALAHOR_PROTOCOL_MARKER);
 }
-function isTextPart2(value) {
+function isTextPart3(value) {
   return isRecord2(value) && value.type === "text" && typeof value.text === "string";
 }
 function isRecord2(value) {
@@ -2802,9 +2928,22 @@ async function setupV2(context) {
     capabilities["tool.execute.before"] = registered;
     if (!registered)
       criticalGaps.push("tool.execute.before");
+    const freshnessRegistered = storage && typeof storage.get === "function" ? await registerHook(tool, "execute.after", async (input) => {
+      const marked = await markMemoryPersisted(input, storage, {
+        cwd,
+        env: process.env,
+        resolveSessionDirectory: options.resolveSessionDirectory
+      });
+      if (!marked.ok)
+        warn(`freshness de memoria degradada${marked.reason ? `: ${marked.reason}` : ""}`);
+    }, cleanups) : false;
+    capabilities["memory.freshness"] = freshnessRegistered;
+    if (!freshnessRegistered)
+      degraded.push("memory.freshness");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
+    capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
   }
   if (session) {
@@ -2848,12 +2987,25 @@ async function setupV2(context) {
     capabilities["compaction.checkpoint"] = compactionRegistered && Boolean(storage);
     if (!compactionRegistered || !storage)
       degraded.push("compaction.checkpoint");
+    const nudgeRegistered = storage && typeof storage.get === "function" ? await registerHook(session, "context", async (input) => {
+      const nudge = await maybeInjectMemoryNudge(input, storage, {
+        cwd,
+        env: process.env,
+        resolveSessionDirectory: options.resolveSessionDirectory
+      });
+      if (!nudge.ok && nudge.reason)
+        warn(`nudge de memoria degradado: ${nudge.reason}`);
+    }, cleanups) : false;
+    capabilities["memory.nudge"] = nudgeRegistered;
+    if (!nudgeRegistered)
+      degraded.push("memory.nudge");
   } else {
     capabilities.session = false;
     for (const event of SESSION_HOOKS)
       capabilities[event] = false;
     capabilities["protocol.context"] = false;
     capabilities["compaction.checkpoint"] = false;
+    capabilities["memory.nudge"] = false;
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);
@@ -3037,7 +3189,7 @@ function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path7.resolve(paths.opencodeDir, item) === path7.resolve(paths.mnemoIndex));
+  return command.some((item) => path8.resolve(paths.opencodeDir, item) === path8.resolve(paths.mnemoIndex));
 }
 function projectObsidianEnabled(paths, cwd) {
   try {
@@ -3060,7 +3212,7 @@ function sessionLocationDirectory(value) {
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path7.join(directory, "plugin-state.json");
+  const file = path8.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -3073,7 +3225,7 @@ function recordState(inspection) {
   };
   try {
     fs6.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path7.join(directory, `.plugin-state.${process.pid}.tmp`);
+    const temporary = path8.join(directory, `.plugin-state.${process.pid}.tmp`);
     fs6.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
@@ -3090,8 +3242,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path7.resolve(override);
-  return path7.join(os2.homedir(), ".malahor");
+    return path8.resolve(override);
+  return path8.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))

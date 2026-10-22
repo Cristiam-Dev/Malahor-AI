@@ -1,6 +1,7 @@
 export const MALAHOR_COMPACTION_MARKER = "<!-- malahor-compaction-protocol:v1 -->";
 
 export interface CompactionStorage {
+  get?: (key: string) => Promise<unknown>;
   set: (key: string, value: Record<string, unknown>) => Promise<void>;
 }
 

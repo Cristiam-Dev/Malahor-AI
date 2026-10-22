@@ -14,6 +14,11 @@ import {
   checkpointBeforeCompaction,
   injectCompactionInstructions,
 } from "../src/plugin/compaction";
+import {
+  MALAHOR_MEMORY_NUDGE_MARKER,
+  markMemoryPersisted,
+  maybeInjectMemoryNudge,
+} from "../src/plugin/memory-nudge";
 import { MALAHOR_PROTOCOL_MARKER, injectMalahorProtocol } from "../src/plugin/protocol";
 
 let root: string;
@@ -95,6 +100,40 @@ describe("adaptador de plugin V2", () => {
     const system = input.system as Array<{ text: string }>;
     expect(system[0]?.text).toContain(MALAHOR_COMPACTION_MARKER);
     expect(system[0]?.text).toContain("mem_session_summary");
+  });
+
+  test("nudge de memoria respeta staleness, intervalo y persistencia", async () => {
+    const values = new Map<string, unknown>();
+    let now = Date.parse("2026-10-22T00:00:00.000Z");
+    const storage = {
+      get: async (key: string) => values.get(key),
+      set: async (key: string, value: Record<string, unknown>) => { values.set(key, value); },
+    };
+    const input: Record<string, unknown> = {
+      sessionID: "ses_nudge",
+      system: [{ type: "text", text: "base" }],
+    };
+    const options = { cwd: repo, staleMinutes: 15, now: () => now };
+
+    expect((await maybeInjectMemoryNudge(input, storage, options)).injected).toBe(false);
+    now += 16 * 60_000;
+    expect((await maybeInjectMemoryNudge(input, storage, options)).injected).toBe(true);
+    expect((input.system as Array<{ text: string }>)[0]?.text).toContain(MALAHOR_MEMORY_NUDGE_MARKER);
+    now += 1 * 60_000;
+    expect((await maybeInjectMemoryNudge(input, storage, options)).injected).toBe(false);
+
+    const persisted = await markMemoryPersisted({
+      sessionID: "ses_nudge",
+      tool: "mcp_mnemo_mem_session_summary",
+      status: "completed",
+    }, storage, options);
+    expect(persisted.marked).toBe(true);
+    now += 1 * 60_000;
+    const freshInput: Record<string, unknown> = {
+      sessionID: "ses_nudge",
+      system: [{ type: "text", text: "fresh context" }],
+    };
+    expect((await maybeInjectMemoryNudge(freshInput, storage, options)).injected).toBe(false);
   });
   test("permission.evaluate convierte git destructivo en deny y no lo rebaja", async () => {
     const input: Record<string, unknown> = {
@@ -406,6 +445,7 @@ describe("adaptador de plugin V2", () => {
         skill: { transform: () => undefined },
         event: { subscribe: () => undefined },
         storage: {
+          get: async (key: string) => storageWrites.find((entry) => entry.key === key)?.value,
           set: async (key: string, value: Record<string, unknown>) => { storageWrites.push({ key, value }); },
         },
       });
@@ -441,8 +481,8 @@ describe("adaptador de plugin V2", () => {
         sessionID: "ses_demo",
         system: [{ type: "text", text: "base" }],
       };
-      await contextHooks.at(-1)?.callback(contextInput);
-      await contextHooks.at(-1)?.callback(contextInput);
+      for (const contextHook of contextHooks) await contextHook.callback(contextInput);
+      for (const contextHook of contextHooks) await contextHook.callback(contextInput);
       const system = contextInput.system as Array<{ text: string }>;
       expect(system).toHaveLength(1);
       expect(system[0]?.text).toContain(MALAHOR_PROTOCOL_MARKER);
@@ -456,6 +496,14 @@ describe("adaptador de plugin V2", () => {
       await compactionHooks.at(-1)?.callback(compactionInput);
       expect(storageWrites.at(-1)?.key).toBe("compaction/ses_demo");
       expect((compactionInput.system as Array<{ text: string }>)[0]?.text).toContain(MALAHOR_COMPACTION_MARKER);
+
+      const memoryAfterHooks = calls.filter((call) => call.domain === "tool" && call.name === "execute.after");
+      await memoryAfterHooks.at(-1)?.callback({
+        sessionID: "ses_demo",
+        tool: "mcp_mnemo_mem_session_summary",
+        status: "completed",
+      });
+      expect(storageWrites.some((entry) => entry.key === "memory/freshness/demo")).toBe(true);
 
       await (cleanup as () => Promise<void>)();
       expect(disposed).toContain("permission.evaluate");
