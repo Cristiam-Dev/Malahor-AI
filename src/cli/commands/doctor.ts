@@ -67,14 +67,14 @@ function renderReport(
   checks.push(checkInstructions(paths));
   checks.push(checkLegacyInstructions(paths));
   checks.push(checkMnemoConfig(paths.opencodeConfig, host, paths));
-  checks.push(checkCompaction(paths.opencodeConfig));
+  checks.push(checkCompaction(paths.opencodeConfig, host, paths));
   checks.push(checkOpenCodeCommands(paths));
   checks.push(checkOpenCodeConfigDuplicates(paths));
   for (const check of pluginHealthChecks({ paths, host, packagePaths })) {
     checks.push(fromPluginHealth(check));
   }
   checks.push(checkHookPolicy(paths, project.canonicalKey));
-  checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution));
+  checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution, host, paths));
   checks.push({
     name: "Graphify",
     ok: graphStatus.source !== "missing",
@@ -256,12 +256,17 @@ function archiveLegacyInstructions(paths: MalahorPaths, dryRun: boolean, repairs
 }
 
 function repairOpenCodeConfigFile(config: MalahorConfig, paths: MalahorPaths, host: OpenCodeHostInfo, dryRun: boolean, repairs: string[]): void {
+  const verifyOnly = host.kind === "v2" && pluginManagesMcp(paths);
   if (hasDuplicateConfigs(paths.opencodeDir)) {
     repairs.push("AVISO: opencode.json y opencode.jsonc coexisten; el self-heal no consolida ni reescribe. Usa `malahor-ai config`.");
     return;
   }
 
   if (!fs.existsSync(paths.opencodeConfig)) {
+    if (verifyOnly) {
+      repairs.push(`${dryRun ? "omitiria" : "omitido"} opencode.jsonc: V2 verify-only, runtime gestionado por plugin`);
+      return;
+    }
     syncOpenCodeConfig(paths, { execution: config.execution, manageMcp: host.kind !== "v2" }, dryRun);
     repairs.push(`${dryRun ? "crearia" : "creado"} opencode.jsonc con Mnemo/compaction/politica`);
     return;
@@ -301,6 +306,10 @@ function repairOpenCodeConfigFile(config: MalahorConfig, paths: MalahorPaths, ho
   }
 
   if (problems.length > 0) {
+    if (verifyOnly) {
+      repairs.push(`${dryRun ? "omitiria" : "omitido"} opencode.jsonc (${problems.join(", ")}): V2 verify-only; usa migracion explicita con backup`);
+      return;
+    }
     syncOpenCodeConfig(paths, { execution: config.execution, manageMcp: host.kind !== "v2" }, dryRun);
     repairs.push(`${dryRun ? "sincronizaria" : "sincronizado"} opencode.jsonc (${problems.join(", ")})`);
   }
@@ -320,43 +329,64 @@ function markerPolicyFormat(build: Record<string, unknown>): number {
   return typeof value === "number" ? value : 1;
 }
 
-function buildPolicyChecks(configPath: string, expected: MalahorExecutionPolicy): CheckResult[] {
+function buildPolicyChecks(configPath: string, expected: MalahorExecutionPolicy, host: OpenCodeHostInfo, paths: MalahorPaths): CheckResult[] {
+  const runtimeManaged = host.kind === "v2" && pluginManagesMcp(paths);
   if (!fs.existsSync(configPath)) {
+    if (runtimeManaged) {
+      return [
+        { name: "Build intervention policy", ok: true, message: "runtime plugin (config verify-only)", critical: false },
+        { name: "Build read-only verification", ok: true, message: "runtime plugin (config verify-only)", critical: false },
+        { name: "Build policy format", ok: true, message: "runtime plugin (sin escritura V2)", critical: false },
+      ];
+    }
     return [{ name: "Build intervention policy", ok: false, message: "opencode.jsonc missing", critical: false }];
   }
 
   try {
     const config = readOpenCodeConfig(configPath);
 
-    return [checkBuildIntervention(config, expected), checkBuildVerification(config, expected), checkBuildPolicyFormat(config, expected)];
+    return [
+      checkBuildIntervention(config, expected, runtimeManaged),
+      checkBuildVerification(config, expected, runtimeManaged),
+      checkBuildPolicyFormat(config, expected, runtimeManaged),
+    ];
   } catch (error) {
     return [{ name: "Build intervention policy", ok: false, message: (error as Error).message, critical: false }];
   }
 }
 
-function checkBuildIntervention(config: OpenCodeConfig, expected: MalahorExecutionPolicy): CheckResult {
+function checkBuildIntervention(config: OpenCodeConfig, expected: MalahorExecutionPolicy, runtimeManaged: boolean): CheckResult {
   const agent = agentConfig(config, "build");
 
   if (!agent) {
+    if (runtimeManaged) {
+      return { name: "Build intervention policy", ok: true, message: `runtime plugin (${expected.intervention}; config verify-only)`, critical: false };
+    }
     return { name: "Build intervention policy", ok: false, message: "agent.build missing", critical: false };
   }
 
   const execution = asRecord(asRecord(agent.options)?.malahor)?.execution;
   const intervention = asRecord(execution)?.intervention;
-  const ok = intervention === expected.intervention;
+  const ok = runtimeManaged || intervention === expected.intervention;
 
   return {
     name: "Build intervention policy",
     ok,
-    message: ok ? expected.intervention : `expected ${expected.intervention} got ${String(intervention ?? "missing")}`,
+    message: runtimeManaged
+      ? `runtime plugin (${expected.intervention}; legacy mirror ignored)`
+      : ok ? expected.intervention : `expected ${expected.intervention} got ${String(intervention ?? "missing")}`,
     critical: false,
   };
 }
 
-function checkBuildPolicyFormat(config: OpenCodeConfig, expected: MalahorExecutionPolicy): CheckResult {
+function checkBuildPolicyFormat(config: OpenCodeConfig, expected: MalahorExecutionPolicy, runtimeManaged: boolean): CheckResult {
   const agent = agentConfig(config, "build");
   const permission = agent ? asRecord(agent.permission) : undefined;
   const bash = permission?.bash;
+
+  if (!agent && runtimeManaged) {
+    return { name: "Build policy format", ok: true, message: "runtime plugin (sin escritura V2)", critical: false };
+  }
 
   if (isMalahorBashPolicy(bash)) {
     return {
@@ -382,34 +412,40 @@ function checkBuildPolicyFormat(config: OpenCodeConfig, expected: MalahorExecuti
   return { name: "Build policy format", ok: false, message: `bash inesperado (${String(bash)}); revisar configuracion, no se reescribe en T-5.1.3`, critical: false };
 }
 
-function checkBuildVerification(config: OpenCodeConfig, expected: MalahorExecutionPolicy): CheckResult {
+function checkBuildVerification(config: OpenCodeConfig, expected: MalahorExecutionPolicy, runtimeManaged: boolean): CheckResult {
   const agent = agentConfig(config, "build");
   const execution = agent ? asRecord(asRecord(agent.options)?.malahor)?.execution : undefined;
   const verification = asRecord(execution)?.verification;
-  const ok = verification === expected.verification;
+  const ok = runtimeManaged || verification === expected.verification;
 
   return {
     name: "Build read-only verification",
     ok,
-    message: ok ? String(expected.verification) : `expected ${String(expected.verification)} got ${String(verification ?? "missing")}`,
+    message: runtimeManaged
+      ? `runtime plugin (${String(expected.verification)}; config verify-only)`
+      : ok ? String(expected.verification) : `expected ${String(expected.verification)} got ${String(verification ?? "missing")}`,
     critical: false,
   };
 }
 
-function checkCompaction(configPath: string): CheckResult {
+function checkCompaction(configPath: string, host: OpenCodeHostInfo, paths: MalahorPaths): CheckResult {
+  const runtimeManaged = host.kind === "v2" && pluginManagesMcp(paths);
   if (!fs.existsSync(configPath)) {
+    if (runtimeManaged) {
+      return { name: "Compaction", ok: true, message: "runtime session.compaction (config verify-only)", critical: false };
+    }
     return { name: "Compaction", ok: false, message: "opencode.jsonc missing", critical: false };
   }
 
   try {
     const config = readOpenCodeConfig(configPath);
     const compaction = asRecord(config.compaction);
-    const ok = Boolean(compaction) && compaction?.auto === true;
+    const ok = runtimeManaged || (Boolean(compaction) && compaction?.auto === true);
 
     return {
       name: "Compaction",
       ok,
-      message: ok ? "auto=true" : "compaction.auto no habilitado",
+      message: runtimeManaged ? "runtime session.compaction (config verify-only)" : ok ? "auto=true" : "compaction.auto no habilitado",
       critical: false,
     };
   } catch (error) {
@@ -502,12 +538,15 @@ function checkMnemoConfig(configPath: string, host: OpenCodeHostInfo, paths: Mal
 
     const entry = mnemo as Record<string, unknown>;
     const ok = entry.type === "local" && Array.isArray(entry.command) && entry.enabled === true;
+    const runtimeManaged = host.kind === "v2" && pluginManagesMcp(paths);
 
     return {
       name: "Mnemo MCP config",
       ok: ok || (host.kind === "v2" && pluginManagesMcp(paths)),
       message: ok
-        ? "type=local command=array enabled=true"
+        ? runtimeManaged
+          ? "runtime ctx.mcp.transform (legacy mirror preserved)"
+          : "type=local command=array enabled=true"
         : host.kind === "v2" && pluginManagesMcp(paths)
           ? "runtime ctx.mcp.transform (legacy entry ignored)"
           : "expected type=local command=array enabled=true",

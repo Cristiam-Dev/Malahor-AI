@@ -97,4 +97,22 @@ describe("inyeccion de politica de build", () => {
     const preserved = JSON.parse(fs.readFileSync(paths.opencodeConfig, "utf8")) as { mcp?: { mnemo?: unknown } };
     expect(preserved.mcp?.mnemo).toEqual(legacy);
   });
+
+  test("verify-only V2 no reescribe config ni agrega compaction/politica", () => {
+    const original = `${JSON.stringify({
+      model: "user-model",
+      compaction: { auto: false },
+      agent: { build: { permission: { edit: "allow" }, options: { custom: true } } },
+    }, null, 2)}\n`;
+    fs.writeFileSync(paths.opencodeConfig, original, "utf8");
+
+    syncOpenCodeConfig(paths, {
+      execution: { intervention: "acompanar", verification: false },
+      applyPolicy: true,
+      manageMcp: false,
+      verifyOnly: true,
+    }, false);
+
+    expect(fs.readFileSync(paths.opencodeConfig, "utf8")).toBe(original);
+  });
 });

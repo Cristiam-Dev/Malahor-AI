@@ -1,5 +1,6 @@
 import { loadConfig } from "../core/config";
 import { applyConsolidation, applyRollback, buildRollbackPlan } from "../core/opencode-config/apply";
+import { applyV2ConfigMigration, previewV2ConfigMigration } from "../core/opencode-config/migrate";
 import { previewConsolidation } from "../core/opencode-config/preview";
 import type { ConfigConflict, ConfigLocation, ConfigSnapshot, ConsolidationPlan, RollbackPlan } from "../core/opencode-config/types";
 
@@ -23,13 +24,16 @@ export function runConfig(options: ConfigOptions): void {
     case "rollback":
       printRollback(options);
       return;
+    case "migrate":
+      printMigrate(options);
+      return;
     case "help":
     case "--help":
     case "-h":
       printConfigHelp();
       return;
     default:
-      throw new Error(`Comando config invalido: ${options.action}. Usa status, consolidate, rollback o help.`);
+      throw new Error(`Comando config invalido: ${options.action}. Usa status, consolidate, rollback, migrate o help.`);
   }
 }
 
@@ -193,6 +197,34 @@ function printRollback(options: ConfigOptions): void {
   process.stdout.write(`Respaldos conservados: ${transaction.directory}/.malahor-config-backups/${transaction.id}\n`);
 }
 
+function printMigrate(options: ConfigOptions): void {
+  const paths = loadConfig().paths;
+  const wantsApply = options.apply && !options.dryRun;
+  const plan = previewV2ConfigMigration(paths);
+
+  if (!wantsApply) {
+    process.stdout.write("\nmalahor-ai config migrate (preview)\n==================================\n");
+    process.stdout.write(`Archivo: ${plan.path}\nEstado: ${plan.state}\n`);
+    for (const finding of plan.findings) {
+      process.stdout.write(`- ${finding.path}: ${finding.removable ? "migrable" : "revision manual"} — ${finding.reason}\n`);
+    }
+    if (plan.confirmation) process.stdout.write(`Token: ${plan.confirmation}\nPara aplicar: malahor-ai config migrate --apply --yes --confirm <token>\n`);
+    if (plan.issue) process.stdout.write(`Motivo: ${plan.issue}\n`);
+    process.stdout.write("Sin --apply (con --yes --confirm <token>) no se escribe nada.\n");
+    if (plan.state === "blocked") process.exitCode = 1;
+    return;
+  }
+
+  if (!options.yes || !options.confirm) {
+    throw new Error("Aplicar migracion requiere --yes y --confirm <token>; el token lo entrega el preview.");
+  }
+
+  const result = applyV2ConfigMigration(paths, options.confirm);
+  process.stdout.write("\nmalahor-ai config migrate\n==========================\n");
+  process.stdout.write(`Migracion aplicada: ${result.removed.join(", ")}\n`);
+  process.stdout.write(`Backup: ${result.backup ?? "no creado"}\n`);
+}
+
 function location(): ConfigLocation {
   return { opencodeDir: loadConfig().paths.opencodeDir };
 }
@@ -222,12 +254,14 @@ function shortHash(hash: string): string {
 function printConfigHelp(): void {
   process.stdout.write(`malahor-ai config
 
-Comandos:
+  Comandos:
   config status                     Revisa opencode.json vs opencode.jsonc (solo lectura)
   config consolidate                Preview de la consolidacion (no escribe)
   config consolidate --apply --yes --confirm <token>
   config rollback                   Preview de la reversion
   config rollback --apply --yes --confirm <token>
+  config migrate                    Preview de restos Malahor legacy en V2
+  config migrate --apply --yes --confirm <token>
 
 La consolidacion conserva comentarios, respalda ambos originales y retira opencode.json
 por renombrado reversible; nunca borra archivos ni fusiona reglas de seguridad.

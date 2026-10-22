@@ -68,7 +68,9 @@ export function runUpdate(options: UpdateOptions): void {
     fs.mkdirSync(paths.opencodeDir, { recursive: true });
   }
 
-  const configBackup = backupFile(paths.opencodeConfig, paths.backupsDir, options.dryRun);
+  const configBackup = host.kind === "v2"
+    ? { created: false, destination: null }
+    : backupFile(paths.opencodeConfig, paths.backupsDir, options.dryRun);
   const agentsSync = syncManagedInstructions(agentsAsset, paths.agentsMd, paths.backupsDir, options.dryRun);
 
   if (!options.dryRun) {
@@ -90,6 +92,7 @@ export function runUpdate(options: UpdateOptions): void {
     execution: config.execution,
     applyPolicy: false,
     manageMcp: host.kind !== "v2",
+    verifyOnly: host.kind === "v2",
   }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
@@ -105,7 +108,7 @@ export function runUpdate(options: UpdateOptions): void {
   printLine("Local data: kept");
 
   runGraphifyStep(paths, options);
-  validateBeforePolicy(paths, packagePaths, options, host.kind === "v2");
+  validateBeforePolicy(paths, packagePaths, options, host.kind === "v2", host.kind === "v2");
 
   // Migracion garantizada: cualquier update reescribe el formato de politica vigente,
   // incluyendo legacy deny -> whitelist agent-safe.
@@ -129,10 +132,14 @@ export function runUpdate(options: UpdateOptions): void {
     },
   });
   saveExecutionPolicy({ ...config, execution }, options.dryRun);
-  syncOpenCodeConfig(paths, { execution, manageMcp: host.kind !== "v2" }, options.dryRun);
+  syncOpenCodeConfig(paths, {
+    execution,
+    manageMcp: host.kind !== "v2",
+    verifyOnly: host.kind === "v2",
+  }, options.dryRun);
 
   printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
-  printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"} (${formatExecutionPolicy(execution)})`);
+  printLine(`OpenCode build policy: ${host.kind === "v2" ? "runtime plugin (config verify-only)" : (options.dryRun ? "would sync" : "synced")} (${formatExecutionPolicy(execution)})`);
   printLine("Validation: passed (politica aplicada al final)");
   printLine("Next: run `malahor-ai doctor`. Si la politica cambio, abre una sesion nueva de OpenCode para recargarla.");
 }
@@ -176,13 +183,19 @@ function runGraphifyStep(paths: MalahorPaths, options: UpdateOptions): void {
   }
 }
 
-function validateBeforePolicy(paths: MalahorPaths, packagePaths: MalahorPackagePaths, options: UpdateOptions, mcpManagedByPlugin: boolean): void {
+function validateBeforePolicy(
+  paths: MalahorPaths,
+  packagePaths: MalahorPackagePaths,
+  options: UpdateOptions,
+  mcpManagedByPlugin: boolean,
+  configManagedByPlugin: boolean,
+): void {
   if (options.dryRun) {
     printLine("Validation: skipped in dry-run");
     return;
   }
 
-  const problems = validateInstallation(paths, packagePaths, { mcpManagedByPlugin });
+  const problems = validateInstallation(paths, packagePaths, { mcpManagedByPlugin, configManagedByPlugin });
   if (problems.length > 0) {
     printLine("Validation: FAILED (no se aplico politica de intervencion; el agente queda desbloqueado)");
     for (const problem of problems) {

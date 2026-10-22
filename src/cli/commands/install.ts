@@ -77,7 +77,9 @@ export async function runInstall(options: InstallOptions): Promise<void> {
     fs.mkdirSync(paths.opencodeDir, { recursive: true });
   }
 
-  const configBackup = backupFile(paths.opencodeConfig, paths.backupsDir, options.dryRun);
+  const configBackup = host.kind === "v2"
+    ? { created: false, destination: null }
+    : backupFile(paths.opencodeConfig, paths.backupsDir, options.dryRun);
   const agentsSync = syncManagedInstructions(agentsAsset, paths.agentsMd, paths.backupsDir, options.dryRun);
 
   if (!options.dryRun) {
@@ -100,6 +102,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
     execution: config.execution,
     applyPolicy: false,
     manageMcp: host.kind !== "v2",
+    verifyOnly: host.kind === "v2",
   }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
@@ -109,10 +112,10 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   printLine(describeSdkEnsure(sdk));
   printLine(describePluginSync(plugin));
   printLine(`Mnemo MCP: ${host.kind === "v2" ? "runtime plugin transform" : "configured in legacy config"}`);
-  printLine("OpenCode compaction: configured");
+  printLine(`OpenCode compaction: ${host.kind === "v2" ? "runtime plugin hook (verify-only config)" : "configured"}`);
 
   runGraphifyStep(paths, options);
-  validateBeforePolicy(paths, packagePaths, options, host.kind === "v2");
+  validateBeforePolicy(paths, packagePaths, options, host.kind === "v2", host.kind === "v2");
 
   const execution = await resolveFinalPolicy(config.execution, options);
   const project = resolveProject(paths.cwd, config.projects.aliases);
@@ -134,10 +137,14 @@ export async function runInstall(options: InstallOptions): Promise<void> {
     },
   });
   saveExecutionPolicy({ ...config, execution }, options.dryRun);
-  syncOpenCodeConfig(paths, { execution, manageMcp: host.kind !== "v2" }, options.dryRun);
+  syncOpenCodeConfig(paths, {
+    execution,
+    manageMcp: host.kind !== "v2",
+    verifyOnly: host.kind === "v2",
+  }, options.dryRun);
 
   printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
-  printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"} (${formatExecutionPolicy(execution)})`);
+  printLine(`OpenCode build policy: ${host.kind === "v2" ? "runtime plugin (config verify-only)" : (options.dryRun ? "would sync" : "synced")} (${formatExecutionPolicy(execution)})`);
   printLine(describeInstructionsSync(agentsSync, options.dryRun));
   const legacyHint = legacyInstructionsHint(paths.opencodeMd);
   if (legacyHint) printLine(legacyHint);
@@ -185,13 +192,19 @@ function runGraphifyStep(paths: MalahorPaths, options: InstallOptions): void {
   }
 }
 
-function validateBeforePolicy(paths: MalahorPaths, packagePaths: MalahorPackagePaths | null, options: InstallOptions, mcpManagedByPlugin: boolean): void {
+function validateBeforePolicy(
+  paths: MalahorPaths,
+  packagePaths: MalahorPackagePaths | null,
+  options: InstallOptions,
+  mcpManagedByPlugin: boolean,
+  configManagedByPlugin: boolean,
+): void {
   if (options.dryRun) {
     printLine("Validation: skipped in dry-run");
     return;
   }
 
-  const problems = validateInstallation(paths, packagePaths, { mcpManagedByPlugin });
+  const problems = validateInstallation(paths, packagePaths, { mcpManagedByPlugin, configManagedByPlugin });
   if (problems.length > 0) {
     printLine("Validation: FAILED (no se aplico politica de intervencion; el agente queda desbloqueado)");
     for (const problem of problems) {

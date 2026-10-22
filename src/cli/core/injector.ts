@@ -46,6 +46,7 @@ export interface SyncOpenCodeConfigOptions {
   execution: MalahorExecutionPolicy;
   applyPolicy?: boolean;
   manageMcp?: boolean;
+  verifyOnly?: boolean;
 }
 
 export interface OpenCodeConfig {
@@ -83,7 +84,7 @@ export function syncOpenCodeConfig(paths: MalahorPaths, options: SyncOpenCodeCon
     next.agent = syncedAgents;
   }
 
-  if (!dryRun) {
+  if (!dryRun && options.verifyOnly !== true) {
     fs.mkdirSync(path.dirname(paths.opencodeConfig), { recursive: true });
     fs.writeFileSync(paths.opencodeConfig, `${JSON.stringify(next, null, 2)}\n`, "utf8");
   }

@@ -11,7 +11,7 @@ import type { MalahorPaths } from "./paths";
 export function validateInstallation(
   paths: MalahorPaths,
   packagePaths: MalahorPackagePaths | null,
-  options: { mcpManagedByPlugin?: boolean } = {},
+  options: { mcpManagedByPlugin?: boolean; configManagedByPlugin?: boolean } = {},
 ): string[] {
   const problems: string[] = [];
 
@@ -46,7 +46,9 @@ export function validateInstallation(
 
     const compaction = asRecord(config.compaction);
     if (!compaction || compaction.auto !== true) {
-      problems.push("compaction.auto no esta habilitado");
+      if (options.configManagedByPlugin !== true) {
+        problems.push("compaction.auto no esta habilitado");
+      }
     }
   } catch (error) {
     problems.push(`opencode.jsonc ilegible: ${(error as Error).message}`);
