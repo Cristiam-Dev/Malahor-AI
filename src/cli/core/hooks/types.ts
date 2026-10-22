@@ -271,6 +271,21 @@ export const CODE_MODE_TOOL_NAMES = new Set([
   "python",
 ]);
 
+// OpenCode normaliza las tools MCP como `<servidor>_<tool>`. Los servidores
+// gestionados por Malahor deben pasar por el mismo punto de mediacion que el
+// prefijo legacy `mcp_`, sin convertirlos en permisos V2 desconocidos.
+export const MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "obsidian", "codegraph"] as const;
+
+export function isMcpToolName(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return MCP_SERVER_TOOL_PREFIXES.some((prefix) => (
+    normalized === prefix
+    || normalized.startsWith(`${prefix}_`)
+    || normalized.startsWith(`${prefix}.`)
+    || normalized.startsWith(`${prefix}:`)
+  ));
+}
+
 export interface HookContext {
   event: HookEvent;
   harness: "cli" | "mcp" | "opencode" | "unknown";

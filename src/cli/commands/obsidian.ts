@@ -112,7 +112,7 @@ async function runSetup(paths: MalahorPaths, mode: ObsidianMode, options: Obsidi
   printLine(`Secret: ${options.dryRun ? "would write" : "written"} ${secretFile}`);
   printLine(`Script: ${options.dryRun ? "would write" : "written"} ${scriptFile}`);
   printLine(`OpenCode config: ${options.dryRun ? "would sync" : "synced"} ${opencodeConfig}`);
-  printLine("Permission: external_directory=deny");
+  printLine("Permission: unchanged; se conserva la politica nativa de OpenCode");
 
   if (!options.dryRun) {
     await printVerify(paths, mode);
@@ -317,10 +317,9 @@ function secureChmod(target: string, mode: number): void {
   }
 }
 
-function syncOpenCodeObsidian(paths: MalahorPaths, configPath: string, mode: ObsidianMode, scriptFile: string, dryRun: boolean): OpenCodeConfig {
+export function syncOpenCodeObsidian(paths: MalahorPaths, configPath: string, mode: ObsidianMode, scriptFile: string, dryRun: boolean): OpenCodeConfig {
   const backup = backupFile(configPath, paths.backupsDir, dryRun);
   const current = readOpenCodeConfig(configPath);
-  const permission = { ...(asRecord(current.permission) ?? {}), external_directory: "deny" };
   const next: OpenCodeConfig = {
     ...current,
     mcp: {
@@ -331,7 +330,6 @@ function syncOpenCodeObsidian(paths: MalahorPaths, configPath: string, mode: Obs
         enabled: true,
       },
     },
-    permission,
   };
 
   if (!dryRun) {

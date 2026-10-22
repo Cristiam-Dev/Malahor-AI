@@ -117,6 +117,15 @@ function collectFindings(raw: string, paths: MalahorPaths): ConfigMigrationFindi
     }
   }
 
+  const permission = recordValue(value.permission);
+  if (permission && Object.keys(permission).length === 1 && permission.external_directory === "deny") {
+    findings.push({
+      path: "/permission",
+      removable: true,
+      reason: "Deny global legacy de external_directory generado por el setup antiguo de Obsidian; OpenCode V2 conserva sus defaults nativos.",
+    });
+  }
+
   const compaction = recordValue(value.compaction);
   if (compaction && isDefaultCompaction(compaction)) {
     findings.push({ path: "/compaction", removable: true, reason: "Defaults de compaction escritos por Malahor; el hook runtime los sustituye." });

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { CODE_MODE_TOOL_NAMES, type HookContext, type HookEvent, type HookProfile, type HookRule, type HookViolation } from "./types";
+import { CODE_MODE_TOOL_NAMES, isMcpToolName, type HookContext, type HookEvent, type HookProfile, type HookRule, type HookViolation } from "./types";
 
 export const builtInHookRules: HookRule[] = [
   { id: "policy-integrity", run: policyIntegrityGuard },
@@ -428,9 +428,9 @@ function pluginPermissionGuard(context: HookContext): HookViolation[] {
   const action = typeof context.metadata?.action === "string" ? context.metadata.action : "desconocida";
   return [{
     id: "MAL-HOOK-PLUGIN-UNMAPPED",
-    decision: "ask",
-    message: `Permiso V2 no mapeado a una operacion mediada: ${action}`,
-    fix: "Mapea la accion a permission/tool/shell/sesion o deniega la capacidad; no asumas cobertura.",
+    decision: "warn",
+    message: `Permiso V2 no mapeado; se conserva la decision nativa del host: ${action}`,
+    fix: "Mapea la accion si necesita un control critico de Malahor; las operaciones normales siguen los defaults de OpenCode.",
   }];
 }
 
@@ -600,7 +600,7 @@ function isSecretPath(target: string): boolean {
 }
 
 function isMcpTool(tool: string): boolean {
-  return /^mcp[_.:-]/i.test(tool) || /^mcp$/i.test(tool);
+  return isMcpToolName(tool);
 }
 
 function parseHttpUrl(value: string): URL | null {

@@ -6,6 +6,7 @@ import {
   levelForProject,
   obsidianEnabled,
   parseContextLevel,
+  registerProjectRoot,
   resolveContextTarget,
   saveProjectContext,
   withGraphify,
@@ -13,7 +14,7 @@ import {
   type ContextLevel,
 } from "../core/context";
 import { isSandbox, type MalahorPaths } from "../core/paths";
-import type { ProjectAliases } from "../core/project";
+import { resolveCanonicalProjectKey, type ProjectAliases } from "../core/project";
 import { detectStack } from "../core/stack";
 import { loadDb, saveDb } from "../../mnemo/db";
 import { contextForProject } from "../../mnemo/context";
@@ -59,6 +60,9 @@ export function runContext(options: ContextOptions): void {
       assertArgCount(options.args, 1, "Uso: malahor-ai context set mnemo|mnemo+graphify|mnemo+graphify+obsidian [--project <key>] [--dry-run]");
       printSet(paths, config.projects.aliases, options);
       return;
+    case "register":
+      printRegister(paths, config.projects.aliases, options);
+      return;
     case "obsidian":
       assertArgCount(options.args, 1, "Uso: malahor-ai context obsidian on|off [--project <key>] [--dry-run]");
       printObsidianToggle(paths, config.projects.aliases, options);
@@ -84,6 +88,8 @@ function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: str
   printLine("Status:");
   printLine(`- Project: ${target.name}`);
   printLine(`- Canonical key: ${target.canonicalKey}`);
+  printLine(`- Active root: ${target.root || "not registered"}`);
+  printLine(`- Registered roots: ${target.registeredRoots?.length ? target.registeredRoots.join(", ") : "none"}`);
   printLine(`- Context level: ${level}`);
   printLine("- Mnemo: enabled (always)");
   printLine(`- Graphify: ${graphifyEnabled(level) ? "enabled" : "disabled"}`);
@@ -172,6 +178,21 @@ function printSet(paths: MalahorPaths, aliases: ProjectAliases, options: Context
   applyLevel(paths, target, nextLevel, options.dryRun, []);
 }
 
+function printRegister(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
+  const requested = options.project ?? options.args[0];
+  const roots = options.project ? options.args : options.args.slice(1);
+  if (!requested || roots.length === 0) {
+    throw new Error("Uso: malahor-ai context register <project> <root> [<root> ...] [--dry-run]");
+  }
+
+  const canonicalKey = resolveCanonicalProjectKey(requested, aliases);
+  for (const root of roots) {
+    registerProjectRoot(paths.projectsFile, canonicalKey, root, options.dryRun);
+    printLine(`- ${options.dryRun ? "would register" : "registered"}: ${canonicalKey} -> ${root}`);
+  }
+  printLine(`Default root: ${roots.at(-1)}`);
+}
+
 function printObsidianToggle(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
   const target = resolveContextTarget(paths, aliases, options.project);
   const enabled = parseToggle(options.args[0], "obsidian");
@@ -203,7 +224,7 @@ function printGraphifyToggle(paths: MalahorPaths, aliases: ProjectAliases, optio
   applyLevel(paths, target, next, options.dryRun, notes);
 }
 
-function applyLevel(paths: MalahorPaths, target: { canonicalKey: string }, next: ContextLevel, dryRun: boolean, notes: string[]): void {
+function applyLevel(paths: MalahorPaths, target: { canonicalKey: string; root?: string }, next: ContextLevel, dryRun: boolean, notes: string[]): void {
   const current = levelForProject(paths.projectsFile, target.canonicalKey);
 
   printLine(`Project: ${target.canonicalKey}`);
@@ -217,7 +238,7 @@ function applyLevel(paths: MalahorPaths, target: { canonicalKey: string }, next:
     return;
   }
 
-  saveProjectContext(paths.projectsFile, target.canonicalKey, next, dryRun);
+  saveProjectContext(paths.projectsFile, target.canonicalKey, next, dryRun, target.root || undefined);
   printLine(`Result: ${dryRun ? "would set" : "set"} ${next}`);
 }
 
@@ -260,6 +281,7 @@ Usage:
   malahor-ai context capsule [--project <key>] [--limit <n>]
   malahor-ai context save [summary...] [--project <key>] [--dry-run]
   malahor-ai context set <nivel> [--project <key>] [--dry-run]
+  malahor-ai context register <project> <root> [<root> ...] [--dry-run]
   malahor-ai context obsidian on|off [--project <key>] [--dry-run]
   malahor-ai context graphify on|off [--project <key>] [--dry-run]
 

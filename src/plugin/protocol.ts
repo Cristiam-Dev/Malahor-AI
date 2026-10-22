@@ -11,12 +11,16 @@ Idioma y autoridad
 
 Proyecto y contexto
 - Resuelve el proyecto activo a su clave canónica antes de consultar memoria, código o documentación; reutiliza aliases existentes y no crees duplicados.
+- Si el proyecto está registrado, usa su raíz/defaultRoot autorizada para el contexto de código aunque la sesión esté en otra ubicación; no pidas una ruta si la registry es inequívoca.
+- Si no hay raíz registrada o hay varias candidatas, pide una sola aclaración antes de operar sobre código.
 - Ordena el contexto así: resolver de proyecto, memoria mediante mem_*, contexto técnico configurado, documentación habilitada y lecturas puntuales.
 - Respeta el nivel de contexto del proyecto. No actives MCP, documentación o herramientas opcionales solo por comodidad.
 - La configuración global, memoria, grafos, índices y assets de Malahor viven fuera del repositorio del usuario.
 
 Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
+- El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni la documentación en Obsidian.
+- Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
 - No edites opencode.json/opencode.jsonc manualmente ni pidas al usuario hacerlo; usa las rutas de diagnóstico y reparación de Malahor.
 - Si instalación, permisos o política cambian, informa que hace falta una sesión nueva para recargar el host.
 

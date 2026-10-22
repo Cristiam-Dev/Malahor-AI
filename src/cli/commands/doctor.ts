@@ -50,7 +50,7 @@ function renderReport(
   repairs: string[],
   options: DoctorOptions,
 ): void {
-  const project = resolveProject(paths.cwd, config.projects.aliases);
+  const project = resolveProject(packagePaths?.root ?? paths.cwd, config.projects.aliases);
   const graphStatus = graphifyStatus(paths);
   const checks: CheckResult[] = [];
 

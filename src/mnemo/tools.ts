@@ -1,9 +1,9 @@
 import { toolDefinitions } from "./tool-definitions";
+import { resolveRegisteredProject } from "../cli/core/context";
 import { auditHookResult, runHooks } from "../cli/core/hooks/engine";
 import { loadHookPolicy, parseHookProfile } from "../cli/core/hooks/policy-loader";
 import type { HookEvent } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
-import { resolveProject } from "../cli/core/project";
 import { getObservation, listProjects, saveObservation, saveSessionSummary, searchObservations, type ObservationType } from "./db";
 import { contextForProject, memoryBrief } from "./context";
 import { deleteProjectMemory, inspectProjectMemory, moveMemory, previewMemoryMove, previewProjectDeletion } from "./admin";
@@ -71,7 +71,12 @@ export function callTool(call: ToolCall): unknown {
 
 function checkMalahorHooks(args: Record<string, unknown>): unknown {
   const paths = resolvePaths();
-  const project = resolveProject(paths.cwd);
+  const targetPaths = stringListArg(args.paths);
+  const metadata = recordArg(args.metadata);
+  const project = resolveRegisteredProject(paths, {}, {
+    override: optionalStringArg(metadata.project),
+    targetPaths,
+  });
   const profileOverride = typeof args.profile === "string" && args.profile.trim() ? parseHookProfile(args.profile) : undefined;
   const policyLoad = loadHookPolicy(paths, project.canonicalKey, profileOverride);
   const context = {
@@ -86,9 +91,9 @@ function checkMalahorHooks(args: Record<string, unknown>): unknown {
     security: policyLoad.security,
     policyMeta: policyLoad.policyMeta,
     command: optionalStringArg(args.command),
-    targetPaths: stringListArg(args.paths),
+    targetPaths,
     confirmation: optionalStringArg(args.confirm),
-    metadata: recordArg(args.metadata),
+    metadata,
   };
   return auditHookResult(context, runHooks(context));
 }

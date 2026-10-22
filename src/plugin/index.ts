@@ -459,13 +459,13 @@ async function registerMcpTransform(
             type: "local",
             command: ["node", paths.mnemoIndex],
             disabled: false,
+            codemode: false,
           });
         } else {
           warnings.push("mcp.mnemo-foreign-definition");
         }
       }
 
-      if (!projectObsidianEnabled(paths, cwd)) return;
       const existingObsidian = editor.get("obsidian");
       if (!existingObsidian) {
         warnings.push("mcp.obsidian-definition-missing");
@@ -478,7 +478,7 @@ async function registerMcpTransform(
 
       // La definición remota aprobada se conserva sin copiar headers ni secretos
       // a otro store; la resolución dinámica del host pertenece a T-5.11.8.
-      editor.set("obsidian", { ...existingObsidian, disabled: false });
+      editor.set("obsidian", { ...existingObsidian, disabled: false, codemode: false });
     });
     if (isRecord(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => (registration.dispose as () => Promise<void> | void)());
@@ -494,18 +494,6 @@ function isMalahorMnemo(config: McpServerConfig, paths: MalahorPaths): boolean {
   if (config.type !== "local" || !Array.isArray(config.command)) return false;
   const command = config.command.filter((item): item is string => typeof item === "string");
   return command.some((item) => path.resolve(paths.opencodeDir, item) === path.resolve(paths.mnemoIndex));
-}
-
-function projectObsidianEnabled(paths: MalahorPaths, cwd: string): boolean {
-  try {
-    const raw = JSON.parse(fs.readFileSync(paths.projectsFile, "utf8")) as unknown;
-    if (!isRecord(raw)) return false;
-    const project = resolveProject(cwd).canonicalKey;
-    const entry = isRecord(raw[project]) ? raw[project] : undefined;
-    return entry?.context === "mnemo+graphify+obsidian";
-  } catch {
-    return false;
-  }
 }
 
 function sessionLocationDirectory(value: unknown): string | undefined {

@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { backupFile } from "../core/backup";
 import { copyAssets } from "../core/assets";
 import { formatExecutionPolicy, loadConfig, saveExecutionPolicy, type MalahorExecutionPolicy } from "../core/config";
+import { registerProjectRoot } from "../core/context";
 import { detectEnvironment, detectOpenCodeHost, type DetectionResult } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
@@ -113,7 +114,8 @@ export function runUpdate(options: UpdateOptions): void {
   // Migracion garantizada: cualquier update reescribe el formato de politica vigente,
   // incluyendo legacy deny -> whitelist agent-safe.
   const execution = resolveFinalPolicy(config.execution, options);
-  const project = resolveProject(paths.cwd, config.projects.aliases);
+  const project = resolveProject(packagePaths.root, config.projects.aliases);
+  registerProjectRoot(paths.projectsFile, project.canonicalKey, project.root, options.dryRun);
   const policyLoad = loadHookPolicy(paths, project.canonicalKey);
   assertHooksAllowed({
     event: "install.beforePolicy",

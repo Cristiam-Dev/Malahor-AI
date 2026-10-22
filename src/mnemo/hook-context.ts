@@ -1,7 +1,7 @@
+import { resolveRegisteredProject } from "../cli/core/context";
 import { loadHookPolicy } from "../cli/core/hooks/policy-loader";
 import type { HookContext, HookEvent } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
-import { resolveProject } from "../cli/core/project";
 
 /**
  * Contexto comun para operaciones MCP que ejecutan efectos propios.
@@ -10,7 +10,13 @@ import { resolveProject } from "../cli/core/project";
  */
 export function mcpHookContext(event: HookEvent, overrides: Partial<HookContext> = {}): HookContext {
   const paths = resolvePaths();
-  const project = resolveProject(paths.cwd);
+  const metadataProject = typeof overrides.metadata?.project === "string" ? overrides.metadata.project : undefined;
+  const project = resolveRegisteredProject(paths, {}, {
+    override: metadataProject,
+    preferredRoot: overrides.projectRoot,
+    targetPaths: overrides.targetPaths,
+    projectHint: overrides.memoryScope,
+  });
   const policyLoad = loadHookPolicy(paths, project.canonicalKey);
 
   return {

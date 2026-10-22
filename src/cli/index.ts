@@ -31,6 +31,7 @@ async function main(argv: string[]): Promise<void> {
           yes: parsed.flags.has("yes"),
           confirm: parsed.options.confirm,
           json: parsed.flags.has("json"),
+          v2: parsed.flags.has("v2"),
         });
         return;
       case "install":

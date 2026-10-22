@@ -1,13 +1,14 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { loadConfig } from "../core/config";
+import { resolveRegisteredProject } from "../core/context";
 import { approvalsDirectory, grantApproval } from "../core/hooks/approvals";
 import { auditFilePath } from "../core/hooks/audit";
 import { assertHooksAllowed, auditHookResult, formatHookResult, hookExitCode, runHooks } from "../core/hooks/engine";
 import { loadHookPolicy, parseHookProfile, saveHookProfile } from "../core/hooks/policy-loader";
 import { HOOK_EVENTS, type HookContext, type HookEvent, type HookResult } from "../core/hooks/types";
 import { isSandbox } from "../core/paths";
-import { resolveCanonicalProjectKey, resolveProject } from "../core/project";
+import { resolveCanonicalProjectKey } from "../core/project";
 
 export interface HooksOptions {
   action: string;
@@ -61,12 +62,15 @@ interface ResolvedHookContext {
 
 function resolveHookContext(options: HooksOptions, eventValue = options.args[0]): ResolvedHookContext {
   const config = loadConfig();
-  const project = resolveProject(config.paths.cwd, config.projects.aliases);
   const event = parseHookEvent(eventValue);
+  const targetPaths = parseTargetPaths(options.paths, config.paths.cwd, event);
+  const project = resolveRegisteredProject(config.paths, config.projects.aliases, {
+    override: options.project,
+    targetPaths,
+  });
   const projectKey = options.project ? resolveCanonicalProjectKey(options.project, config.projects.aliases) : project.canonicalKey;
   const profileOverride = options.profile ? parseHookProfile(options.profile) : undefined;
   const policyLoad = loadHookPolicy(config.paths, projectKey, profileOverride);
-  const targetPaths = parseTargetPaths(options.paths, config.paths.cwd, event);
   const context: HookContext = {
     event,
     harness: "cli",
@@ -185,7 +189,7 @@ function parseApprovalTtl(value: string | undefined): number | undefined {
 
 function printHooksStatus(options: HooksOptions): void {
   const config = loadConfig();
-  const currentProject = resolveProject(config.paths.cwd, config.projects.aliases);
+  const currentProject = resolveRegisteredProject(config.paths, config.projects.aliases, { override: options.project });
   const projectKey = options.project ? resolveCanonicalProjectKey(options.project, config.projects.aliases) : currentProject.canonicalKey;
   const policyLoad = loadHookPolicy(config.paths, projectKey, options.profile ? parseHookProfile(options.profile) : undefined);
 
@@ -221,7 +225,7 @@ function printHooksStatus(options: HooksOptions): void {
 function printHooksProfile(options: HooksOptions): void {
   const subcommand = options.args[0] ?? "get";
   const config = loadConfig();
-  const currentProject = resolveProject(config.paths.cwd, config.projects.aliases);
+  const currentProject = resolveRegisteredProject(config.paths, config.projects.aliases, { override: options.project });
   const projectKey = options.project ? resolveCanonicalProjectKey(options.project, config.projects.aliases) : undefined;
 
   if (subcommand === "get") {

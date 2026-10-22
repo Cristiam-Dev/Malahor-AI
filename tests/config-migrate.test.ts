@@ -29,6 +29,7 @@ describe("migracion V2 verify-only", () => {
     const original = `{
   // conservar comentario y modelo ajeno
   "model": "user/model",
+  "permission": { "external_directory": "deny" },
   "mcp": {
     "mnemo": { "type": "local", "command": ["node", "${paths.mnemoIndex}"], "enabled": true }
   },
@@ -50,8 +51,9 @@ describe("migracion V2 verify-only", () => {
       "/agent/build/options/malahor",
       "/agent/build/permission/edit",
       "/agent/build/permission/task",
-      "/agent/build/permission/bash",
-      "/compaction",
+       "/agent/build/permission/bash",
+       "/permission",
+       "/compaction",
     ]));
     expect(fs.readFileSync(paths.opencodeConfig, "utf8")).toBe(original);
 
@@ -63,6 +65,7 @@ describe("migracion V2 verify-only", () => {
     const value = nodeValue(readDocument(migrated).root) as Record<string, unknown>;
     expect(migrated).toContain("conservar comentario");
     expect(value.model).toBe("user/model");
+    expect(value.permission).toBeUndefined();
     expect((value.mcp as Record<string, unknown> | undefined)?.mnemo).toBeUndefined();
     expect(value.compaction).toBeUndefined();
     const build = ((value.agent as Record<string, unknown>).build as Record<string, unknown>);

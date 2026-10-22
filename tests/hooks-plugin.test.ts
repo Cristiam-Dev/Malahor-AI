@@ -76,6 +76,7 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toContain(MALAHOR_PROTOCOL_MARKER);
     expect(system[0]?.text).toContain("mem_brief");
     expect(system[0]?.text).toContain("Principio de socio");
+    expect(system[0]?.text).toContain("no convierte en interactivos los guardados rutinarios de memoria");
   });
 
   test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {
@@ -189,6 +190,24 @@ describe("adaptador de plugin V2", () => {
     expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE")).toBe(true);
   });
 
+  test("autorizacion de archivos usa la raiz registrada aunque el cwd sea otro", async () => {
+    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({
+      demo: { context: "mnemo", roots: [repo], defaultRoot: repo },
+    })}\n`, "utf8");
+
+    const result = await evaluateToolHook({
+      tool: "read",
+      input: { filePath: path.join(repo, "package.json") },
+    }, { cwd: home, permissionRegistered: true, shellRegistered: true, env });
+
+    expect(result.decision).toBe("allow");
+    const audit = fs.readFileSync(path.join(home, "audit", "security.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { project: string; resourceRefs: string[] });
+    expect(audit.at(-1)?.project).toBe("demo");
+  });
+
   test("permission.evaluate mantiene un deny del host aunque el motor permita", async () => {
     const input: Record<string, unknown> = {
       action: "read",
@@ -202,7 +221,7 @@ describe("adaptador de plugin V2", () => {
     expect(input.effect).toBe("deny");
   });
 
-  test("permission.evaluate pide aprobacion para acciones no mapeadas", async () => {
+  test("permission.evaluate conserva defaults del host para acciones no mapeadas", async () => {
     const input: Record<string, unknown> = {
       action: "capacidad.desconocida",
       resources: [],
@@ -211,8 +230,22 @@ describe("adaptador de plugin V2", () => {
 
     const result = await evaluatePermission(input, { cwd: repo, permissionRegistered: true, env });
 
-    expect(result.effect).toBe("ask");
+    expect(result.effect).toBe("allow");
+    expect(result.result.decision).toBe("warn");
     expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-PLUGIN-UNMAPPED")).toBe(true);
+  });
+
+  test("permission.evaluate trata Mnemo y Obsidian directos como MCP sin pedir permiso adicional", async () => {
+    for (const action of ["mnemo_mem_save", "obsidian_vault_write"]) {
+      const result = await evaluatePermission({
+        action,
+        resources: [],
+        effect: "allow",
+      }, { cwd: repo, permissionRegistered: true, env });
+
+      expect(result.effect).toBe("allow");
+      expect(result.result.violations).toEqual([]);
+    }
   });
 
   test("permission.evaluate mapea MCP y aplica la allowlist de tools", async () => {
@@ -618,6 +651,7 @@ describe("adaptador de plugin V2", () => {
         type: "local",
         command: ["node", path.join(home, "mnemo", "index.js")],
         disabled: false,
+        codemode: false,
       });
       expect(sets.some((entry) => entry.name === "foreign")).toBe(false);
       expect(sets.some((entry) => entry.name === "obsidian")).toBe(false);
@@ -632,14 +666,13 @@ describe("adaptador de plugin V2", () => {
     }
   });
 
-  test("ctx.mcp.transform no pisa Mnemo ajeno y conserva Obsidian remoto habilitado", async () => {
+  test("ctx.mcp.transform no pisa Mnemo ajeno y registra Obsidian remoto globalmente", async () => {
     const originalHome = process.env.MALAHOR_HOME;
     const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
     process.env.MALAHOR_HOME = home;
     process.env.MALAHOR_OPENCODE_DIR = opencode;
     fs.mkdirSync(path.join(home, "mnemo"), { recursive: true });
     fs.writeFileSync(path.join(home, "mnemo", "index.js"), "// mnemo\n", "utf8");
-    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({ demo: { context: "mnemo+graphify+obsidian" } })}\n`, "utf8");
 
     const sets: string[] = [];
     const state: Record<string, Record<string, unknown>> = {
@@ -669,6 +702,7 @@ describe("adaptador de plugin V2", () => {
       expect(sets).toEqual(["obsidian"]);
       expect(state.mnemo.command).toEqual(["node", "/tmp/other-mnemo.js"]);
       expect(state.obsidian.disabled).toBe(false);
+      expect(state.obsidian.codemode).toBe(false);
       expect(state.obsidian.headers).toEqual({ Authorization: "Bearer {env:OBSIDIAN_API_KEY}" });
     } finally {
       if (originalHome === undefined) delete process.env.MALAHOR_HOME;

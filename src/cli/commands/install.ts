@@ -9,6 +9,7 @@ import {
   saveExecutionPolicy,
   type MalahorExecutionPolicy,
 } from "../core/config";
+import { registerProjectRoot } from "../core/context";
 import { detectEnvironment, detectOpenCodeHost, type DetectionResult } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
@@ -118,7 +119,8 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   validateBeforePolicy(paths, packagePaths, options, host.kind === "v2", host.kind === "v2");
 
   const execution = await resolveFinalPolicy(config.execution, options);
-  const project = resolveProject(paths.cwd, config.projects.aliases);
+  const project = resolveProject(packagePaths.root, config.projects.aliases);
+  registerProjectRoot(paths.projectsFile, project.canonicalKey, project.root, options.dryRun);
   const policyLoad = loadHookPolicy(paths, project.canonicalKey);
   assertHooksAllowed({
     event: "install.beforePolicy",

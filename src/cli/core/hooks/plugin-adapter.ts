@@ -1,11 +1,13 @@
 import path from "node:path";
 
+import { registeredProjectRoots } from "../context";
 import { resolvePaths, type MalahorPaths } from "../paths";
 import { resolveProject } from "../project";
 import { auditHookResult, runHooks } from "./engine";
 import { loadHookPolicy } from "./policy-loader";
 import {
   CODE_MODE_TOOL_NAMES,
+  isMcpToolName,
   type HookContext,
   type HookDecision,
   type HookEvent,
@@ -297,7 +299,7 @@ function buildContext(
 
   try {
     const paths = pluginPaths(cwd, env);
-    const project = resolveProject(cwd);
+    const project = resolveOperationProject(cwd, details.targetPaths, paths);
     const loaded = loadHookPolicy(paths, project.canonicalKey);
     const context: HookContext = {
       event,
@@ -365,6 +367,24 @@ function pluginPaths(cwd: string, env: NodeJS.ProcessEnv): MalahorPaths {
   return resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
 }
 
+function resolveOperationProject(cwd: string, targetPaths: string[] | undefined, paths: MalahorPaths): ReturnType<typeof resolveProject> {
+  const candidates = registeredProjectRoots(paths.projectsFile)
+    .sort((left, right) => right.root.length - left.root.length);
+  const absoluteTargets = (targetPaths ?? []).map((target) => path.resolve(cwd, target));
+  const candidate = candidates.find((entry) => (
+    isWithinPath(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root))
+  ));
+  if (!candidate) return resolveProject(cwd);
+
+  const resolved = resolveProject(candidate.root);
+  return { ...resolved, canonicalKey: candidate.canonicalKey, graphKey: candidate.canonicalKey };
+}
+
+function isWithinPath(value: string, root: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(value));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function permissionDetails(action: string, resources: string[], metadata: Record<string, unknown>): EvaluationDetails {
   const normalized = action.toLowerCase();
   const metadataCommand = stringValue(metadata.command) || stringValue(metadata.cmd);
@@ -404,7 +424,7 @@ function permissionDetails(action: string, resources: string[], metadata: Record
     return { event: "tool.execute.before", metadata: { ...metadata, tool: normalized } };
   }
 
-  if (normalized === "task" || normalized.startsWith("mcp_") || normalized.startsWith("mcp.")) {
+  if (normalized === "task" || isMcpToolName(normalized)) {
     return {
       event: "tool.execute.before",
       metadata: { ...metadata, tool: normalized === "task" ? "task" : action },

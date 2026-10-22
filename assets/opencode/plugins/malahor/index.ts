@@ -1,9 +1,9 @@
 // malahor-managed
 // @ts-nocheck bundle generado desde src/plugin/index.ts; el source se typechequea con tsconfig.json
 // src/plugin/index.ts
-import fs6 from "node:fs";
+import fs7 from "node:fs";
 import os2 from "node:os";
-import path9 from "node:path";
+import path10 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -1484,11 +1484,86 @@ function recordValue2(value) {
 }
 
 // src/cli/core/hooks/plugin-adapter.ts
-import path8 from "node:path";
+import path9 from "node:path";
 
-// src/cli/core/hooks/audit.ts
+// src/cli/core/context.ts
 import fs4 from "node:fs";
 import path6 from "node:path";
+var CONTEXT_LEVELS = ["mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"];
+function parseContextLevel(value) {
+  if (typeof value !== "string" || !CONTEXT_LEVELS.includes(value)) {
+    throw new Error(`Nivel de contexto invalido: ${String(value)}. Usa ${CONTEXT_LEVELS.join(", ")}.`);
+  }
+  return value;
+}
+function loadProjectsFile(filePath) {
+  if (!fs4.existsSync(filePath)) {
+    return {};
+  }
+  const raw = fs4.readFileSync(filePath, "utf8").trim();
+  if (!raw)
+    return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`No se pudo leer ${filePath}: ${error.message}`);
+  }
+  if (!isRecord2(parsed)) {
+    throw new Error(`La configuracion ${filePath} no contiene un objeto JSON valido.`);
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!isRecord2(value)) {
+      throw new Error(`La configuracion ${filePath} en ${key} debe ser un objeto.`);
+    }
+    try {
+      const roots = readRoots(value.roots, `${filePath} en ${key}.roots`);
+      const defaultRoot = readRoot(value.defaultRoot, `${filePath} en ${key}.defaultRoot`);
+      result[key] = {
+        context: parseContextLevel(value.context),
+        ...roots.length > 0 ? { roots } : {},
+        ...defaultRoot ? { defaultRoot } : {}
+      };
+    } catch (error) {
+      throw new Error(`La configuracion ${filePath} en ${key}: ${error.message}`);
+    }
+  }
+  return result;
+}
+function registeredProjectRoots(projectsFile) {
+  const projects = loadProjectsFile(projectsFile);
+  return Object.entries(projects).flatMap(([canonicalKey, entry]) => (entry.roots ?? []).map((root) => ({ canonicalKey, root })));
+}
+function normalizeRoot(root) {
+  const resolved = path6.resolve(root);
+  try {
+    return fs4.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+function readRoots(value, key) {
+  if (value === undefined || value === null)
+    return [];
+  if (!Array.isArray(value))
+    throw new Error(`La configuracion ${key} debe ser una lista de strings.`);
+  return value.filter((item) => typeof item === "string" && Boolean(item.trim())).map(normalizeRoot);
+}
+function readRoot(value, key) {
+  if (value === undefined || value === null || value === "")
+    return;
+  if (typeof value !== "string")
+    throw new Error(`La configuracion ${key} debe ser un string.`);
+  return normalizeRoot(value);
+}
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/cli/core/hooks/audit.ts
+import fs5 from "node:fs";
+import path7 from "node:path";
 var AUDIT_VERSION = 1;
 var MAX_AUDIT_BYTES = 5 * 1024 * 1024;
 var DEFAULT_MAX_FILES = 10;
@@ -1503,17 +1578,17 @@ function writeAudit(context, result, options = {}) {
     return { ok: true, skipped: true, required, path: filePath };
   }
   try {
-    const directory = path6.dirname(filePath);
+    const directory = path7.dirname(filePath);
     const directoryMode = parseMode(context.security?.audit?.directoryMode, 448);
     const fileMode = parseMode(context.security?.audit?.fileMode, 384);
     const prefix = auditFilePrefix(filePath);
     ensureAuditDirectory(directory, directoryMode, context.malahorHome);
     rotateIfNeeded(filePath, directory, options.now ?? new Date, fileMode, prefix);
     const entry = buildAuditEntry(context, result, options.now ?? new Date);
-    fs4.appendFileSync(filePath, `${JSON.stringify(entry)}
+    fs5.appendFileSync(filePath, `${JSON.stringify(entry)}
 `, { encoding: "utf8", mode: fileMode, flag: "a" });
     secureChmod(filePath, fileMode);
-    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path6.basename(filePath), prefix);
+    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path7.basename(filePath), prefix);
     return { ok: true, skipped: false, required, path: filePath };
   } catch (error) {
     return {
@@ -1530,18 +1605,18 @@ function approvalRefForAudit(nonce) {
 }
 function auditFilePath(malahorHome, overridePath, cwd = process.cwd()) {
   if (overridePath) {
-    const expanded = overridePath.startsWith("~/") ? path6.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
-    return path6.resolve(cwd, expanded);
+    const expanded = overridePath.startsWith("~/") ? path7.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
+    return path7.resolve(cwd, expanded);
   }
-  return path6.join(malahorHome, "audit", "security.jsonl");
+  return path7.join(malahorHome, "audit", "security.jsonl");
 }
 function auditFilePrefix(filePath) {
-  const base = path6.basename(filePath);
+  const base = path7.basename(filePath);
   return base.endsWith(".jsonl") ? base.slice(0, -6) : base;
 }
 function buildAuditEntry(context, result, now = new Date) {
   const policy = result.policy ?? context.policyMeta;
-  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(path6.normalize(path6.resolve(context.cwd, target)))}`))].sort();
+  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(path7.normalize(path7.resolve(context.cwd, target)))}`))].sort();
   const policyHash = policy?.policyHash ? `sha256:${policy.policyHash}` : "sha256:unknown";
   return {
     auditVersion: AUDIT_VERSION,
@@ -1570,52 +1645,52 @@ function auditHost() {
   return process.platform;
 }
 function ensureAuditDirectory(directory, mode, managedRoot) {
-  if (fs4.existsSync(directory)) {
-    const stat = fs4.lstatSync(directory);
+  if (fs5.existsSync(directory)) {
+    const stat = fs5.lstatSync(directory);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error("directorio de auditoria invalido");
     }
     if (isWithin(directory, managedRoot))
       secureChmod(directory, mode);
   } else {
-    fs4.mkdirSync(directory, { recursive: true, mode });
+    fs5.mkdirSync(directory, { recursive: true, mode });
     secureChmod(directory, mode);
   }
 }
 function isWithin(target, root) {
-  const relative = path6.relative(path6.resolve(root), path6.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path6.isAbsolute(relative);
+  const relative = path7.relative(path7.resolve(root), path7.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path7.isAbsolute(relative);
 }
 function rotateIfNeeded(filePath, directory, now, fileMode, prefix) {
-  if (!fs4.existsSync(filePath))
+  if (!fs5.existsSync(filePath))
     return;
-  const stat = fs4.lstatSync(filePath);
+  const stat = fs5.lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error("archivo de auditoria invalido");
   }
   if (stat.size < MAX_AUDIT_BYTES)
     return;
-  const base = path6.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
+  const base = path7.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
   let rotated = `${base}.jsonl`;
   let suffix = 1;
-  while (fs4.existsSync(rotated)) {
+  while (fs5.existsSync(rotated)) {
     rotated = `${base}.${suffix}.jsonl`;
     suffix += 1;
   }
-  fs4.renameSync(filePath, rotated);
+  fs5.renameSync(filePath, rotated);
   secureChmod(rotated, fileMode);
 }
 function pruneAuditFiles(directory, maxFiles, retentionDays, now, activeName, prefix) {
   const keep = Math.max(1, maxFiles);
   const cutoff = now.getTime() - Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
-  const entries = fs4.readdirSync(directory).filter((name) => name !== activeName && name.startsWith(`${prefix}.`) && name.endsWith(".jsonl")).map((name) => {
-    const filePath = path6.join(directory, name);
-    const stat = fs4.statSync(filePath);
+  const entries = fs5.readdirSync(directory).filter((name) => name !== activeName && name.startsWith(`${prefix}.`) && name.endsWith(".jsonl")).map((name) => {
+    const filePath = path7.join(directory, name);
+    const stat = fs5.statSync(filePath);
     return { filePath, mtime: stat.mtimeMs };
   }).sort((left, right) => right.mtime - left.mtime);
   for (const [index, entry] of entries.entries()) {
     if (index >= keep - 1 || entry.mtime < cutoff) {
-      fs4.unlinkSync(entry.filePath);
+      fs5.unlinkSync(entry.filePath);
     }
   }
 }
@@ -1631,7 +1706,7 @@ function parseMode(value, fallback) {
 }
 function secureChmod(target, mode) {
   try {
-    fs4.chmodSync(target, mode);
+    fs5.chmodSync(target, mode);
   } catch (error) {
     if (process.platform !== "win32")
       throw error;
@@ -1643,8 +1718,8 @@ var TRUSTED_CHANNELS = new Set(["cli-tty", "opencode-ui", "host-ui"]);
 
 // src/cli/core/hooks/rules.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
-import fs5 from "node:fs";
-import path7 from "node:path";
+import fs6 from "node:fs";
+import path8 from "node:path";
 
 // src/cli/core/hooks/types.ts
 var CODE_MODE_TOOL_NAMES = new Set([
@@ -1658,6 +1733,11 @@ var CODE_MODE_TOOL_NAMES = new Set([
   "typescript",
   "python"
 ]);
+var MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "obsidian", "codegraph"];
+function isMcpToolName(value) {
+  const normalized = value.trim().toLowerCase();
+  return MCP_SERVER_TOOL_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}_`) || normalized.startsWith(`${prefix}.`) || normalized.startsWith(`${prefix}:`));
+}
 
 // src/cli/core/hooks/rules.ts
 var builtInHookRules = [
@@ -1704,7 +1784,7 @@ function repoBoundaryGuard(context) {
   const writesMalahorData = Boolean(context.metadata?.writesMalahorData);
   if (!writesMalahorData || !context.targetPaths || context.targetPaths.length === 0)
     return [];
-  const unsafe = context.targetPaths.map((targetPath) => path7.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
+  const unsafe = context.targetPaths.map((targetPath) => path8.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
   if (unsafe.length === 0)
     return [];
   return [{
@@ -1935,13 +2015,13 @@ function fileBoundaryGuard(context) {
   if (context.event !== "file.read.before" && context.event !== "file.write.before")
     return [];
   const controls = context.security?.files;
-  const paths = (context.targetPaths ?? []).map((target) => path7.resolve(context.cwd, target));
+  const paths = (context.targetPaths ?? []).map((target) => path8.resolve(context.cwd, target));
   if (paths.length === 0)
     return [];
   const violations = [];
   const write = context.event === "file.write.before";
   const roots = (write ? controls?.allowedWriteRoots : controls?.allowedReadRoots) ?? [];
-  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path7.resolve(context.cwd, root));
+  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path8.resolve(context.cwd, root));
   const enforceRoots = controls?.enforceRoots === true;
   for (const target of paths) {
     const canonical = resolveTargetPath(target, controls?.resolveSymlinks !== false);
@@ -1963,7 +2043,7 @@ function fileBoundaryGuard(context) {
         fix: "Limita la operacion al proyecto/raiz aprobada o genera aprobacion vinculada."
       });
     }
-    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path7.basename(canonical)));
+    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path8.basename(canonical)));
     if (denied) {
       violations.push({
         id: "MAL-HOOK-FILE-DENYLIST",
@@ -2038,9 +2118,9 @@ function pluginPermissionGuard(context) {
   const action = typeof context.metadata?.action === "string" ? context.metadata.action : "desconocida";
   return [{
     id: "MAL-HOOK-PLUGIN-UNMAPPED",
-    decision: "ask",
-    message: `Permiso V2 no mapeado a una operacion mediada: ${action}`,
-    fix: "Mapea la accion a permission/tool/shell/sesion o deniega la capacidad; no asumas cobertura."
+    decision: "warn",
+    message: `Permiso V2 no mapeado; se conserva la decision nativa del host: ${action}`,
+    fix: "Mapea la accion si necesita un control critico de Malahor; las operaciones normales siguen los defaults de OpenCode."
   }];
 }
 function egressPolicyGuard(context) {
@@ -2173,31 +2253,31 @@ function isIndirectExecution(command) {
 }
 function resolveTargetPath(target, followSymlinks) {
   try {
-    if (fs5.existsSync(target)) {
-      return followSymlinks ? fs5.realpathSync(target) : path7.resolve(target);
+    if (fs6.existsSync(target)) {
+      return followSymlinks ? fs6.realpathSync(target) : path8.resolve(target);
     }
-    let parent = path7.dirname(target);
-    while (!fs5.existsSync(parent)) {
-      const next = path7.dirname(parent);
+    let parent = path8.dirname(target);
+    while (!fs6.existsSync(parent)) {
+      const next = path8.dirname(parent);
       if (next === parent)
         return null;
       parent = next;
     }
-    const canonicalParent = followSymlinks ? fs5.realpathSync(parent) : path7.resolve(parent);
-    return path7.join(canonicalParent, path7.relative(parent, target));
+    const canonicalParent = followSymlinks ? fs6.realpathSync(parent) : path8.resolve(parent);
+    return path8.join(canonicalParent, path8.relative(parent, target));
   } catch {
     return null;
   }
 }
 function isSecretPath(target) {
   const normalized = target.replaceAll("\\", "/");
-  const base = path7.basename(normalized);
+  const base = path8.basename(normalized);
   if (base === ".env.example")
     return false;
   return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
 }
 function isMcpTool(tool) {
-  return /^mcp[_.:-]/i.test(tool) || /^mcp$/i.test(tool);
+  return isMcpToolName(tool);
 }
 function parseHttpUrl(value) {
   if (!value.trim())
@@ -2211,7 +2291,7 @@ function parseHttpUrl(value) {
 function programmingQualityGuard(context) {
   const violations = [];
   const files = context.targetPaths ?? [];
-  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path7.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path8.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -2232,7 +2312,7 @@ function programmingQualityGuard(context) {
   return violations;
 }
 function readableTargetPaths(context) {
-  return (context.targetPaths ?? []).map((targetPath) => path7.resolve(context.cwd, targetPath)).filter((targetPath) => fs5.existsSync(targetPath) && fs5.statSync(targetPath).isFile() && fs5.statSync(targetPath).size <= 512 * 1024);
+  return (context.targetPaths ?? []).map((targetPath) => path8.resolve(context.cwd, targetPath)).filter((targetPath) => fs6.existsSync(targetPath) && fs6.statSync(targetPath).isFile() && fs6.statSync(targetPath).size <= 512 * 1024);
 }
 function scanStagedSecrets(cwd, includeWorktree = false) {
   const commands = [
@@ -2254,8 +2334,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
       return null;
     }
     for (const relative of output.split("\x00").filter(Boolean)) {
-      const file = path7.resolve(cwd, relative);
-      if (!fs5.existsSync(file))
+      const file = path8.resolve(cwd, relative);
+      if (!fs6.existsSync(file))
         continue;
       try {
         leaks.push(...scanFileForSecrets(file));
@@ -2268,8 +2348,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
 }
 var PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function scanFileForSecrets(filePath) {
-  const basename = path7.basename(filePath);
-  const content = fs5.readFileSync(filePath, "utf8");
+  const basename = path8.basename(filePath);
+  const content = fs6.readFileSync(filePath, "utf8");
   const patterns = [
     [PRIVATE_KEY_PATTERN, "private-key"],
     [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
@@ -2296,7 +2376,7 @@ function strictness(profile, fallback) {
 }
 function fileSize(filePath) {
   try {
-    return fs5.statSync(filePath).size;
+    return fs6.statSync(filePath).size;
   } catch {
     return 0;
   }
@@ -2326,12 +2406,12 @@ function controlAffectsEvent(gap, event) {
   return true;
 }
 function isWithin2(targetPath, rootPath) {
-  const relative = path7.relative(path7.resolve(rootPath), path7.resolve(targetPath));
-  return relative === "" || !relative.startsWith("..") && !path7.isAbsolute(relative);
+  const relative = path8.relative(path8.resolve(rootPath), path8.resolve(targetPath));
+  return relative === "" || !relative.startsWith("..") && !path8.isAbsolute(relative);
 }
 function isInside(targetPath, rootPath) {
-  const relative = path7.relative(path7.resolve(rootPath), path7.resolve(targetPath));
-  return Boolean(relative) && !relative.startsWith("..") && !path7.isAbsolute(relative);
+  const relative = path8.relative(path8.resolve(rootPath), path8.resolve(targetPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path8.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/engine.ts
@@ -2571,9 +2651,9 @@ function evaluate(context) {
   return auditHookResult(context, runHooks(context));
 }
 async function resolveEvaluationScope(input, options, operationCwd) {
-  const fallback = path8.resolve(options.cwd);
+  const fallback = path9.resolve(options.cwd);
   if (operationCwd) {
-    return { options: { ...options, cwd: path8.resolve(fallback, operationCwd) } };
+    return { options: { ...options, cwd: path9.resolve(fallback, operationCwd) } };
   }
   if (!options.resolveSessionDirectory) {
     return { options: { ...options, cwd: fallback } };
@@ -2593,7 +2673,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
         error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
       };
     }
-    return { options: { ...options, cwd: path8.resolve(directory) } };
+    return { options: { ...options, cwd: path9.resolve(directory) } };
   } catch (error) {
     return {
       options: { ...options, cwd: fallback },
@@ -2602,11 +2682,11 @@ async function resolveEvaluationScope(input, options, operationCwd) {
   }
 }
 function buildContext(event, options, details) {
-  const cwd = path8.resolve(options.cwd);
+  const cwd = path9.resolve(options.cwd);
   const env = options.env ?? process.env;
   try {
     const paths = pluginPaths(cwd, env);
-    const project = resolveProject(cwd);
+    const project = resolveOperationProject(cwd, details.targetPaths, paths);
     const loaded = loadHookPolicy(paths, project.canonicalKey);
     const context = {
       event,
@@ -2646,7 +2726,7 @@ function policyFailure(event, options, detail) {
     }]
   };
   try {
-    const cwd = path8.resolve(options.cwd);
+    const cwd = path9.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
     const project = resolveProject(cwd);
     const context = {
@@ -2667,6 +2747,19 @@ function policyFailure(event, options, detail) {
 }
 function pluginPaths(cwd, env) {
   return resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
+}
+function resolveOperationProject(cwd, targetPaths, paths) {
+  const candidates = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
+  const absoluteTargets = (targetPaths ?? []).map((target) => path9.resolve(cwd, target));
+  const candidate = candidates.find((entry) => isWithinPath(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root)));
+  if (!candidate)
+    return resolveProject(cwd);
+  const resolved = resolveProject(candidate.root);
+  return { ...resolved, canonicalKey: candidate.canonicalKey, graphKey: candidate.canonicalKey };
+}
+function isWithinPath(value, root) {
+  const relative = path9.relative(path9.resolve(root), path9.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path9.isAbsolute(relative);
 }
 function permissionDetails(action, resources, metadata) {
   const normalized = action.toLowerCase();
@@ -2700,7 +2793,7 @@ function permissionDetails(action, resources, metadata) {
   if (CODE_MODE_TOOL_NAMES.has(normalized)) {
     return { event: "tool.execute.before", metadata: { ...metadata, tool: normalized } };
   }
-  if (normalized === "task" || normalized.startsWith("mcp_") || normalized.startsWith("mcp.")) {
+  if (normalized === "task" || isMcpToolName(normalized)) {
     return {
       event: "tool.execute.before",
       metadata: { ...metadata, tool: normalized === "task" ? "task" : action }
@@ -2864,12 +2957,16 @@ Idioma y autoridad
 
 Proyecto y contexto
 - Resuelve el proyecto activo a su clave canónica antes de consultar memoria, código o documentación; reutiliza aliases existentes y no crees duplicados.
+- Si el proyecto está registrado, usa su raíz/defaultRoot autorizada para el contexto de código aunque la sesión esté en otra ubicación; no pidas una ruta si la registry es inequívoca.
+- Si no hay raíz registrada o hay varias candidatas, pide una sola aclaración antes de operar sobre código.
 - Ordena el contexto así: resolver de proyecto, memoria mediante mem_*, contexto técnico configurado, documentación habilitada y lecturas puntuales.
 - Respeta el nivel de contexto del proyecto. No actives MCP, documentación o herramientas opcionales solo por comodidad.
 - La configuración global, memoria, grafos, índices y assets de Malahor viven fuera del repositorio del usuario.
 
 Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
+- El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni la documentación en Obsidian.
+- Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
 - No edites opencode.json/opencode.jsonc manualmente ni pidas al usuario hacerlo; usa las rutas de diagnóstico y reparación de Malahor.
 - Si instalación, permisos o política cambian, informa que hace falta una sesión nueva para recargar el host.
 
@@ -2927,9 +3024,9 @@ function textContainsMarker(value) {
   return isTextPart3(value) && value.text.includes(MALAHOR_PROTOCOL_MARKER);
 }
 function isTextPart3(value) {
-  return isRecord2(value) && value.type === "text" && typeof value.text === "string";
+  return isRecord3(value) && value.type === "text" && typeof value.text === "string";
 }
-function isRecord2(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -2949,12 +3046,12 @@ var SESSION_HOOKS = [
 ];
 var BLOCKING_SHELL_ASK_IDS = ["MAL-HOOK-PUSH-CLI-EVIDENCE"];
 function detectHost(value) {
-  if (!isRecord3(value))
+  if (!isRecord4(value))
     return "unknown";
-  const isV2 = isRecord3(value.session) && typeof value.session.hook === "function" || isRecord3(value.mcp) && typeof value.mcp.transform === "function" || isRecord3(value.agent) && typeof value.agent.transform === "function";
+  const isV2 = isRecord4(value.session) && typeof value.session.hook === "function" || isRecord4(value.mcp) && typeof value.mcp.transform === "function" || isRecord4(value.agent) && typeof value.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord3(value.client) && isRecord3(value.project) && typeof value.directory === "string";
+  const isV1 = isRecord4(value.client) && isRecord4(value.project) && typeof value.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -2972,7 +3069,7 @@ async function setupV2(context) {
   const criticalGaps = [];
   const domain = (name) => {
     const value = context[name];
-    if (!isRecord3(value) || typeof value.hook !== "function")
+    if (!isRecord4(value) || typeof value.hook !== "function")
       return;
     return value;
   };
@@ -3013,7 +3110,7 @@ async function setupV2(context) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord3(input.env)) {
+      if (isRecord4(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -3139,7 +3236,7 @@ async function setupV2(context) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord3(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
+    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord4(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -3170,12 +3267,12 @@ async function setupV2(context) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord3(input.client),
-    project: isRecord3(input.project),
+    client: isRecord4(input.client),
+    project: isRecord4(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord3(input.experimental_workspace)
+    workspace: isRecord4(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -3224,7 +3321,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback, cleanups) {
   try {
     const registration = await domain.hook(name, callback);
-    if (isRecord3(registration) && typeof registration.dispose === "function") {
+    if (isRecord4(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -3253,23 +3350,23 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context) {
-  const location = isRecord3(context.location) ? context.location : undefined;
+  const location = isRecord4(context.location) ? context.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function transformDomain(value) {
-  if (!isRecord3(value) || typeof value.transform !== "function")
+  if (!isRecord4(value) || typeof value.transform !== "function")
     return;
   return value;
 }
 function storageDomain(value) {
-  if (!isRecord3(value) || typeof value.set !== "function")
+  if (!isRecord4(value) || typeof value.set !== "function")
     return;
   return value;
 }
 function eventDomain(value) {
-  if (!isRecord3(value) || typeof value.subscribe !== "function")
+  if (!isRecord4(value) || typeof value.subscribe !== "function")
     return;
   return value;
 }
@@ -3286,26 +3383,25 @@ function captureSubagentsOptIn(cwd, env) {
 async function registerMcpTransform(domain, cwd, env, cleanups) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
-  if (!fs6.existsSync(paths.mnemoIndex)) {
+  if (!fs7.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs6.existsSync(paths.mnemoIndex)) {
+      if (fs7.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
             type: "local",
             command: ["node", paths.mnemoIndex],
-            disabled: false
+            disabled: false,
+            codemode: false
           });
         } else {
           warnings.push("mcp.mnemo-foreign-definition");
         }
       }
-      if (!projectObsidianEnabled(paths, cwd))
-        return;
       const existingObsidian = editor.get("obsidian");
       if (!existingObsidian) {
         warnings.push("mcp.obsidian-definition-missing");
@@ -3315,9 +3411,9 @@ async function registerMcpTransform(domain, cwd, env, cleanups) {
         warnings.push("mcp.obsidian-legacy-local");
         return;
       }
-      editor.set("obsidian", { ...existingObsidian, disabled: false });
+      editor.set("obsidian", { ...existingObsidian, disabled: false, codemode: false });
     });
-    if (isRecord3(registration) && typeof registration.dispose === "function") {
+    if (isRecord4(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -3330,30 +3426,18 @@ function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path9.resolve(paths.opencodeDir, item) === path9.resolve(paths.mnemoIndex));
-}
-function projectObsidianEnabled(paths, cwd) {
-  try {
-    const raw = JSON.parse(fs6.readFileSync(paths.projectsFile, "utf8"));
-    if (!isRecord3(raw))
-      return false;
-    const project = resolveProject(cwd).canonicalKey;
-    const entry = isRecord3(raw[project]) ? raw[project] : undefined;
-    return entry?.context === "mnemo+graphify+obsidian";
-  } catch {
-    return false;
-  }
+  return command.some((item) => path10.resolve(paths.opencodeDir, item) === path10.resolve(paths.mnemoIndex));
 }
 function sessionLocationDirectory(value) {
-  const response = isRecord3(value) && isRecord3(value.data) ? value.data : value;
-  if (!isRecord3(response))
+  const response = isRecord4(value) && isRecord4(value.data) ? value.data : value;
+  if (!isRecord4(response))
     return;
-  const location = isRecord3(response.location) ? response.location : undefined;
+  const location = isRecord4(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path9.join(directory, "plugin-state.json");
+  const file = path10.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -3365,15 +3449,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs6.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path9.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs6.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs7.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path10.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs7.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs6.chmodSync(temporary, 384);
-    fs6.renameSync(temporary, file);
+    fs7.chmodSync(temporary, 384);
+    fs7.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -3383,8 +3467,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path9.resolve(override);
-  return path9.join(os2.homedir(), ".malahor");
+    return path10.resolve(override);
+  return path10.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))
@@ -3400,7 +3484,7 @@ function warn(message) {
 function unique2(values) {
   return [...new Set(values)];
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export {
