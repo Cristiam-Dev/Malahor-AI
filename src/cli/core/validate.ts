@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type { OpenCodeHostKind } from "./detector";
 import { readOpenCodeConfig } from "./injector";
+import { agentContractProblems, agentState, malahorAgentPath } from "./opencode-agents";
 import { MALAHOR_COMMAND_FILES } from "./opencode-commands";
 import type { MalahorPackagePaths } from "./package";
 import type { MalahorPaths } from "./paths";
@@ -11,7 +13,11 @@ import type { MalahorPaths } from "./paths";
 export function validateInstallation(
   paths: MalahorPaths,
   packagePaths: MalahorPackagePaths | null,
-  options: { mcpManagedByPlugin?: boolean; configManagedByPlugin?: boolean } = {},
+  options: {
+    mcpManagedByPlugin?: boolean;
+    configManagedByPlugin?: boolean;
+    agentHost?: OpenCodeHostKind;
+  } = {},
 ): string[] {
   const problems: string[] = [];
 
@@ -32,6 +38,21 @@ export function validateInstallation(
   const missingCommands = MALAHOR_COMMAND_FILES.filter((file) => !fs.existsSync(path.join(commandsDir, file)));
   if (missingCommands.length > 0) {
     problems.push(`Comandos OpenCode faltan: ${missingCommands.join(", ")}`);
+  }
+
+  // Un host desconocido no se adivina: install no crea el agente y la validacion
+  // tampoco puede exigirlo. Un archivo propio (foreign) se respeta y no falla.
+  if (options.agentHost && options.agentHost !== "unknown") {
+    const agentPath = malahorAgentPath(paths);
+    const state = agentState(agentPath);
+
+    if (state === "missing") {
+      problems.push(`Agente malahor falta: ${agentPath}`);
+    } else if (state === "managed") {
+      for (const problem of agentContractProblems(agentPath)) {
+        problems.push(`Agente malahor: ${problem}`);
+      }
+    }
   }
 
   try {

@@ -10,6 +10,7 @@ import {
   removePluginState,
 } from "../core/managed-plugin";
 import { removeOpenCodeCommands } from "../core/opencode-commands";
+import { describeAgentRemoval, removeManagedAgent } from "../core/opencode-agents";
 import { describeSdkRemove, removeOpencodeSdk } from "../core/opencode-sdk";
 import { isSandbox } from "../core/paths";
 
@@ -47,6 +48,7 @@ export function runUninstall(options: UninstallOptions): void {
   });
   const pluginRemoval = removeManagedPlugin(paths.malahorPluginDir, paths.backupsDir, options.dryRun);
   const pluginStateRemoval = removePluginState(paths.pluginState, options.dryRun);
+  const agentRemoval = removeManagedAgent(paths, options.dryRun);
 
   if (!options.dryRun) {
     if (agentsState === "managed" && fs.existsSync(paths.agentsMd)) {
@@ -68,6 +70,10 @@ export function runUninstall(options: UninstallOptions): void {
   printLine(describeSdkRemove(sdkRemoval));
   printLine(describePluginSync(pluginRemoval));
   printLine(describePluginStateRemoval(pluginStateRemoval));
+  printLine(describeAgentRemoval(agentRemoval, options.dryRun));
+  if (agentRemoval.backup?.created) {
+    printLine(`Backup agente: ${agentRemoval.backup.destination}`);
+  }
   printLine(agentsState === "managed"
     ? `AGENTS.md: ${options.dryRun ? "would remove" : "removed"}`
     : agentsState === "foreign"

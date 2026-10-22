@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { MALAHOR_AGENT_FILE } from "./opencode-agents";
 import type { MalahorPaths } from "./paths";
 
 export interface DetectionResult {
@@ -11,6 +13,7 @@ export interface DetectionResult {
   nodeMajor: number;
   opencodeConfigExists: boolean;
   agentsMdExists: boolean;
+  agents: { malahor: boolean };
   commands: Record<string, boolean>;
 }
 
@@ -80,6 +83,9 @@ export function detectEnvironment(paths: MalahorPaths): DetectionResult {
     nodeMajor: Number(nodeVersion.split(".")[0] ?? 0),
     opencodeConfigExists: fs.existsSync(paths.opencodeConfig),
     agentsMdExists: fs.existsSync(paths.agentsMd),
+    agents: {
+      malahor: fs.existsSync(path.join(paths.opencodeDir, "agents", MALAHOR_AGENT_FILE)),
+    },
     commands: {
       node: commandExists("node"),
       bun: commandExists("bun"),

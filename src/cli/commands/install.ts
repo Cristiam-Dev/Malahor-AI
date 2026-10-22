@@ -10,7 +10,7 @@ import {
   type MalahorExecutionPolicy,
 } from "../core/config";
 import { registerProjectRoot } from "../core/context";
-import { detectEnvironment, detectOpenCodeHost, type DetectionResult } from "../core/detector";
+import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostKind } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
@@ -18,6 +18,7 @@ import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { describePluginSync, syncManagedPlugin } from "../core/managed-plugin";
+import { describeAgentSync, malahorAgentAssetPath, syncManagedAgent } from "../core/opencode-agents";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths } from "../core/package";
@@ -43,6 +44,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
   const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
+  const agentAsset = malahorAgentAssetPath(packagePaths.assetsDir, host.kind);
 
   printHeader("malahor-ai install");
   printLine(`Mode: ${config.mode}`);
@@ -68,6 +70,10 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 
   if (!fs.existsSync(pluginAsset)) {
     throw new Error("No existe assets/opencode/plugins/malahor/index.ts.");
+  }
+
+  if (agentAsset && !fs.existsSync(agentAsset)) {
+    throw new Error(`No existe asset de agente ${host.kind}: ${agentAsset}.`);
   }
 
   if (!options.dryRun) {
@@ -97,6 +103,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
     commands: { bun: detection.commands.bun, npm: detection.commands.npm },
   });
   const plugin = syncManagedPlugin(pluginAsset, paths.malahorPluginDir, paths.backupsDir, options.dryRun);
+  const agent = syncManagedAgent(packagePaths.assetsDir, paths, host.kind, options.dryRun);
 
   // MCP + compaction primero (sin tocar politica): Mnemo debe poder usarse ya.
   syncOpenCodeConfig(paths, {
@@ -112,11 +119,12 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   printLine(`OpenCode commands: ${options.dryRun ? "would install" : "installed"} ${commands.files} in ${commands.destination}`);
   printLine(describeSdkEnsure(sdk));
   printLine(describePluginSync(plugin));
+  printLine(describeAgentSync(agent, options.dryRun));
   printLine(`Mnemo MCP: ${host.kind === "v2" ? "runtime plugin transform" : "configured in legacy config"}`);
   printLine(`OpenCode compaction: ${host.kind === "v2" ? "runtime plugin hook (verify-only config)" : "configured"}`);
 
   runGraphifyStep(paths, options);
-  validateBeforePolicy(paths, packagePaths, options, host.kind === "v2", host.kind === "v2");
+  validateBeforePolicy(paths, packagePaths, options, host.kind === "v2", host.kind === "v2", host.kind);
 
   const execution = await resolveFinalPolicy(config.execution, options);
   const project = resolveProject(packagePaths.root, config.projects.aliases);
@@ -200,13 +208,14 @@ function validateBeforePolicy(
   options: InstallOptions,
   mcpManagedByPlugin: boolean,
   configManagedByPlugin: boolean,
+  agentHost: OpenCodeHostKind,
 ): void {
   if (options.dryRun) {
     printLine("Validation: skipped in dry-run");
     return;
   }
 
-  const problems = validateInstallation(paths, packagePaths, { mcpManagedByPlugin, configManagedByPlugin });
+  const problems = validateInstallation(paths, packagePaths, { mcpManagedByPlugin, configManagedByPlugin, agentHost });
   if (problems.length > 0) {
     printLine("Validation: FAILED (no se aplico politica de intervencion; el agente queda desbloqueado)");
     for (const problem of problems) {
