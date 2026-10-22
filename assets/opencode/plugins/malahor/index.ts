@@ -5,9 +5,6 @@ import fs6 from "node:fs";
 import os2 from "node:os";
 import path7 from "node:path";
 
-// src/cli/core/hooks/plugin-adapter.ts
-import path6 from "node:path";
-
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -221,6 +218,9 @@ function mergeAliases(base, extra) {
   }
   return merged;
 }
+
+// src/cli/core/hooks/plugin-adapter.ts
+import path6 from "node:path";
 
 // src/cli/core/hooks/audit.ts
 import fs3 from "node:fs";
@@ -1312,10 +1312,12 @@ function egressPolicyGuard(context) {
     return [];
   const violations = [];
   if (context.metadata?.secretDetected === true && context.security?.persistence?.blockSecrets !== false) {
+    const secretKinds = Array.isArray(context.metadata.secretKinds) ? context.metadata.secretKinds.filter((kind) => typeof kind === "string") : [];
+    const classification = secretKinds.length > 0 ? ` (${secretKinds.join(", ")})` : "";
     violations.push({
       id: "MAL-HOOK-EGRESS-SECRET",
       decision: "deny",
-      message: "Posible secreto en el payload de sesion/egress.",
+      message: `Posible secreto${classification} en el payload de sesion/egress.`,
       fix: "Redacta o retira el secreto antes de enviar/compactar/guardar contexto."
     });
   }
@@ -1533,7 +1535,7 @@ function scanFileForSecrets(filePath) {
   const patterns = [
     [PRIVATE_KEY_PATTERN, "private-key"],
     [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
-    [/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^"']{16,}["']/i, "credential-assignment"]
+    [/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i, "credential-assignment"]
   ];
   const leaks = patterns.filter(([pattern]) => pattern.test(content)).map(([, name]) => `${basename}:${name}`);
   if (/^\.env(\.|$)/.test(basename))
@@ -2108,7 +2110,8 @@ async function evaluatePermission(input, options) {
   const metadata = recordValue(input.metadata) ?? {};
   const generic = action === "*";
   const details = permissionDetails(action, resources, metadata);
-  const built = buildContext(details.event, options, {
+  const scope = await resolveEvaluationScope(input, options, details.cwd);
+  const built = scope.error ? undefined : buildContext(details.event, scope.options, {
     command: details.command,
     targetPaths: details.targetPaths,
     metadata: {
@@ -2119,7 +2122,7 @@ async function evaluatePermission(input, options) {
       ...generic ? { genericPermission: true } : {}
     }
   });
-  const result = built.context ? evaluate(built.context) : policyFailure(details.event, options, built.error ?? "politica no evaluable");
+  const result = built?.context ? evaluate(built.context) : policyFailure(details.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
   const hostEffect = permissionEffect(input.effect);
   const effect = strongerEffect(hostEffect, decisionEffect(result.decision));
   if (effect !== hostEffect || result.decision !== "allow") {
@@ -2135,7 +2138,8 @@ async function evaluateToolHook(input, options) {
   const tool = stringValue(input.tool) || "unknown";
   const toolInput = input.input;
   const mapped = toolDetails(tool, toolInput, options);
-  const built = buildContext(mapped.event, options, {
+  const scope = await resolveEvaluationScope(input, options, mapped.cwd);
+  const built = scope.error ? undefined : buildContext(mapped.event, scope.options, {
     command: mapped.command,
     targetPaths: mapped.targetPaths,
     metadata: {
@@ -2144,7 +2148,7 @@ async function evaluateToolHook(input, options) {
       tool
     }
   });
-  return built.context ? evaluate(built.context) : policyFailure(mapped.event, options, built.error ?? "politica no evaluable");
+  return built?.context ? evaluate(built.context) : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
 }
 async function evaluateShellHook(input, options) {
   const command = stringValue(input.command) || "";
@@ -2160,18 +2164,19 @@ async function evaluateShellHook(input, options) {
   let timeout = originalTimeout;
   let envChanged = false;
   let timeoutChanged = false;
-  const built = buildContext("shell.exec.before", options, {
+  const scope = await resolveEvaluationScope(input, options, stringValue(input.cwd));
+  const built = scope.error ? undefined : buildContext("shell.exec.before", scope.options, {
     command,
     metadata: {
       origin: "opencode-v2",
       shell: stringValue(input.shell),
-      cwd: stringValue(input.cwd),
+      cwd: scope.options.cwd,
       timeoutSeconds: timeout
     }
   });
-  if (!built.context) {
+  if (!built?.context) {
     return {
-      result: policyFailure("shell.exec.before", options, built.error ?? "politica no evaluable"),
+      result: policyFailure("shell.exec.before", scope.options, scope.error ?? built?.error ?? "politica no evaluable"),
       env,
       timeout
     };
@@ -2235,11 +2240,14 @@ async function evaluateSessionHook(event, input, options) {
   if (requestURL)
     metadata.url = requestURL;
   const contentEvent = event === "session.prompt.before" || event === "session.context.before" || event === "session.compaction.before" || event === "session.generate.before" || event === "session.title.before";
-  if (contentEvent && containsSecret(input)) {
+  const secretKinds = contentEvent ? detectSecretKinds(input) : [];
+  if (secretKinds.length > 0) {
     metadata.secretDetected = true;
+    metadata.secretKinds = secretKinds;
   }
-  const built = buildContext(event, options, { metadata });
-  return built.context ? evaluate(built.context) : policyFailure(event, options, built.error ?? "politica no evaluable");
+  const scope = await resolveEvaluationScope(input, options);
+  const built = scope.error ? undefined : buildContext(event, scope.options, { metadata });
+  return built?.context ? evaluate(built.context) : policyFailure(event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
 }
 function shouldBlockPluginResult(result, options, blockingAskIds = []) {
   if (result.decision === "deny")
@@ -2259,6 +2267,37 @@ function formatPluginBlock(result) {
 }
 function evaluate(context) {
   return auditHookResult(context, runHooks(context));
+}
+async function resolveEvaluationScope(input, options, operationCwd) {
+  const fallback = path6.resolve(options.cwd);
+  if (operationCwd) {
+    return { options: { ...options, cwd: path6.resolve(fallback, operationCwd) } };
+  }
+  if (!options.resolveSessionDirectory) {
+    return { options: { ...options, cwd: fallback } };
+  }
+  const sessionID = stringValue(input.sessionID);
+  if (!sessionID) {
+    return {
+      options: { ...options, cwd: fallback },
+      error: "el hook no expuso sessionID para resolver la ubicacion de la sesion"
+    };
+  }
+  try {
+    const directory = await options.resolveSessionDirectory(sessionID);
+    if (!directory) {
+      return {
+        options: { ...options, cwd: fallback },
+        error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
+      };
+    }
+    return { options: { ...options, cwd: path6.resolve(directory) } };
+  } catch (error) {
+    return {
+      options: { ...options, cwd: fallback },
+      error: `no se pudo resolver la ubicacion de la sesion ${sessionID}: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
 }
 function buildContext(event, options, details) {
   const cwd = path6.resolve(options.cwd);
@@ -2382,6 +2421,7 @@ function toolDetails(tool, input, options) {
     }
     return {
       event: "shell.exec.before",
+      cwd: stringValue(args.cwd) || stringValue(args.workdir),
       command: stringValue(args.command) || stringValue(args.cmd),
       metadata: { tool, timeoutSeconds: numberValue(args.timeout, 0) }
     };
@@ -2417,12 +2457,22 @@ function pathValues(value) {
   return [...new Set([...direct, ...arrays, ...nested])];
 }
 var PRIVATE_KEY_PATTERN2 = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
-function containsSecret(value) {
+function detectSecretKinds(value) {
   const text = collectStrings(value).join(`
 `);
   if (!text)
-    return false;
-  return PRIVATE_KEY_PATTERN2.test(text) || /\b(AKIA|ASIA)[A-Z0-9]{16}\b/.test(text) || /(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^"']{16,}["']/i.test(text) || /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/.test(text);
+    return [];
+  const kinds = [];
+  if (PRIVATE_KEY_PATTERN2.test(text))
+    kinds.push("private-key");
+  if (/\b(AKIA|ASIA)[A-Z0-9]{16}\b/.test(text))
+    kinds.push("aws-access-key");
+  if (/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i.test(text)) {
+    kinds.push("credential-assignment");
+  }
+  if (/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/.test(text))
+    kinds.push("bearer-token");
+  return kinds;
 }
 function collectStrings(value, depth = 0, output = []) {
   if (depth > 6 || output.length >= 500)
@@ -2501,7 +2551,7 @@ function recordValue(value) {
 
 // src/plugin/index.ts
 var PLUGIN_ID = "malahor";
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.3.1";
 var STATE_SCHEMA = 1;
 var SESSION_HOOKS = [
   "session.prompt.before",
@@ -2542,6 +2592,23 @@ async function setupV2(context) {
       return;
     return value;
   };
+  const mcp = transformDomain(context.mcp);
+  if (mcp) {
+    const registration = await registerMcpTransform(mcp, cwd, process.env, cleanups);
+    capabilities["mcp.transform"] = registration.ok;
+    if (registration.warnings.length > 0)
+      degraded.push(...registration.warnings);
+  } else {
+    capabilities["mcp.transform"] = false;
+    degraded.push("mcp.transform");
+  }
+  const session = domain("session");
+  if (session?.get) {
+    options.resolveSessionDirectory = async (sessionID) => {
+      const value = await session.get?.({ sessionID });
+      return sessionLocationDirectory(value);
+    };
+  }
   const permission = domain("permission");
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
@@ -2593,7 +2660,6 @@ async function setupV2(context) {
     capabilities["tool.execute.before"] = false;
     criticalGaps.push("tool.hook");
   }
-  const session = domain("session");
   if (session) {
     for (const event of SESSION_HOOKS) {
       const registered = await registerHook(session, hookNameForEvent(event), async (input) => {
@@ -2741,6 +2807,79 @@ function locationDirectory(context) {
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
+}
+function transformDomain(value) {
+  if (!isRecord2(value) || typeof value.transform !== "function")
+    return;
+  return value;
+}
+async function registerMcpTransform(domain, cwd, env, cleanups) {
+  const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
+  const warnings = [];
+  if (!fs6.existsSync(paths.mnemoIndex)) {
+    warnings.push("mcp.mnemo-index-missing");
+  }
+  try {
+    const registration = await domain.transform((editor) => {
+      const existingMnemo = editor.get("mnemo");
+      if (fs6.existsSync(paths.mnemoIndex)) {
+        if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
+          editor.set("mnemo", {
+            ...existingMnemo ?? {},
+            type: "local",
+            command: ["node", paths.mnemoIndex],
+            disabled: false
+          });
+        } else {
+          warnings.push("mcp.mnemo-foreign-definition");
+        }
+      }
+      if (!projectObsidianEnabled(paths, cwd))
+        return;
+      const existingObsidian = editor.get("obsidian");
+      if (!existingObsidian) {
+        warnings.push("mcp.obsidian-definition-missing");
+        return;
+      }
+      if (existingObsidian.type !== "remote") {
+        warnings.push("mcp.obsidian-legacy-local");
+        return;
+      }
+      editor.set("obsidian", { ...existingObsidian, disabled: false });
+    });
+    if (isRecord2(registration) && typeof registration.dispose === "function") {
+      cleanups.push(() => registration.dispose());
+    }
+    return { ok: true, warnings: unique2(warnings) };
+  } catch (error) {
+    warn(`no se pudo registrar ctx.mcp.transform: ${error instanceof Error ? error.message : String(error)}`);
+    return { ok: false, warnings: ["mcp.transform-registration"] };
+  }
+}
+function isMalahorMnemo(config, paths) {
+  if (config.type !== "local" || !Array.isArray(config.command))
+    return false;
+  const command = config.command.filter((item) => typeof item === "string");
+  return command.some((item) => path7.resolve(paths.opencodeDir, item) === path7.resolve(paths.mnemoIndex));
+}
+function projectObsidianEnabled(paths, cwd) {
+  try {
+    const raw = JSON.parse(fs6.readFileSync(paths.projectsFile, "utf8"));
+    if (!isRecord2(raw))
+      return false;
+    const project = resolveProject(cwd).canonicalKey;
+    const entry = isRecord2(raw[project]) ? raw[project] : undefined;
+    return entry?.context === "mnemo+graphify+obsidian";
+  } catch {
+    return false;
+  }
+}
+function sessionLocationDirectory(value) {
+  const response = isRecord2(value) && isRecord2(value.data) ? value.data : value;
+  if (!isRecord2(response))
+    return;
+  const location = isRecord2(response.location) ? response.location : undefined;
+  return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();

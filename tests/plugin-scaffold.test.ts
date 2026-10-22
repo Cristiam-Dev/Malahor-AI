@@ -10,6 +10,8 @@ let home: string;
 beforeEach(() => {
   home = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-plugin-scaffold-"));
   process.env.MALAHOR_HOME = home;
+  fs.mkdirSync(path.join(home, "mnemo"), { recursive: true });
+  fs.writeFileSync(path.join(home, "mnemo", "index.js"), "// mnemo\n", "utf8");
 });
 
 afterEach(() => {

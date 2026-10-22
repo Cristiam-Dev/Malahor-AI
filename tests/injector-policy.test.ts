@@ -75,4 +75,26 @@ describe("inyeccion de politica de build", () => {
     expect(permission.task).toBeUndefined();
     expect(permission.webfetch).toBe("ask");
   });
+
+  test("V2 runtime no crea registro Mnemo en config y conserva legacy existente", () => {
+    writeConfig({});
+
+    syncOpenCodeConfig(paths, {
+      execution: { intervention: "ejecutar", verification: true },
+      manageMcp: false,
+    }, false);
+
+    const initial = JSON.parse(fs.readFileSync(paths.opencodeConfig, "utf8")) as Record<string, unknown>;
+    expect(initial.mcp).toBeUndefined();
+
+    const legacy = { type: "local", command: ["node", "/tmp/legacy-mnemo.js"], enabled: true };
+    fs.writeFileSync(paths.opencodeConfig, `${JSON.stringify({ mcp: { mnemo: legacy } }, null, 2)}\n`, "utf8");
+    syncOpenCodeConfig(paths, {
+      execution: { intervention: "ejecutar", verification: true },
+      manageMcp: false,
+    }, false);
+
+    const preserved = JSON.parse(fs.readFileSync(paths.opencodeConfig, "utf8")) as { mcp?: { mnemo?: unknown } };
+    expect(preserved.mcp?.mnemo).toEqual(legacy);
+  });
 });

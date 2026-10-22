@@ -440,10 +440,14 @@ function egressPolicyGuard(context: HookContext): HookViolation[] {
 
   const violations: HookViolation[] = [];
   if (context.metadata?.secretDetected === true && context.security?.persistence?.blockSecrets !== false) {
+    const secretKinds = Array.isArray(context.metadata.secretKinds)
+      ? context.metadata.secretKinds.filter((kind): kind is string => typeof kind === "string")
+      : [];
+    const classification = secretKinds.length > 0 ? ` (${secretKinds.join(", ")})` : "";
     violations.push({
       id: "MAL-HOOK-EGRESS-SECRET",
       decision: "deny",
-      message: "Posible secreto en el payload de sesion/egress.",
+      message: `Posible secreto${classification} en el payload de sesion/egress.`,
       fix: "Redacta o retira el secreto antes de enviar/compactar/guardar contexto.",
     });
   }
@@ -683,7 +687,7 @@ function scanFileForSecrets(filePath: string): string[] {
   const patterns: Array<[RegExp, string]> = [
     [PRIVATE_KEY_PATTERN, "private-key"],
     [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
-    [/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^"']{16,}["']/i, "credential-assignment"],
+    [/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i, "credential-assignment"],
   ];
 
   const leaks = patterns.filter(([pattern]) => pattern.test(content)).map(([, name]) => `${basename}:${name}`);

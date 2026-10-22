@@ -154,6 +154,78 @@ describe("adaptador de plugin V2", () => {
     expect(result.env.PATH).toBe("/usr/bin");
   });
 
+  test("shell hook carga la politica del cwd real de la operacion", async () => {
+    writeProjectPolicy({
+      shell: {
+        deniedCommands: ["echo target-policy"],
+      },
+    });
+
+    const result = await evaluateShellHook({
+      command: "echo target-policy",
+      cwd: repo,
+      timeout: 10,
+      shell: "/bin/bash",
+      env: { PATH: process.env.PATH },
+    }, {
+      cwd: home,
+      permissionRegistered: true,
+      shellRegistered: true,
+      resolveSessionDirectory: async () => { throw new Error("no debe consultarse"); },
+      env,
+    });
+
+    expect(result.result.decision).toBe("deny");
+    expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-SHELL-DENY")).toBe(true);
+
+    const audit = fs.readFileSync(path.join(home, "audit", "security.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { project: string });
+    expect(audit.at(-1)?.project).toBe("demo");
+  });
+
+  test("permission hook resuelve la ubicacion de la sesion en vez de la instancia", async () => {
+    writeProjectPolicy({
+      integrations: {
+        enforceMcpToolAllowlist: true,
+        allowedMcpTools: ["mcp_ok*"],
+      },
+    });
+
+    const result = await evaluatePermission({
+      sessionID: "ses_demo",
+      action: "mcp_bad_search",
+      resources: [],
+      effect: "allow",
+    }, {
+      cwd: home,
+      permissionRegistered: true,
+      resolveSessionDirectory: async (sessionID) => sessionID === "ses_demo" ? repo : undefined,
+      env,
+    });
+
+    expect(result.effect).toBe("deny");
+    expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-MCP-ALLOWLIST")).toBe(true);
+  });
+
+  test("un fallo al resolver la sesion deniega en vez de usar la instancia", async () => {
+    const result = await evaluateToolHook({
+      sessionID: "ses_missing",
+      tool: "read",
+      input: { filePath: path.join(repo, "package.json") },
+    }, {
+      cwd: home,
+      permissionRegistered: true,
+      shellRegistered: true,
+      resolveSessionDirectory: async () => { throw new Error("session unavailable"); },
+      env,
+    });
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-PLUGIN-POLICY")).toBe(true);
+  });
+
   test("un control git sin mediacion bloquea shell en vez de presumir cobertura", async () => {
     writeProjectPolicy({ git: { scanOutgoingCommits: true } });
 
@@ -245,7 +317,9 @@ describe("adaptador de plugin V2", () => {
     }, { cwd: repo, permissionRegistered: true, env });
 
     expect(result.decision).toBe("deny");
-    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-EGRESS-SECRET")).toBe(true);
+    const violation = result.violations.find((candidate) => candidate.id === "MAL-HOOK-EGRESS-SECRET");
+    expect(violation?.message).toContain("private-key");
+    expect(violation?.message).not.toContain("abc");
   });
 
   test("plugin registra hooks V2 reales y setup devuelve cleanup", async () => {
@@ -256,13 +330,27 @@ describe("adaptador de plugin V2", () => {
       return { dispose: () => { disposed.push(`${domain}.${name}`); } };
     };
     const originalHome = process.env.MALAHOR_HOME;
+    const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
     process.env.MALAHOR_HOME = home;
+    process.env.MALAHOR_OPENCODE_DIR = opencode;
     fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({ name: "demo" }, null, 2)}\n`, "utf8");
+    writeProjectPolicy({
+      integrations: {
+        enforceMcpToolAllowlist: true,
+        allowedMcpTools: ["mcp_ok*"],
+      },
+    });
 
     try {
       const cleanup = await plugin.setup({
-        location: { directory: repo },
-        session: { hook: hook("session") },
+        location: { directory: home },
+        session: {
+          hook: hook("session"),
+          get: async ({ sessionID }: { sessionID: string }) => ({
+            id: sessionID,
+            location: { directory: repo },
+          }),
+        },
         permission: { hook: hook("permission") },
         tool: { hook: hook("tool") },
         shell: { hook: hook("shell") },
@@ -285,15 +373,28 @@ describe("adaptador de plugin V2", () => {
       ]));
 
       const permission = calls.find((call) => call.domain === "permission" && call.name === "evaluate");
-      const input: Record<string, unknown> = { action: "bash", resources: ["git reset --hard"], effect: "allow" };
+      const input: Record<string, unknown> = {
+        sessionID: "ses_demo",
+        action: "mcp_bad_search",
+        resources: [],
+        effect: "allow",
+      };
       await permission?.callback(input);
       expect(input.effect).toBe("deny");
+
+      const audit = fs.readFileSync(path.join(home, "audit", "security.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { project: string });
+      expect(audit.at(-1)?.project).toBe("demo");
 
       await (cleanup as () => Promise<void>)();
       expect(disposed).toContain("permission.evaluate");
     } finally {
       if (originalHome === undefined) delete process.env.MALAHOR_HOME;
       else process.env.MALAHOR_HOME = originalHome;
+      if (originalOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
+      else process.env.MALAHOR_OPENCODE_DIR = originalOpenCodeDir;
     }
   });
 
@@ -315,5 +416,108 @@ describe("adaptador de plugin V2", () => {
     });
     expect(loaded.exitCode).toBe(0);
     expect(loaded.stdout.toString()).toContain("function");
+  });
+
+  test("ctx.mcp.transform registra Mnemo y conserva MCP ajeno", async () => {
+    const originalHome = process.env.MALAHOR_HOME;
+    const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
+    process.env.MALAHOR_HOME = home;
+    process.env.MALAHOR_OPENCODE_DIR = opencode;
+    fs.mkdirSync(path.join(home, "mnemo"), { recursive: true });
+    fs.writeFileSync(path.join(home, "mnemo", "index.js"), "// mnemo\n", "utf8");
+
+    const sets: Array<{ name: string; config: Record<string, unknown> }> = [];
+    const transforms: Array<(editor: {
+      get: (name: string) => Record<string, unknown> | undefined;
+      set: (name: string, config: Record<string, unknown>) => void;
+    }) => void> = [];
+    const editorState: Record<string, Record<string, unknown>> = {
+      foreign: { type: "local", command: ["node", "/tmp/foreign.js"] },
+      obsidian: { type: "local", command: ["legacy-obsidian"] },
+    };
+    const disposed: string[] = [];
+
+    try {
+      const cleanup = await plugin.setup({
+        location: { directory: repo },
+        mcp: {
+          transform: (callback: (editor: typeof transforms[number] extends (editor: infer T) => void ? T : never) => void) => {
+            transforms.push(callback);
+            const editor = {
+              get: (name: string) => editorState[name],
+              set: (name: string, config: Record<string, unknown>) => {
+                editorState[name] = config;
+                sets.push({ name, config });
+              },
+            };
+            callback(editor);
+            return { dispose: () => { disposed.push("mcp.transform"); } };
+          },
+        },
+      });
+
+      expect(transforms).toHaveLength(1);
+      expect(sets.find((entry) => entry.name === "mnemo")?.config).toMatchObject({
+        type: "local",
+        command: ["node", path.join(home, "mnemo", "index.js")],
+        disabled: false,
+      });
+      expect(sets.some((entry) => entry.name === "foreign")).toBe(false);
+      expect(sets.some((entry) => entry.name === "obsidian")).toBe(false);
+
+      await (cleanup as () => Promise<void>)();
+      expect(disposed).toContain("mcp.transform");
+    } finally {
+      if (originalHome === undefined) delete process.env.MALAHOR_HOME;
+      else process.env.MALAHOR_HOME = originalHome;
+      if (originalOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
+      else process.env.MALAHOR_OPENCODE_DIR = originalOpenCodeDir;
+    }
+  });
+
+  test("ctx.mcp.transform no pisa Mnemo ajeno y conserva Obsidian remoto habilitado", async () => {
+    const originalHome = process.env.MALAHOR_HOME;
+    const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
+    process.env.MALAHOR_HOME = home;
+    process.env.MALAHOR_OPENCODE_DIR = opencode;
+    fs.mkdirSync(path.join(home, "mnemo"), { recursive: true });
+    fs.writeFileSync(path.join(home, "mnemo", "index.js"), "// mnemo\n", "utf8");
+    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({ demo: { context: "mnemo+graphify+obsidian" } })}\n`, "utf8");
+
+    const sets: string[] = [];
+    const state: Record<string, Record<string, unknown>> = {
+      mnemo: { type: "local", command: ["node", "/tmp/other-mnemo.js"] },
+      obsidian: { type: "remote", url: "https://obsidian.example/mcp", headers: { Authorization: "Bearer {env:OBSIDIAN_API_KEY}" } },
+    };
+
+    try {
+      await plugin.setup({
+        location: { directory: repo },
+        mcp: {
+          transform: (callback: (editor: {
+            get: (name: string) => Record<string, unknown> | undefined;
+            set: (name: string, config: Record<string, unknown>) => void;
+          }) => void) => {
+            callback({
+              get: (name) => state[name],
+              set: (name, config) => {
+                state[name] = config;
+                sets.push(name);
+              },
+            });
+          },
+        },
+      });
+
+      expect(sets).toEqual(["obsidian"]);
+      expect(state.mnemo.command).toEqual(["node", "/tmp/other-mnemo.js"]);
+      expect(state.obsidian.disabled).toBe(false);
+      expect(state.obsidian.headers).toEqual({ Authorization: "Bearer {env:OBSIDIAN_API_KEY}" });
+    } finally {
+      if (originalHome === undefined) delete process.env.MALAHOR_HOME;
+      else process.env.MALAHOR_HOME = originalHome;
+      if (originalOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
+      else process.env.MALAHOR_OPENCODE_DIR = originalOpenCodeDir;
+    }
   });
 });

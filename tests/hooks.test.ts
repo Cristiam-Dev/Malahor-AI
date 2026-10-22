@@ -71,6 +71,21 @@ describe("malahor hooks", () => {
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
   });
 
+  test("no confunde un placeholder multilinea del codigo con una credencial", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-source-"));
+    const sourceFile = path.join(dir, "obsidian.ts");
+    fs.writeFileSync(sourceFile, 'throw new Error("OBSIDIAN_API_KEY: ");\n', "utf8");
+
+    const result = runHooks(baseContext({
+      event: "file.stage.before",
+      cwd: dir,
+      projectRoot: dir,
+      targetPaths: [sourceFile],
+    }));
+
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+  });
+
   test("exige preview y confirmacion para memoria destructiva", () => {
     const result = runHooks(baseContext({
       event: "memory.delete.apply",

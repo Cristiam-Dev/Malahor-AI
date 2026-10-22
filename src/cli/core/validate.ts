@@ -8,7 +8,11 @@ import type { MalahorPaths } from "./paths";
 
 // Validacion interna agent-safe: se corre antes de aplicar politica para no bloquear
 // a un agente con una instalacion a medias. Devuelve la lista de problemas encontrados.
-export function validateInstallation(paths: MalahorPaths, packagePaths: MalahorPackagePaths | null): string[] {
+export function validateInstallation(
+  paths: MalahorPaths,
+  packagePaths: MalahorPackagePaths | null,
+  options: { mcpManagedByPlugin?: boolean } = {},
+): string[] {
   const problems: string[] = [];
 
   if (!fs.existsSync(paths.malahorHome)) {
@@ -35,7 +39,8 @@ export function validateInstallation(paths: MalahorPaths, packagePaths: MalahorP
     const mcp = asRecord(config.mcp);
     const mnemo = mcp ? asRecord(mcp.mnemo) : undefined;
 
-    if (!mnemo || mnemo.type !== "local" || !Array.isArray(mnemo.command) || mnemo.enabled !== true) {
+    const validLegacyMnemo = mnemo && mnemo.type === "local" && Array.isArray(mnemo.command) && mnemo.enabled === true;
+    if (!validLegacyMnemo && options.mcpManagedByPlugin !== true) {
       problems.push("mcp.mnemo no esta configurado correctamente");
     }
 

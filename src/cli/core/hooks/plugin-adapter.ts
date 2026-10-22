@@ -19,6 +19,7 @@ export interface PluginAdapterOptions {
   cwd: string;
   permissionRegistered?: boolean;
   shellRegistered?: boolean;
+  resolveSessionDirectory?: (sessionID: string) => Promise<string | undefined>;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -35,14 +36,11 @@ export interface ShellAdapterResult {
 
 interface EvaluationDetails {
   event: HookEvent;
+  cwd?: string;
   command?: string;
   targetPaths?: string[];
   metadata?: Record<string, unknown>;
   destructive?: boolean;
-}
-
-interface ContextBuild {
-  context: HookContext;
 }
 
 /**
@@ -59,7 +57,8 @@ export async function evaluatePermission(
   const generic = action === "*";
 
   const details = permissionDetails(action, resources, metadata);
-  const built = buildContext(details.event, options, {
+  const scope = await resolveEvaluationScope(input, options, details.cwd);
+  const built = scope.error ? undefined : buildContext(details.event, scope.options, {
     command: details.command,
     targetPaths: details.targetPaths,
     metadata: {
@@ -71,9 +70,9 @@ export async function evaluatePermission(
     },
   });
 
-  const result = built.context
+  const result = built?.context
     ? evaluate(built.context)
-    : policyFailure(details.event, options, built.error ?? "politica no evaluable");
+    : policyFailure(details.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
   const hostEffect = permissionEffect(input.effect);
   const effect = strongerEffect(hostEffect, decisionEffect(result.decision));
 
@@ -96,7 +95,8 @@ export async function evaluateToolHook(
   const toolInput = input.input;
   const mapped = toolDetails(tool, toolInput, options);
 
-  const built = buildContext(mapped.event, options, {
+  const scope = await resolveEvaluationScope(input, options, mapped.cwd);
+  const built = scope.error ? undefined : buildContext(mapped.event, scope.options, {
     command: mapped.command,
     targetPaths: mapped.targetPaths,
     metadata: {
@@ -106,9 +106,9 @@ export async function evaluateToolHook(
     },
   });
 
-  return built.context
+  return built?.context
     ? evaluate(built.context)
-    : policyFailure(mapped.event, options, built.error ?? "politica no evaluable");
+    : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
 }
 
 export async function evaluateShellHook(
@@ -128,19 +128,20 @@ export async function evaluateShellHook(
   let envChanged = false;
   let timeoutChanged = false;
 
-  const built = buildContext("shell.exec.before", options, {
+  const scope = await resolveEvaluationScope(input, options, stringValue(input.cwd));
+  const built = scope.error ? undefined : buildContext("shell.exec.before", scope.options, {
     command,
     metadata: {
       origin: "opencode-v2",
       shell: stringValue(input.shell),
-      cwd: stringValue(input.cwd),
+      cwd: scope.options.cwd,
       timeoutSeconds: timeout,
     },
   });
 
-  if (!built.context) {
+  if (!built?.context) {
     return {
-      result: policyFailure("shell.exec.before", options, built.error ?? "politica no evaluable"),
+      result: policyFailure("shell.exec.before", scope.options, scope.error ?? built?.error ?? "politica no evaluable"),
       env,
       timeout,
     };
@@ -214,14 +215,17 @@ export async function evaluateSessionHook(
     || event === "session.compaction.before"
     || event === "session.generate.before"
     || event === "session.title.before";
-  if (contentEvent && containsSecret(input)) {
+  const secretKinds = contentEvent ? detectSecretKinds(input) : [];
+  if (secretKinds.length > 0) {
     metadata.secretDetected = true;
+    metadata.secretKinds = secretKinds;
   }
 
-  const built = buildContext(event, options, { metadata });
-  return built.context
+  const scope = await resolveEvaluationScope(input, options);
+  const built = scope.error ? undefined : buildContext(event, scope.options, { metadata });
+  return built?.context
     ? evaluate(built.context)
-    : policyFailure(event, options, built.error ?? "politica no evaluable");
+    : policyFailure(event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
 }
 
 export function shouldBlockPluginResult(result: HookResult, options: PluginAdapterOptions, blockingAskIds: string[] = []): boolean {
@@ -242,6 +246,45 @@ export function formatPluginBlock(result: HookResult): string {
 
 function evaluate(context: HookContext): HookResult {
   return auditHookResult(context, runHooks(context));
+}
+
+async function resolveEvaluationScope(
+  input: Record<string, unknown>,
+  options: PluginAdapterOptions,
+  operationCwd?: string,
+): Promise<{ options: PluginAdapterOptions; error?: string }> {
+  const fallback = path.resolve(options.cwd);
+  if (operationCwd) {
+    return { options: { ...options, cwd: path.resolve(fallback, operationCwd) } };
+  }
+
+  if (!options.resolveSessionDirectory) {
+    return { options: { ...options, cwd: fallback } };
+  }
+
+  const sessionID = stringValue(input.sessionID);
+  if (!sessionID) {
+    return {
+      options: { ...options, cwd: fallback },
+      error: "el hook no expuso sessionID para resolver la ubicacion de la sesion",
+    };
+  }
+
+  try {
+    const directory = await options.resolveSessionDirectory(sessionID);
+    if (!directory) {
+      return {
+        options: { ...options, cwd: fallback },
+        error: `la sesion ${sessionID} no expuso una ubicacion evaluable`,
+      };
+    }
+    return { options: { ...options, cwd: path.resolve(directory) } };
+  } catch (error) {
+    return {
+      options: { ...options, cwd: fallback },
+      error: `no se pudo resolver la ubicacion de la sesion ${sessionID}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 function buildContext(
@@ -391,6 +434,7 @@ function toolDetails(tool: string, input: unknown, options: PluginAdapterOptions
     }
     return {
       event: "shell.exec.before",
+      cwd: stringValue(args.cwd) || stringValue(args.workdir),
       command: stringValue(args.command) || stringValue(args.cmd),
       metadata: { tool, timeoutSeconds: numberValue(args.timeout, 0) },
     };
@@ -437,13 +481,18 @@ function pathValues(value: unknown): string[] {
 
 const PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 
-function containsSecret(value: unknown): boolean {
+function detectSecretKinds(value: unknown): string[] {
   const text = collectStrings(value).join("\n");
-  if (!text) return false;
-  return PRIVATE_KEY_PATTERN.test(text)
-    || /\b(AKIA|ASIA)[A-Z0-9]{16}\b/.test(text)
-    || /(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^"']{16,}["']/i.test(text)
-    || /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/.test(text);
+  if (!text) return [];
+
+  const kinds: string[] = [];
+  if (PRIVATE_KEY_PATTERN.test(text)) kinds.push("private-key");
+  if (/\b(AKIA|ASIA)[A-Z0-9]{16}\b/.test(text)) kinds.push("aws-access-key");
+  if (/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i.test(text)) {
+    kinds.push("credential-assignment");
+  }
+  if (/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/.test(text)) kinds.push("bearer-token");
+  return kinds;
 }
 
 function collectStrings(value: unknown, depth = 0, output: string[] = []): string[] {

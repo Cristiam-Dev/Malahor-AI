@@ -45,6 +45,7 @@ export const ACOMPANAR_BASH_POLICY: Record<string, string> = {
 export interface SyncOpenCodeConfigOptions {
   execution: MalahorExecutionPolicy;
   applyPolicy?: boolean;
+  manageMcp?: boolean;
 }
 
 export interface OpenCodeConfig {
@@ -63,16 +64,19 @@ export function syncOpenCodeConfig(paths: MalahorPaths, options: SyncOpenCodeCon
   const current = readOpenCodeConfig(paths.opencodeConfig);
   const next: OpenCodeConfig = {
     ...current,
-    mcp: {
+    compaction: syncCompaction(asRecord(current.compaction)),
+  };
+
+  if (options.manageMcp !== false) {
+    next.mcp = {
       ...(current.mcp ?? {}),
       mnemo: {
         type: "local",
         command: ["node", paths.mnemoIndex],
         enabled: true,
       },
-    },
-    compaction: syncCompaction(asRecord(current.compaction)),
-  };
+    };
+  }
 
   const syncedAgents = syncAgents(asRecord(current.agent), options);
   if (syncedAgents) {

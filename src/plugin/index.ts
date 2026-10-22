@@ -7,6 +7,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
+import { resolveProject } from "../cli/core/project";
 import {
   evaluatePermission,
   evaluateSessionHook,
@@ -19,7 +21,7 @@ import {
 import type { HookEvent, HookResult } from "../cli/core/hooks/types";
 
 const PLUGIN_ID = "malahor";
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.3.1";
 const STATE_SCHEMA = 1;
 
 type HostKind = "v1" | "v2" | "unknown";
@@ -42,6 +44,18 @@ type Cleanup = () => Promise<void> | void;
 
 type HookDomain = {
   hook: (name: string, callback: (input: Record<string, unknown>) => Promise<void> | void) => Promise<unknown> | unknown;
+  get?: (input: Record<string, unknown>) => Promise<unknown> | unknown;
+};
+
+type McpServerConfig = Record<string, unknown>;
+
+type McpEditor = {
+  get: (name: string) => McpServerConfig | undefined;
+  set: (name: string, config: McpServerConfig) => void;
+};
+
+type McpTransformDomain = {
+  transform: (callback: (editor: McpEditor) => void) => Promise<unknown> | unknown;
 };
 
 const SESSION_HOOKS: HookEvent[] = [
@@ -93,6 +107,24 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     return value as unknown as HookDomain;
   };
 
+  const mcp = transformDomain(context.mcp);
+  if (mcp) {
+    const registration = await registerMcpTransform(mcp, cwd, process.env, cleanups);
+    capabilities["mcp.transform"] = registration.ok;
+    if (registration.warnings.length > 0) degraded.push(...registration.warnings);
+  } else {
+    capabilities["mcp.transform"] = false;
+    degraded.push("mcp.transform");
+  }
+
+  const session = domain("session");
+  if (session?.get) {
+    options.resolveSessionDirectory = async (sessionID) => {
+      const value = await session.get?.({ sessionID });
+      return sessionLocationDirectory(value);
+    };
+  }
+
   const permission = domain("permission");
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
@@ -142,7 +174,6 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     criticalGaps.push("tool.hook");
   }
 
-  const session = domain("session");
   if (session) {
     for (const event of SESSION_HOOKS) {
       const registered = await registerHook(session, hookNameForEvent(event), async (input) => {
@@ -302,6 +333,89 @@ function locationDirectory(context: Record<string, unknown>): string | undefined
   const location = isRecord(context.location) ? context.location : undefined;
   if (!location) return undefined;
   return typeof location.directory === "string" ? location.directory : undefined;
+}
+
+function transformDomain(value: unknown): McpTransformDomain | undefined {
+  if (!isRecord(value) || typeof value.transform !== "function") return undefined;
+  return value as unknown as McpTransformDomain;
+}
+
+async function registerMcpTransform(
+  domain: McpTransformDomain,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  cleanups: Cleanup[],
+): Promise<{ ok: boolean; warnings: string[] }> {
+  const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
+  const warnings: string[] = [];
+  if (!fs.existsSync(paths.mnemoIndex)) {
+    warnings.push("mcp.mnemo-index-missing");
+  }
+
+  try {
+    const registration = await domain.transform((editor) => {
+      const existingMnemo = editor.get("mnemo");
+      if (fs.existsSync(paths.mnemoIndex)) {
+        if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
+          editor.set("mnemo", {
+            ...(existingMnemo ?? {}),
+            type: "local",
+            command: ["node", paths.mnemoIndex],
+            disabled: false,
+          });
+        } else {
+          warnings.push("mcp.mnemo-foreign-definition");
+        }
+      }
+
+      if (!projectObsidianEnabled(paths, cwd)) return;
+      const existingObsidian = editor.get("obsidian");
+      if (!existingObsidian) {
+        warnings.push("mcp.obsidian-definition-missing");
+        return;
+      }
+      if (existingObsidian.type !== "remote") {
+        warnings.push("mcp.obsidian-legacy-local");
+        return;
+      }
+
+      // La definición remota aprobada se conserva sin copiar headers ni secretos
+      // a otro store; la resolución dinámica del host pertenece a T-5.11.8.
+      editor.set("obsidian", { ...existingObsidian, disabled: false });
+    });
+    if (isRecord(registration) && typeof registration.dispose === "function") {
+      cleanups.push(() => (registration.dispose as () => Promise<void> | void)());
+    }
+    return { ok: true, warnings: unique(warnings) };
+  } catch (error) {
+    warn(`no se pudo registrar ctx.mcp.transform: ${error instanceof Error ? error.message : String(error)}`);
+    return { ok: false, warnings: ["mcp.transform-registration"] };
+  }
+}
+
+function isMalahorMnemo(config: McpServerConfig, paths: MalahorPaths): boolean {
+  if (config.type !== "local" || !Array.isArray(config.command)) return false;
+  const command = config.command.filter((item): item is string => typeof item === "string");
+  return command.some((item) => path.resolve(paths.opencodeDir, item) === path.resolve(paths.mnemoIndex));
+}
+
+function projectObsidianEnabled(paths: MalahorPaths, cwd: string): boolean {
+  try {
+    const raw = JSON.parse(fs.readFileSync(paths.projectsFile, "utf8")) as unknown;
+    if (!isRecord(raw)) return false;
+    const project = resolveProject(cwd).canonicalKey;
+    const entry = isRecord(raw[project]) ? raw[project] : undefined;
+    return entry?.context === "mnemo+graphify+obsidian";
+  } catch {
+    return false;
+  }
+}
+
+function sessionLocationDirectory(value: unknown): string | undefined {
+  const response = isRecord(value) && isRecord(value.data) ? value.data : value;
+  if (!isRecord(response)) return undefined;
+  const location = isRecord(response.location) ? response.location : undefined;
+  return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 
 function recordState(inspection: HostInspection): boolean {

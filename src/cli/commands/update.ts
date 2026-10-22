@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { backupFile } from "../core/backup";
 import { copyAssets } from "../core/assets";
 import { formatExecutionPolicy, loadConfig, saveExecutionPolicy, type MalahorExecutionPolicy } from "../core/config";
-import { detectEnvironment, type DetectionResult } from "../core/detector";
+import { detectEnvironment, detectOpenCodeHost, type DetectionResult } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
 import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
@@ -31,6 +31,7 @@ export function runUpdate(options: UpdateOptions): void {
   const config = loadConfig();
   const paths = config.paths;
   const detection = detectEnvironment(paths);
+  const host = detectOpenCodeHost(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
@@ -85,7 +86,11 @@ export function runUpdate(options: UpdateOptions): void {
   });
   const plugin = syncManagedPlugin(pluginAsset, paths.malahorPluginDir, paths.backupsDir, options.dryRun);
 
-  syncOpenCodeConfig(paths, { execution: config.execution, applyPolicy: false }, options.dryRun);
+  syncOpenCodeConfig(paths, {
+    execution: config.execution,
+    applyPolicy: false,
+    manageMcp: host.kind !== "v2",
+  }, options.dryRun);
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(agentsSync.backup?.created ? `Backup AGENTS.md: ${agentsSync.backup.destination}` : "Backup AGENTS.md: skipped");
@@ -93,14 +98,14 @@ export function runUpdate(options: UpdateOptions): void {
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
   printLine(describeSdkEnsure(sdk));
   printLine(describePluginSync(plugin));
-  printLine(`Mnemo MCP: ${options.dryRun ? "would refresh" : "refreshed"}`);
+  printLine(`Mnemo MCP: ${host.kind === "v2" ? "runtime plugin transform" : (options.dryRun ? "would refresh" : "refreshed")}`);
   printLine(describeInstructionsSync(agentsSync, options.dryRun));
   const legacyHint = legacyInstructionsHint(paths.opencodeMd);
   if (legacyHint) printLine(legacyHint);
   printLine("Local data: kept");
 
   runGraphifyStep(paths, options);
-  validateBeforePolicy(paths, packagePaths, options);
+  validateBeforePolicy(paths, packagePaths, options, host.kind === "v2");
 
   // Migracion garantizada: cualquier update reescribe el formato de politica vigente,
   // incluyendo legacy deny -> whitelist agent-safe.
@@ -124,7 +129,7 @@ export function runUpdate(options: UpdateOptions): void {
     },
   });
   saveExecutionPolicy({ ...config, execution }, options.dryRun);
-  syncOpenCodeConfig(paths, { execution }, options.dryRun);
+  syncOpenCodeConfig(paths, { execution, manageMcp: host.kind !== "v2" }, options.dryRun);
 
   printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
   printLine(`OpenCode build policy: ${options.dryRun ? "would sync" : "synced"} (${formatExecutionPolicy(execution)})`);
@@ -171,13 +176,13 @@ function runGraphifyStep(paths: MalahorPaths, options: UpdateOptions): void {
   }
 }
 
-function validateBeforePolicy(paths: MalahorPaths, packagePaths: MalahorPackagePaths, options: UpdateOptions): void {
+function validateBeforePolicy(paths: MalahorPaths, packagePaths: MalahorPackagePaths, options: UpdateOptions, mcpManagedByPlugin: boolean): void {
   if (options.dryRun) {
     printLine("Validation: skipped in dry-run");
     return;
   }
 
-  const problems = validateInstallation(paths, packagePaths);
+  const problems = validateInstallation(paths, packagePaths, { mcpManagedByPlugin });
   if (problems.length > 0) {
     printLine("Validation: FAILED (no se aplico politica de intervencion; el agente queda desbloqueado)");
     for (const problem of problems) {
