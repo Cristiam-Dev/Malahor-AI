@@ -110,10 +110,17 @@ malahor-ai obsidian setup
 En OpenCode, Malahor instala comandos slash equivalentes:
 
 - `/recuperar-contexto`
+- `/malahor-contexto`
 - `/guardar-contexto`
 - `/compactar-seguro`
+- `/malahor-bootstrap`
+- `/malahor-doctor`
+- `/malahor-reparar`
+- `/malahor-commit`
 
-Tambien puedes escribir “recuperar contexto” o “guardar contexto” y el agente debe aplicar el mismo protocolo. Para trabajar en una asignacion grande, describe el proyecto/modulo/feature en lenguaje natural; el agente consulta Mnemo por MCP y no necesitas escribir scopes ni usar comandos CLI.
+Tambien puedes escribir “recuperar contexto”, “guardar contexto”, “commit” o “comitea” y el agente debe aplicar el mismo protocolo. “Commit” o “comitea” disparan el flujo verificado: status/diff, diagnostico, testing y build; si algo falla, no se commitea. `/malahor-commit` nunca hace push.
+
+Para trabajar en una asignacion grande, describe el proyecto/modulo/feature en lenguaje natural; el agente consulta Mnemo por MCP y no necesitas escribir scopes ni usar comandos CLI.
 
 Los comandos destructivos de memoria requieren confirmacion fuerte:
 

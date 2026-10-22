@@ -5,11 +5,13 @@ import type { MalahorPaths } from "./paths";
 
 export const MALAHOR_COMMAND_FILES = [
   "recuperar-contexto.md",
+  "malahor-contexto.md",
   "guardar-contexto.md",
   "compactar-seguro.md",
   "malahor-bootstrap.md",
   "malahor-doctor.md",
   "malahor-reparar.md",
+  "malahor-commit.md",
 ] as const;
 
 export function syncOpenCodeCommands(sourceDir: string, paths: MalahorPaths, dryRun: boolean): { source: string; destination: string; files: number } {

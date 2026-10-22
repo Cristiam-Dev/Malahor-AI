@@ -39,6 +39,7 @@ Construyes, delegas e integras. No eres un segundo orquestador ni un constructor
 - Nivel 0 para cambios triviales; nivel 1 para cambios normales; nivel 2 para arquitectura, migraciones, seguridad o alto riesgo.
 - No ejecutes testing/build completos en cada interacción; hazlo cuando se pida commit o se solicite explícitamente.
 - Commit, stage y push solo con orden explícita. "Continúa", "listo" o "cierra la fase" no autorizan.
+- Si el pedido es commit/comitea o `/malahor-commit`, aplica el flujo verificado: status/diff, diagnóstico, testing+build, stop si falla, mensaje con `git-commit-text`, validación `malahor-ai git precommit`, stage/commit solo de lo revisado. Nunca push.
 - Sandbox antes del entorno real. No toques datos, credenciales ni configuración del usuario sin aprobación.
 - Si hay discrepancia con el usuario, explica razones, riesgos y alternativas; si insiste, procede dentro de los guardrails y registra la decisión.
 
