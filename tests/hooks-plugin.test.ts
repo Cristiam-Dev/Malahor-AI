@@ -9,6 +9,7 @@ import {
   evaluateShellHook,
   evaluateToolHook,
 } from "../src/cli/core/hooks/plugin-adapter";
+import { MALAHOR_PROTOCOL_MARKER, injectMalahorProtocol } from "../src/plugin/protocol";
 
 let root: string;
 let repo: string;
@@ -51,6 +52,20 @@ function writeProjectPolicy(controls: Record<string, unknown>): void {
 }
 
 describe("adaptador de plugin V2", () => {
+  test("inyecta el protocolo al ultimo bloque de sistema una sola vez", () => {
+    const input: Record<string, unknown> = {
+      system: [{ type: "text", text: "instrucciones del host" }],
+    };
+
+    expect(injectMalahorProtocol(input)).toBe(true);
+    expect(injectMalahorProtocol(input)).toBe(false);
+
+    const system = input.system as Array<{ type: string; text: string }>;
+    expect(system).toHaveLength(1);
+    expect(system[0]?.text).toContain(MALAHOR_PROTOCOL_MARKER);
+    expect(system[0]?.text).toContain("mem_brief");
+    expect(system[0]?.text).toContain("Principio de socio");
+  });
   test("permission.evaluate convierte git destructivo en deny y no lo rebaja", async () => {
     const input: Record<string, unknown> = {
       action: "bash",
@@ -387,6 +402,17 @@ describe("adaptador de plugin V2", () => {
         .split("\n")
         .map((line) => JSON.parse(line) as { project: string });
       expect(audit.at(-1)?.project).toBe("demo");
+
+      const contextHooks = calls.filter((call) => call.domain === "session" && call.name === "context");
+      const contextInput: Record<string, unknown> = {
+        sessionID: "ses_demo",
+        system: [{ type: "text", text: "base" }],
+      };
+      await contextHooks.at(-1)?.callback(contextInput);
+      await contextHooks.at(-1)?.callback(contextInput);
+      const system = contextInput.system as Array<{ text: string }>;
+      expect(system).toHaveLength(1);
+      expect(system[0]?.text).toContain(MALAHOR_PROTOCOL_MARKER);
 
       await (cleanup as () => Promise<void>)();
       expect(disposed).toContain("permission.evaluate");

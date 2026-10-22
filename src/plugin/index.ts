@@ -19,9 +19,10 @@ import {
   type PluginAdapterOptions,
 } from "../cli/core/hooks/plugin-adapter";
 import type { HookEvent, HookResult } from "../cli/core/hooks/types";
+import { injectMalahorProtocol } from "./protocol";
 
 const PLUGIN_ID = "malahor";
-const PLUGIN_VERSION = "0.3.1";
+const PLUGIN_VERSION = "0.4.0";
 const STATE_SCHEMA = 1;
 
 type HostKind = "v1" | "v2" | "unknown";
@@ -189,9 +190,16 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
         else criticalGaps.push(event);
       }
     }
+
+    const protocolRegistered = await registerHook(session, "context", async (input) => {
+      injectMalahorProtocol(input);
+    }, cleanups);
+    capabilities["protocol.context"] = protocolRegistered;
+    if (!protocolRegistered) degraded.push("protocol.context");
   } else {
     capabilities.session = false;
     for (const event of SESSION_HOOKS) capabilities[event] = false;
+    capabilities["protocol.context"] = false;
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);
