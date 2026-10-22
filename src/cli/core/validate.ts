@@ -3,7 +3,13 @@ import path from "node:path";
 
 import type { OpenCodeHostKind } from "./detector";
 import { readOpenCodeConfig } from "./injector";
-import { agentContractProblems, agentState, malahorAgentPath } from "./opencode-agents";
+import {
+  MALAHOR_AGENT_IDS,
+  MALAHOR_AGENTS,
+  agentContractProblems,
+  agentState,
+  malahorAgentPath,
+} from "./opencode-agents";
 import { MALAHOR_COMMAND_FILES } from "./opencode-commands";
 import type { MalahorPackagePaths } from "./package";
 import type { MalahorPaths } from "./paths";
@@ -40,17 +46,23 @@ export function validateInstallation(
     problems.push(`Comandos OpenCode faltan: ${missingCommands.join(", ")}`);
   }
 
-  // Un host desconocido no se adivina: install no crea el agente y la validacion
-  // tampoco puede exigirlo. Un archivo propio (foreign) se respeta y no falla.
+  // Un host desconocido no se adivina: install no crea los agentes y la validacion
+  // tampoco puede exigirlos. Un archivo propio (foreign) se respeta, pero los IDs
+  // de especialista son reservados: el primario no puede confiar en su contrato.
   if (options.agentHost && options.agentHost !== "unknown") {
-    const agentPath = malahorAgentPath(paths);
-    const state = agentState(agentPath);
+    for (const agentId of MALAHOR_AGENT_IDS) {
+      const label = MALAHOR_AGENTS[agentId].label;
+      const agentPath = malahorAgentPath(paths, agentId);
+      const state = agentState(agentPath);
 
-    if (state === "missing") {
-      problems.push(`Agente malahor falta: ${agentPath}`);
-    } else if (state === "managed") {
-      for (const problem of agentContractProblems(agentPath)) {
-        problems.push(`Agente malahor: ${problem}`);
+      if (state === "missing") {
+        problems.push(`${label} falta: ${agentPath}`);
+      } else if (state === "managed") {
+        for (const problem of agentContractProblems(agentPath, agentId)) {
+          problems.push(`${label}: ${problem}`);
+        }
+      } else if (agentId !== "malahor") {
+        problems.push(`${label} existe pero no esta gestionado; el primario no puede confiar en su contrato: ${agentPath}`);
       }
     }
   }

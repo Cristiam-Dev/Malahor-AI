@@ -10,7 +10,16 @@ import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
 import { instructionsState, syncManagedInstructions } from "../core/instructions";
 import { describePluginSync, isManagedContent, syncManagedPlugin } from "../core/managed-plugin";
-import { agentContractProblems, agentState, describeAgentSync, malahorAgentAssetPath, malahorAgentPath, syncManagedAgent } from "../core/opencode-agents";
+import {
+  MALAHOR_AGENT_IDS,
+  MALAHOR_AGENTS,
+  agentContractProblems,
+  agentState,
+  describeAgentSync,
+  malahorAgentPath,
+  syncManagedAgents,
+  type MalahorAgentId,
+} from "../core/opencode-agents";
 import { MALAHOR_COMMAND_FILES, syncOpenCodeCommands } from "../core/opencode-commands";
 import { hasDuplicateConfigs } from "../core/opencode-config/preview";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
@@ -70,7 +79,7 @@ function renderReport(
   checks.push(checkMnemoConfig(paths.opencodeConfig, host, paths));
   checks.push(checkCompaction(paths.opencodeConfig, host, paths));
   checks.push(checkOpenCodeCommands(paths));
-  checks.push(checkAgent(paths, host));
+  checks.push(...checkAgents(paths, host));
   checks.push(checkOpenCodeConfigDuplicates(paths));
   for (const check of pluginHealthChecks({ paths, host, packagePaths })) {
     checks.push(fromPluginHealth(check));
@@ -236,19 +245,26 @@ function repairInstallFiles(
     }
   }
 
-  const agentAsset = malahorAgentAssetPath(packagePaths.assetsDir, host);
-  if (agentAsset && fs.existsSync(agentAsset)) {
-    const agent = syncManagedAgent(packagePaths.assetsDir, paths, host, dryRun);
+  if (host === "unknown") {
+    repairs.push("AVISO: host OpenCode desconocido; no se reparan agentes");
+  } else {
+    try {
+      const agents = syncManagedAgents(packagePaths.assetsDir, paths, host, dryRun);
 
-    if (agent.action === "created") {
-      repairs.push(`${dryRun ? "crearia" : "creado"} agente malahor (${host})`);
-    } else if (agent.action === "refreshed") {
-      repairs.push(`${dryRun ? "refrescaria" : "refrescado"} agente malahor (${host}; backup ${agent.backup?.destination ?? "en backups"})`);
-    } else if (agent.action === "kept-foreign") {
-      repairs.push("AVISO: agente malahor no gestionado; no se toca");
+      for (const agent of agents) {
+        const label = MALAHOR_AGENTS[agent.agent].label.toLowerCase();
+
+        if (agent.action === "created") {
+          repairs.push(`${dryRun ? "crearia" : "creado"} ${label} (${host})`);
+        } else if (agent.action === "refreshed") {
+          repairs.push(`${dryRun ? "refrescaria" : "refrescado"} ${label} (${host}; backup ${agent.backup?.destination ?? "en backups"})`);
+        } else if (agent.action === "kept-foreign") {
+          repairs.push(`AVISO: ${label} no gestionado; no se toca`);
+        }
+      }
+    } catch (error) {
+      repairs.push(`AVISO: ${(error as Error).message}; no se reparan agentes`);
     }
-  } else if (host !== "unknown") {
-    repairs.push(`AVISO: asset de agente ${host} no encontrado; no se repara`);
   }
 
   if (!fs.existsSync(paths.assetsDir) && fs.existsSync(packagePaths.assetsDir)) {
@@ -488,15 +504,24 @@ function checkOpenCodeCommands(paths: MalahorPaths): CheckResult {
   };
 }
 
-// El agente primario es una capacidad del producto, no un requisito para que la
-// sesion arranque: un fallo aqui es WARN y el self-heal lo recrea sin sobrescribir
-// un archivo propio del usuario.
-function checkAgent(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult {
-  const destination = malahorAgentPath(paths);
+// Los agentes son una capacidad del producto, no un requisito para que la
+// sesion arranque: un fallo aqui es WARN y el self-heal los recrea sin
+// sobrescribir archivos propios del usuario.
+function checkAgents(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult[] {
+  return MALAHOR_AGENT_IDS.map((agentId) => checkManagedAgent(paths, host, agentId));
+}
+
+function checkManagedAgent(
+  paths: MalahorPaths,
+  host: OpenCodeHostInfo,
+  agentId: MalahorAgentId,
+): CheckResult {
+  const label = MALAHOR_AGENTS[agentId].label;
+  const destination = malahorAgentPath(paths, agentId);
 
   if (host.kind === "unknown") {
     return {
-      name: "Agente malahor",
+      name: label,
       ok: false,
       message: `host desconocido; no se verifica V1/V2 (${destination})`,
       critical: false,
@@ -507,7 +532,7 @@ function checkAgent(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult {
 
   if (state === "missing") {
     return {
-      name: "Agente malahor",
+      name: label,
       ok: false,
       message: `falta: ${destination} (corre \`malahor-ai doctor --self-heal\` o \`malahor-ai update --yes\`)`,
       critical: false,
@@ -516,17 +541,19 @@ function checkAgent(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult {
 
   if (state === "foreign") {
     return {
-      name: "Agente malahor",
+      name: label,
       ok: false,
-      message: `${destination} (propio; no gestionado por Malahor, no se toca)`,
+      message: agentId === "malahor"
+        ? `${destination} (propio; no gestionado por Malahor, no se toca)`
+        : `${destination} (propio; no gestionado por Malahor; el primario no puede confiar en su contrato)`,
       critical: false,
     };
   }
 
-  const problems = agentContractProblems(destination);
+  const problems = agentContractProblems(destination, agentId);
   if (problems.length > 0) {
     return {
-      name: "Agente malahor",
+      name: label,
       ok: false,
       message: `contrato incompleto: ${problems.join(", ")} (self-heal refresca con backup)`,
       critical: false,
@@ -534,7 +561,7 @@ function checkAgent(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult {
   }
 
   return {
-    name: "Agente malahor",
+    name: label,
     ok: true,
     message: `${host.kind} (${destination})`,
     critical: false,

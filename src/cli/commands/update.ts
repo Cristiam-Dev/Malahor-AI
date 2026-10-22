@@ -13,7 +13,7 @@ import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { describePluginSync, syncManagedPlugin } from "../core/managed-plugin";
-import { describeAgentSync, malahorAgentAssetPath, syncManagedAgent } from "../core/opencode-agents";
+import { assertAgentAssets, describeAgentSync, syncManagedAgents } from "../core/opencode-agents";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
@@ -38,7 +38,6 @@ export function runUpdate(options: UpdateOptions): void {
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
   const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
-  const agentAsset = malahorAgentAssetPath(packagePaths.assetsDir, host.kind);
 
   printHeader("malahor-ai update");
   printLine(`Mode: ${config.mode}`);
@@ -63,9 +62,7 @@ export function runUpdate(options: UpdateOptions): void {
     throw new Error("No existe assets/opencode/plugins/malahor/index.ts.");
   }
 
-  if (agentAsset && !fs.existsSync(agentAsset)) {
-    throw new Error(`No existe asset de agente ${host.kind}: ${agentAsset}.`);
-  }
+  assertAgentAssets(packagePaths.assetsDir, host.kind);
 
   if (!options.dryRun) {
     fs.mkdirSync(paths.mnemoDir, { recursive: true });
@@ -94,7 +91,7 @@ export function runUpdate(options: UpdateOptions): void {
     commands: { bun: detection.commands.bun, npm: detection.commands.npm },
   });
   const plugin = syncManagedPlugin(pluginAsset, paths.malahorPluginDir, paths.backupsDir, options.dryRun);
-  const agent = syncManagedAgent(packagePaths.assetsDir, paths, host.kind, options.dryRun);
+  const agents = syncManagedAgents(packagePaths.assetsDir, paths, host.kind, options.dryRun);
 
   syncOpenCodeConfig(paths, {
     execution: config.execution,
@@ -109,7 +106,9 @@ export function runUpdate(options: UpdateOptions): void {
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
   printLine(describeSdkEnsure(sdk));
   printLine(describePluginSync(plugin));
-  printLine(describeAgentSync(agent, options.dryRun));
+  for (const agent of agents) {
+    printLine(describeAgentSync(agent, options.dryRun));
+  }
   printLine(`Mnemo MCP: ${host.kind === "v2" ? "runtime plugin transform" : (options.dryRun ? "would refresh" : "refreshed")}`);
   printLine(describeInstructionsSync(agentsSync, options.dryRun));
   const legacyHint = legacyInstructionsHint(paths.opencodeMd);
