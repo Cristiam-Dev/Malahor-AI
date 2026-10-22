@@ -352,23 +352,32 @@ function checkBuildIntervention(config: OpenCodeConfig, expected: MalahorExecuti
 }
 
 function checkBuildPolicyFormat(config: OpenCodeConfig, expected: MalahorExecutionPolicy): CheckResult {
-  if (expected.intervention === "ejecutar") {
-    return { name: "Build policy format", ok: true, message: "sin bloqueos", critical: false };
-  }
-
   const agent = agentConfig(config, "build");
   const permission = agent ? asRecord(agent.permission) : undefined;
   const bash = permission?.bash;
 
   if (isMalahorBashPolicy(bash)) {
-    return { name: "Build policy format", ok: true, message: "whitelist agent-safe v2", critical: false };
+    return {
+      name: "Build policy format",
+      ok: false,
+      message: "whitelist bash legacy presente; se conserva, pero ya no es la fuente de verdad: autoriza el motor de hooks/plugin (T-5.1.7 la retira)",
+      critical: false,
+    };
   }
 
   if (bash === "deny") {
-    return { name: "Build policy format", ok: false, message: "legado deny total; migrar con `malahor-ai doctor --self-heal`", critical: false };
+    return { name: "Build policy format", ok: false, message: "legado bash:deny total; no se borra en T-5.1.3; la autorizacion efectiva es el motor de hooks", critical: false };
   }
 
-  return { name: "Build policy format", ok: false, message: `bash inesperado (${String(bash)}); resync con \`malahor-ai update --yes\``, critical: false };
+  if (expected.intervention === "ejecutar") {
+    return { name: "Build policy format", ok: true, message: "sin bloqueos", critical: false };
+  }
+
+  if (bash === undefined) {
+    return { name: "Build policy format", ok: true, message: "sin whitelist bash legacy; autorizacion en motor de hooks/plugin", critical: false };
+  }
+
+  return { name: "Build policy format", ok: false, message: `bash inesperado (${String(bash)}); revisar configuracion, no se reescribe en T-5.1.3`, critical: false };
 }
 
 function checkBuildVerification(config: OpenCodeConfig, expected: MalahorExecutionPolicy): CheckResult {
@@ -450,15 +459,22 @@ function checkLegacyInstructions(paths: MalahorPaths): CheckResult {
 
 function checkHookPolicy(paths: MalahorPaths, project: string): CheckResult {
   const policyLoad = loadHookPolicy(paths, project);
-  const ok = policyLoad.warnings.length === 0;
+  const gaps = policyLoad.policyMeta.criticalGaps;
+  const ok = policyLoad.warnings.length === 0 && gaps.length === 0;
+  const details = [
+    `profile=${policyLoad.policy.profile}`,
+    `hash=${policyLoad.policyMeta.policyHash.slice(0, 12)}`,
+    `corporate=${policyLoad.policyMeta.corporateStatus}`,
+    `sources=${policyLoad.sources.length > 0 ? policyLoad.sources.join(",") : "defaults"}`,
+    ...(gaps.length > 0 ? [`criticalGaps=${gaps.join(",")}`] : []),
+    ...policyLoad.warnings,
+  ];
 
   return {
     name: "Hook policy",
     ok,
-    message: ok
-      ? `profile=${policyLoad.policy.profile} sources=${policyLoad.sources.length > 0 ? policyLoad.sources.length : "defaults"}`
-      : policyLoad.warnings.join("; "),
-    critical: false,
+    message: details.join("; "),
+    critical: gaps.length > 0,
   };
 }
 
@@ -500,11 +516,19 @@ function checkOpenCodeHost(host: OpenCodeHostInfo): CheckResult {
     };
   }
 
-  const note = host.kind === "v1" ? " (V1; cobertura completa T-5.6.4 pendiente)" : "";
+  if (host.kind === "v1") {
+    return {
+      name: "OpenCode host",
+      ok: false,
+      message: `${host.kind} ${host.version ?? ""} (V1 sin hooks de mediacion; doctor no certifica cobertura; T-5.6.4 pendiente)`.trim(),
+      critical: false,
+    };
+  }
+
   return {
     name: "OpenCode host",
     ok: true,
-    message: `${host.kind} ${host.version ?? ""}${note}`.trim(),
+    message: `${host.kind} ${host.version ?? ""}`.trim(),
     critical: true,
   };
 }

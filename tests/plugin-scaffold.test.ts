@@ -37,6 +37,7 @@ function v2Context(overrides: Record<string, unknown> = {}): Record<string, unkn
     skill: { transform: () => undefined },
     permission: { hook: () => undefined },
     tool: { hook: () => undefined },
+    shell: { hook: () => undefined },
     event: { subscribe: () => undefined },
     storage: {},
     ...overrides,
@@ -58,7 +59,7 @@ describe("scaffold del plugin", () => {
     expect(fs.existsSync(stateFile())).toBe(false);
   });
 
-  test("V2 completo registra estado sin brechas", async () => {
+  test("V2 completo registra hooks criticos y degrada event", async () => {
     await plugin.setup(v2Context());
 
     const state = readState();
@@ -66,7 +67,7 @@ describe("scaffold del plugin", () => {
     expect(state.plugin).toBe("malahor");
     expect(state.schema).toBe(1);
     expect(state.criticalGaps).toEqual([]);
-    expect(state.degraded).toEqual([]);
+    expect(state.degraded).toEqual(["event"]);
     expect(state.capabilities).toMatchObject({
       session: true,
       permission: true,
@@ -75,8 +76,14 @@ describe("scaffold del plugin", () => {
       command: true,
       skill: true,
       tool: true,
-      event: true,
+      event: false,
       storage: true,
+      "permission.evaluate": true,
+      "tool.execute.before": true,
+      "shell.create.before": true,
+      "session.prompt.before": true,
+      "session.context.before": true,
+      "session.http-request.before": true,
     });
 
     if (process.platform !== "win32") {
@@ -120,7 +127,10 @@ describe("scaffold del plugin", () => {
     expect(hooks).toEqual({});
     const state = readState();
     expect(state.host).toBe("v1");
-    expect(state.criticalGaps).toEqual([]);
+    expect(state.criticalGaps).toContain("v1.permission.hook");
+    expect(state.criticalGaps).toContain("v1.tool.hook");
+    expect(state.criticalGaps).toContain("v1.shell.hook");
+    expect(state.criticalGaps).toContain("v1.session.hook");
     expect(state.capabilities).toMatchObject({
       client: true,
       project: true,
@@ -154,9 +164,13 @@ describe("scaffold del plugin", () => {
     expect(fs.existsSync(path.join(blocker, "nested"))).toBe(false);
   });
 
-  test("setup V2 devuelve undefined y server V1 devuelve objeto", async () => {
-    const setupResult = await plugin.setup(v2Context());
-    expect(setupResult).toBeUndefined();
+  test("setup V2 devuelve cleanup y server V1 devuelve objeto", async () => {
+    let cleanup: unknown;
+    await withoutWarnings(async () => {
+      cleanup = await plugin.setup(v2Context());
+    });
+    expect(typeof cleanup).toBe("function");
+    await (cleanup as () => Promise<void>)();
 
     let serverResult: unknown;
     await withoutWarnings(async () => {

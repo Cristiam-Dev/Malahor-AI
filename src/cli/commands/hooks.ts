@@ -5,7 +5,7 @@ import { approvalsDirectory, grantApproval } from "../core/hooks/approvals";
 import { auditFilePath } from "../core/hooks/audit";
 import { assertHooksAllowed, auditHookResult, formatHookResult, hookExitCode, runHooks } from "../core/hooks/engine";
 import { loadHookPolicy, parseHookProfile, saveHookProfile } from "../core/hooks/policy-loader";
-import type { HookContext, HookEvent, HookResult } from "../core/hooks/types";
+import { HOOK_EVENTS, type HookContext, type HookEvent, type HookResult } from "../core/hooks/types";
 import { isSandbox } from "../core/paths";
 import { resolveCanonicalProjectKey, resolveProject } from "../core/project";
 
@@ -285,35 +285,6 @@ function parseHookEvent(value: string | undefined): HookEvent {
   if (HOOK_EVENTS.includes(value as HookEvent)) return value as HookEvent;
   throw new Error(`Evento hook invalido: ${value}. Usa \`malahor-ai hooks events\`.`);
 }
-
-const HOOK_EVENTS: HookEvent[] = [
-  "project.resolve.before",
-  "context.recover.before",
-  "context.save.before",
-  "memory.write.before",
-  "memory.delete.preview",
-  "memory.delete.apply",
-  "memory.move.preview",
-  "memory.move.apply",
-  "memory.restore.preview",
-  "memory.restore.apply",
-  "obsidian.write.before",
-  "graphify.generate.before",
-  "install.preflight",
-  "install.beforePolicy",
-  "update.preflight",
-  "uninstall.beforeRemove",
-  "git.commit.before",
-  "git.push.before",
-  "git.reset.before",
-  "git.checkout.before",
-  "git.rebase.before",
-  "file.stage.before",
-  "dependency.add.before",
-  "api.change.before",
-  "database.change.before",
-  "quality.check.before",
-];
 
 function printEvents(): void {
   process.stdout.write(`${HOOK_EVENTS.join("\n")}\n`);

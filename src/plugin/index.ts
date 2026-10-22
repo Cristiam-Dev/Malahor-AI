@@ -1,0 +1,365 @@
+// malahor-managed
+// Entrypoint fuente del plugin gestionado. `bun run build:plugin` lo bundlea a
+// assets/opencode/plugins/malahor/index.ts. No importa el SDK: solo usa la
+// forma estructural de los hosts V1/V2 para no romper la carga.
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  evaluatePermission,
+  evaluateSessionHook,
+  evaluateShellHook,
+  evaluateToolHook,
+  formatPluginBlock,
+  shouldBlockPluginResult,
+  type PluginAdapterOptions,
+} from "../cli/core/hooks/plugin-adapter";
+import type { HookEvent, HookResult } from "../cli/core/hooks/types";
+
+const PLUGIN_ID = "malahor";
+const PLUGIN_VERSION = "0.3.0";
+const STATE_SCHEMA = 1;
+
+type HostKind = "v1" | "v2" | "unknown";
+
+interface HostInspection {
+  host: HostKind;
+  capabilities: Record<string, boolean>;
+  degraded: string[];
+  criticalGaps: string[];
+}
+
+interface PluginState extends HostInspection {
+  schema: number;
+  plugin: string;
+  pluginVersion: string;
+  updatedAt: string;
+}
+
+type Cleanup = () => Promise<void> | void;
+
+type HookDomain = {
+  hook: (name: string, callback: (input: Record<string, unknown>) => Promise<void> | void) => Promise<unknown> | unknown;
+};
+
+const SESSION_HOOKS: HookEvent[] = [
+  "session.prompt.before",
+  "session.context.before",
+  "session.compaction.before",
+  "session.generate.before",
+  "session.title.before",
+  "session.model-request.before",
+  "session.http-request.before",
+  "session.http-response.after",
+];
+
+const BLOCKING_SHELL_ASK_IDS = ["MAL-HOOK-PUSH-CLI-EVIDENCE"];
+
+function detectHost(value: unknown): HostKind {
+  if (!isRecord(value)) return "unknown";
+
+  const isV2 =
+    (isRecord(value.session) && typeof value.session.hook === "function") ||
+    (isRecord(value.mcp) && typeof value.mcp.transform === "function") ||
+    (isRecord(value.agent) && typeof value.agent.transform === "function");
+  if (isV2) return "v2";
+
+  const isV1 =
+    isRecord(value.client) &&
+    isRecord(value.project) &&
+    typeof value.directory === "string";
+  if (isV1) return "v1";
+
+  return "unknown";
+}
+
+async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void> {
+  const cwd = locationDirectory(context) ?? process.cwd();
+  const options: PluginAdapterOptions = {
+    cwd,
+    permissionRegistered: false,
+    shellRegistered: false,
+  };
+  const cleanups: Cleanup[] = [];
+  const capabilities: Record<string, boolean> = {};
+  const degraded: string[] = [];
+  const criticalGaps: string[] = [];
+
+  const domain = (name: string): HookDomain | undefined => {
+    const value = context[name];
+    if (!isRecord(value) || typeof value.hook !== "function") return undefined;
+    return value as unknown as HookDomain;
+  };
+
+  const permission = domain("permission");
+  if (permission) {
+    options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
+      const evaluated = await evaluatePermission(input, options);
+      if (evaluated.effect === "deny") {
+        warn(`permission.evaluate deny: ${summary(evaluated.result)}`);
+      }
+    }, cleanups);
+  }
+  if (!permission) criticalGaps.push("permission.hook");
+  else if (!options.permissionRegistered) criticalGaps.push("permission.evaluate");
+  capabilities.permission = Boolean(permission);
+  capabilities["permission.evaluate"] = options.permissionRegistered === true;
+
+  const shell = domain("shell");
+  if (shell) {
+    options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
+      const evaluated = await evaluateShellHook(input, options);
+      if (isRecord(input.env)) {
+        replaceRecord(input.env as Record<string, string | undefined>, evaluated.env);
+      }
+      input.timeout = evaluated.timeout;
+      if (shouldBlockPluginResult(evaluated.result, options, BLOCKING_SHELL_ASK_IDS)) {
+        throw new Error(formatPluginBlock(evaluated.result));
+      }
+    }, cleanups);
+  }
+  if (!shell) criticalGaps.push("shell.hook");
+  else if (!options.shellRegistered) criticalGaps.push("shell.create.before");
+  capabilities.shell = Boolean(shell);
+  capabilities["shell.create.before"] = options.shellRegistered === true;
+
+  const tool = domain("tool");
+  if (tool) {
+    const registered = await registerHook(tool, "execute.before", async (input) => {
+      const result = await evaluateToolHook(input, options);
+      if (shouldBlockPluginResult(result, options)) {
+        throw new Error(formatPluginBlock(result));
+      }
+    }, cleanups);
+    capabilities.tool = true;
+    capabilities["tool.execute.before"] = registered;
+    if (!registered) criticalGaps.push("tool.execute.before");
+  } else {
+    capabilities.tool = false;
+    capabilities["tool.execute.before"] = false;
+    criticalGaps.push("tool.hook");
+  }
+
+  const session = domain("session");
+  if (session) {
+    for (const event of SESSION_HOOKS) {
+      const registered = await registerHook(session, hookNameForEvent(event), async (input) => {
+        const result = await evaluateSessionHook(event, input, options);
+        if (event === "session.http-response.after") return;
+        if (result.decision === "deny" || result.decision === "ask") {
+          throw new Error(formatPluginBlock(result));
+        }
+      }, cleanups);
+      capabilities[event] = registered;
+      if (!registered) {
+        if (event === "session.http-response.after") degraded.push(event);
+        else criticalGaps.push(event);
+      }
+    }
+  } else {
+    capabilities.session = false;
+    for (const event of SESSION_HOOKS) capabilities[event] = false;
+    criticalGaps.push("session.hook");
+  }
+  capabilities.session = Boolean(session);
+
+  // `event.subscribe` es un stream de auditoria, no un hook previo. No se marca
+  // como cobertura registrada: la auditoria obligatoria la escribe cada hook.
+  capabilities.event = false;
+  degraded.push("event");
+
+  const auxiliary = ["mcp", "agent", "command", "skill", "storage"] as const;
+  for (const name of auxiliary) {
+    const available = name === "storage"
+      ? context.storage !== undefined && context.storage !== null
+      : isRecord(context[name]) && (
+        typeof (context[name] as Record<string, unknown>).transform === "function"
+        || typeof (context[name] as Record<string, unknown>).hook === "function"
+        || typeof (context[name] as Record<string, unknown>).subscribe === "function"
+      );
+    capabilities[name] = available;
+    if (!available) degraded.push(name);
+  }
+
+  const inspection: HostInspection = {
+    host: "v2",
+    capabilities,
+    degraded: unique(degraded),
+    criticalGaps: unique(criticalGaps),
+  };
+  const recorded = recordState(inspection);
+  if (!recorded) warn("estado de diagnostico no disponible (degradado auxiliar)");
+  if (inspection.criticalGaps.length > 0) {
+    warn(`controles criticos no disponibles: ${inspection.criticalGaps.join(", ")}; no se habilitan operaciones protegidas`);
+  } else if (inspection.degraded.length > 0) {
+    warn(`capacidades auxiliares degradadas: ${inspection.degraded.join(", ")}`);
+  }
+
+  return async () => {
+    for (const cleanup of cleanups.reverse()) {
+      try {
+        await cleanup();
+      } catch (error) {
+        warn(`cleanup fallido: ${(error as Error).message}`);
+      }
+    }
+  };
+}
+
+async function setupV1(input: Record<string, unknown>): Promise<void> {
+  const capabilities = {
+    client: isRecord(input.client),
+    project: isRecord(input.project),
+    directory: typeof input.directory === "string",
+    worktree: typeof input.worktree === "string",
+    shell: typeof input.$ === "function",
+    workspace: isRecord(input.experimental_workspace),
+  };
+  const degraded = Object.entries(capabilities)
+    .filter(([, available]) => !available)
+    .map(([name]) => name);
+  const criticalGaps = [
+    "v1.permission.hook",
+    "v1.tool.hook",
+    "v1.shell.hook",
+    "v1.session.hook",
+  ];
+  recordState({ host: "v1", capabilities, degraded, criticalGaps });
+  warn("host V1 detectado: no hay hooks de mediacion; cobertura V1 completa queda en T-5.6.4");
+}
+
+async function setupUnknown(): Promise<void> {
+  recordState({
+    host: "unknown",
+    capabilities: {},
+    degraded: ["host-api-desconocida"],
+    criticalGaps: ["host-api-desconocida"],
+  });
+  warn("API de host no reconocida; plugin inactivo (degradacion segura)");
+}
+
+const plugin = {
+  id: PLUGIN_ID,
+
+  async setup(context: unknown): Promise<Cleanup | void> {
+    const host = detectHost(context);
+    if (host === "v2") return setupV2(context as Record<string, unknown>);
+    if (host === "v1") {
+      await setupV1(context as Record<string, unknown>);
+      return;
+    }
+    await setupUnknown();
+  },
+
+  async server(input: unknown): Promise<Record<string, never>> {
+    const host = detectHost(input);
+    if (host === "v2") {
+      await setupV2(input as Record<string, unknown>);
+    } else if (host === "v1") {
+      await setupV1(input as Record<string, unknown>);
+    } else {
+      await setupUnknown();
+    }
+    return {};
+  },
+};
+
+export default plugin;
+
+async function registerHook(
+  domain: HookDomain,
+  name: string,
+  callback: (input: Record<string, unknown>) => Promise<void>,
+  cleanups: Cleanup[],
+): Promise<boolean> {
+  try {
+    const registration = await domain.hook(name, callback);
+    if (isRecord(registration) && typeof registration.dispose === "function") {
+      cleanups.push(() => (registration.dispose as () => Promise<void> | void)());
+    }
+    return true;
+  } catch (error) {
+    warn(`no se pudo registrar ${name}: ${(error as Error).message}`);
+    return false;
+  }
+}
+
+function hookNameForEvent(event: HookEvent): string {
+  if (event === "session.prompt.before") return "prompt";
+  if (event === "session.context.before") return "context";
+  if (event === "session.compaction.before") return "compaction";
+  if (event === "session.generate.before") return "generate";
+  if (event === "session.title.before") return "title";
+  if (event === "session.model-request.before") return "model.request";
+  if (event === "session.http-request.before") return "http.request";
+  if (event === "session.http-response.after") return "http.response";
+  return event;
+}
+
+function locationDirectory(context: Record<string, unknown>): string | undefined {
+  const location = isRecord(context.location) ? context.location : undefined;
+  if (!location) return undefined;
+  return typeof location.directory === "string" ? location.directory : undefined;
+}
+
+function recordState(inspection: HostInspection): boolean {
+  const directory = resolveMalahorHome();
+  const file = path.join(directory, "plugin-state.json");
+  const state: PluginState = {
+    schema: STATE_SCHEMA,
+    plugin: PLUGIN_ID,
+    pluginVersion: PLUGIN_VERSION,
+    host: inspection.host,
+    capabilities: inspection.capabilities,
+    degraded: inspection.degraded,
+    criticalGaps: inspection.criticalGaps,
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const temporary = path.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    fs.chmodSync(temporary, 0o600);
+    fs.renameSync(temporary, file);
+    return true;
+  } catch (error) {
+    warn(`no se pudo escribir ${file}: ${(error as Error).message}`);
+    return false;
+  }
+}
+
+function resolveMalahorHome(): string {
+  const override = process.env.MALAHOR_HOME?.trim();
+  if (override) return path.resolve(override);
+  return path.join(os.homedir(), ".malahor");
+}
+
+function replaceRecord(target: Record<string, string | undefined>, source: Record<string, string | undefined>): void {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, source);
+}
+
+function summary(result: HookResult): string {
+  return result.violations
+    .filter((violation) => violation.decision === "deny")
+    .map((violation) => violation.id)
+    .join(",") || result.decision;
+}
+
+function warn(message: string): void {
+  console.warn(`[${PLUGIN_ID}] ${message}`);
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

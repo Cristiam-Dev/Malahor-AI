@@ -3,7 +3,7 @@ import path from "node:path";
 
 import type { ProjectAliases } from "./project";
 import { type MalahorPaths, resolvePaths } from "./paths";
-import { stripJsonComments } from "./injector";
+import { stripJsonComments } from "./jsonc";
 
 export type MalahorMode = "assistant" | "executor";
 export type MalahorIntervention = "ejecutar" | "guiar" | "acompanar";

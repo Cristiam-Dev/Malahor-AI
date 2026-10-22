@@ -1,0 +1,532 @@
+import path from "node:path";
+
+import { resolvePaths, type MalahorPaths } from "../paths";
+import { resolveProject } from "../project";
+import { auditHookResult, runHooks } from "./engine";
+import { loadHookPolicy } from "./policy-loader";
+import {
+  CODE_MODE_TOOL_NAMES,
+  type HookContext,
+  type HookDecision,
+  type HookEvent,
+  type HookResult,
+  type HookViolation,
+} from "./types";
+
+export type PermissionEffect = "allow" | "ask" | "deny";
+
+export interface PluginAdapterOptions {
+  cwd: string;
+  permissionRegistered?: boolean;
+  shellRegistered?: boolean;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface PermissionAdapterResult {
+  result: HookResult;
+  effect: PermissionEffect;
+}
+
+export interface ShellAdapterResult {
+  result: HookResult;
+  env: Record<string, string | undefined>;
+  timeout: number;
+}
+
+interface EvaluationDetails {
+  event: HookEvent;
+  command?: string;
+  targetPaths?: string[];
+  metadata?: Record<string, unknown>;
+  destructive?: boolean;
+}
+
+interface ContextBuild {
+  context: HookContext;
+}
+
+/**
+ * Evaluador comun de los hooks V2. No conoce el SDK: recibe la forma estructural
+ * que expone `@opencode/plugin` y la traduce al motor unico de hooks.
+ */
+export async function evaluatePermission(
+  input: Record<string, unknown>,
+  options: PluginAdapterOptions,
+): Promise<PermissionAdapterResult> {
+  const action = stringValue(input.action) || "unknown";
+  const resources = stringArray(input.resources);
+  const metadata = recordValue(input.metadata) ?? {};
+  const generic = action === "*";
+
+  const details = permissionDetails(action, resources, metadata);
+  const built = buildContext(details.event, options, {
+    command: details.command,
+    targetPaths: details.targetPaths,
+    metadata: {
+      ...metadata,
+      ...details.metadata,
+      origin: "opencode-v2",
+      action,
+      ...(generic ? { genericPermission: true } : {}),
+    },
+  });
+
+  const result = built.context
+    ? evaluate(built.context)
+    : policyFailure(details.event, options, built.error ?? "politica no evaluable");
+  const hostEffect = permissionEffect(input.effect);
+  const effect = strongerEffect(hostEffect, decisionEffect(result.decision));
+
+  if (effect !== hostEffect || result.decision !== "allow") {
+    input.effect = effect;
+  }
+  const message = pluginMessage(result);
+  if (message && effect !== "allow") {
+    input.message = mergeMessage(input.message, message);
+  }
+
+  return { result, effect };
+}
+
+export async function evaluateToolHook(
+  input: Record<string, unknown>,
+  options: PluginAdapterOptions,
+): Promise<HookResult> {
+  const tool = stringValue(input.tool) || "unknown";
+  const toolInput = input.input;
+  const mapped = toolDetails(tool, toolInput, options);
+
+  const built = buildContext(mapped.event, options, {
+    command: mapped.command,
+    targetPaths: mapped.targetPaths,
+    metadata: {
+      ...mapped.metadata,
+      origin: "opencode-v2",
+      tool,
+    },
+  });
+
+  return built.context
+    ? evaluate(built.context)
+    : policyFailure(mapped.event, options, built.error ?? "politica no evaluable");
+}
+
+export async function evaluateShellHook(
+  input: Record<string, unknown>,
+  options: PluginAdapterOptions,
+): Promise<ShellAdapterResult> {
+  const command = stringValue(input.command) || "";
+  const originalTimeout = numberValue(input.timeout, 0);
+  const env: Record<string, string | undefined> = {};
+  const rawEnv = recordValue(input.env);
+  if (rawEnv) {
+    for (const [key, value] of Object.entries(rawEnv)) {
+      if (typeof value === "string" || value === undefined) env[key] = value;
+    }
+  }
+  let timeout = originalTimeout;
+  let envChanged = false;
+  let timeoutChanged = false;
+
+  const built = buildContext("shell.exec.before", options, {
+    command,
+    metadata: {
+      origin: "opencode-v2",
+      shell: stringValue(input.shell),
+      cwd: stringValue(input.cwd),
+      timeoutSeconds: timeout,
+    },
+  });
+
+  if (!built.context) {
+    return {
+      result: policyFailure("shell.exec.before", options, built.error ?? "politica no evaluable"),
+      env,
+      timeout,
+    };
+  }
+
+  const controls = built.context.security?.shell;
+  if (controls) {
+    if (controls.denyCredentialEnv === true) {
+      for (const key of Object.keys(env)) {
+        if (isCredentialEnvKey(key)) {
+          delete env[key];
+          envChanged = true;
+        }
+      }
+    }
+    if (controls.minimizeEnvironment === true) {
+      for (const key of Object.keys(env)) {
+        if (!isSafeEnvKey(key)) {
+          delete env[key];
+          envChanged = true;
+        }
+      }
+    }
+    if (controls.enforceTimeout === true && controls.timeoutSeconds && (timeout <= 0 || timeout > controls.timeoutSeconds)) {
+      timeout = controls.timeoutSeconds;
+      timeoutChanged = true;
+      built.context.metadata = { ...built.context.metadata, timeoutSeconds: timeout };
+    }
+  }
+
+  let result = runHooks(built.context);
+  if (envChanged) {
+    result = appendViolation(result, {
+      id: "MAL-HOOK-SHELL-ENV",
+      decision: "warn",
+      message: "Se retiraron variables de entorno sensibles antes de ejecutar.",
+      fix: "No pases credenciales por entorno; usa un gestor de secretos o un canal aprobado.",
+    });
+  }
+  if (timeoutChanged) {
+    result = appendViolation(result, {
+      id: "MAL-HOOK-SHELL-TIMEOUT-CLAMP",
+      decision: "warn",
+      message: `Timeout ajustado al maximo de politica (${timeout}s).`,
+      fix: "Define timeouts explicitos dentro del maximo administrado.",
+    });
+  }
+  result = auditHookResult(built.context, result);
+
+  return { result, env, timeout };
+}
+
+export async function evaluateSessionHook(
+  event: HookEvent,
+  input: Record<string, unknown>,
+  options: PluginAdapterOptions,
+): Promise<HookResult> {
+  const model = recordValue(input.model);
+  const request = recordValue(input.request);
+  const metadata: Record<string, unknown> = {
+    origin: "opencode-v2",
+    providerID: stringValue(model?.providerID),
+    kind: stringValue(input.kind),
+  };
+  const baseURL = stringValue(input.baseURL);
+  const requestURL = stringValue(request?.url);
+  if (baseURL) metadata.url = baseURL;
+  if (requestURL) metadata.url = requestURL;
+  const contentEvent = event === "session.prompt.before"
+    || event === "session.context.before"
+    || event === "session.compaction.before"
+    || event === "session.generate.before"
+    || event === "session.title.before";
+  if (contentEvent && containsSecret(input)) {
+    metadata.secretDetected = true;
+  }
+
+  const built = buildContext(event, options, { metadata });
+  return built.context
+    ? evaluate(built.context)
+    : policyFailure(event, options, built.error ?? "politica no evaluable");
+}
+
+export function shouldBlockPluginResult(result: HookResult, options: PluginAdapterOptions, blockingAskIds: string[] = []): boolean {
+  if (result.decision === "deny") return true;
+  if (result.decision !== "ask") return false;
+  if (blockingAskIds.some((id) => result.violations.some((violation) => violation.id === id))) return true;
+  return options.permissionRegistered !== true;
+}
+
+export function formatPluginBlock(result: HookResult): string {
+  return [
+    `Malahor bloqueo ${result.event}: ${result.decision.toUpperCase()}`,
+    ...result.violations
+      .filter((violation) => violation.decision === "deny" || violation.decision === "ask")
+      .map((violation) => `- ${violation.id}: ${violation.message}`),
+  ].join("\n");
+}
+
+function evaluate(context: HookContext): HookResult {
+  return auditHookResult(context, runHooks(context));
+}
+
+function buildContext(
+  event: HookEvent,
+  options: PluginAdapterOptions,
+  details: Omit<EvaluationDetails, "event">,
+): { context?: HookContext; error?: string } {
+  const cwd = path.resolve(options.cwd);
+  const env = options.env ?? process.env;
+
+  try {
+    const paths = pluginPaths(cwd, env);
+    const project = resolveProject(cwd);
+    const loaded = loadHookPolicy(paths, project.canonicalKey);
+    const context: HookContext = {
+      event,
+      harness: "opencode",
+      profile: loaded.policy.profile,
+      cwd,
+      projectRoot: project.root,
+      malahorHome: paths.malahorHome,
+      project: project.canonicalKey,
+      policy: loaded.policy,
+      security: loaded.security,
+      policyMeta: loaded.policyMeta,
+      command: details.command,
+      targetPaths: details.targetPaths,
+      destructive: details.destructive,
+      audit: {
+        enabled: true,
+        required: loaded.security.audit?.required === true || loaded.security.audit?.failClosedIfUnavailable === true,
+      },
+      metadata: details.metadata,
+    };
+    return { context };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function policyFailure(event: HookEvent, options: PluginAdapterOptions, detail: string): HookResult {
+  const result: HookResult = {
+    event,
+    profile: "off",
+    decision: "deny",
+    violations: [{
+      id: "MAL-HOOK-PLUGIN-POLICY",
+      decision: "deny",
+      message: `Politica runtime no evaluable: ${detail}`,
+      fix: "Corrige la politica efectiva o el entorno antes de ejecutar la operacion protegida.",
+    }],
+  };
+
+  try {
+    const cwd = path.resolve(options.cwd);
+    const paths = pluginPaths(cwd, options.env ?? process.env);
+    const project = resolveProject(cwd);
+    const context: HookContext = {
+      event,
+      harness: "opencode",
+      profile: "off",
+      cwd,
+      projectRoot: project.root,
+      malahorHome: paths.malahorHome,
+      project: project.canonicalKey,
+      audit: { enabled: true },
+      metadata: { origin: "opencode-v2" },
+    };
+    return auditHookResult(context, result);
+  } catch {
+    return result;
+  }
+}
+
+function pluginPaths(cwd: string, env: NodeJS.ProcessEnv): MalahorPaths {
+  // El plugin no debe lanzar `opencode api get` por cada hook: la deteccion
+  // interactiva es exclusiva de la CLI.
+  return resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
+}
+
+function permissionDetails(action: string, resources: string[], metadata: Record<string, unknown>): EvaluationDetails {
+  const normalized = action.toLowerCase();
+  const metadataCommand = stringValue(metadata.command) || stringValue(metadata.cmd);
+
+  if (normalized === "bash" || normalized === "shell" || normalized === "command") {
+    return {
+      event: "shell.exec.before",
+      command: metadataCommand || resources.join(" "),
+      metadata: { ...metadata, tool: "bash" },
+    };
+  }
+
+  if (normalized === "read" || normalized === "glob" || normalized === "grep") {
+    return { event: "file.read.before", targetPaths: resources, metadata };
+  }
+
+  if (normalized === "edit" || normalized === "write" || normalized === "patch" || normalized === "create") {
+    return { event: "file.write.before", targetPaths: resources, metadata };
+  }
+
+  if (normalized === "webfetch" || normalized === "fetch" || normalized === "http") {
+    return {
+      event: "session.http-request.before",
+      metadata: { ...metadata, url: resources[0] ?? stringValue(metadata.url) },
+    };
+  }
+
+  if (normalized === "external_directory") {
+    return {
+      event: metadata.write === true ? "file.write.before" : "file.read.before",
+      targetPaths: resources,
+      metadata,
+    };
+  }
+
+  if (CODE_MODE_TOOL_NAMES.has(normalized)) {
+    return { event: "tool.execute.before", metadata: { ...metadata, tool: normalized } };
+  }
+
+  if (normalized === "task" || normalized.startsWith("mcp_") || normalized.startsWith("mcp.")) {
+    return {
+      event: "tool.execute.before",
+      metadata: { ...metadata, tool: normalized === "task" ? "task" : action },
+    };
+  }
+
+  if (normalized === "skill") {
+    return { event: "tool.execute.before", metadata: { ...metadata, tool: "skill" } };
+  }
+
+  // Tools conocidas sin efecto propio (todo, question, list) no se convierten
+  // en ask: su mediacion real ocurre en tool/shell/file cuando aplica.
+  if (KNOWN_TOOLS.has(normalized)) {
+    return { event: "plugin.permission.before", metadata: { ...metadata, action, knownTool: true } };
+  }
+
+  return { event: "plugin.permission.before", metadata: { ...metadata, action } };
+}
+
+function toolDetails(tool: string, input: unknown, options: PluginAdapterOptions): EvaluationDetails {
+  const normalized = tool.toLowerCase();
+  const args = recordValue(input) ?? {};
+
+  if (normalized === "bash") {
+    if (options.shellRegistered) {
+      return { event: "tool.execute.before", metadata: { tool } };
+    }
+    return {
+      event: "shell.exec.before",
+      command: stringValue(args.command) || stringValue(args.cmd),
+      metadata: { tool, timeoutSeconds: numberValue(args.timeout, 0) },
+    };
+  }
+
+  if (normalized === "read" || normalized === "glob" || normalized === "grep") {
+    return { event: "file.read.before", targetPaths: pathValues(args), metadata: { tool } };
+  }
+
+  if (normalized === "write" || normalized === "edit" || normalized === "patch") {
+    return { event: "file.write.before", targetPaths: pathValues(args), metadata: { tool } };
+  }
+
+  if (normalized === "webfetch") {
+    return {
+      event: "session.http-request.before",
+      metadata: { tool, url: stringValue(args.url) },
+    };
+  }
+
+  return { event: "tool.execute.before", metadata: { tool } };
+}
+
+const KNOWN_TOOLS = new Set([
+  "todowrite",
+  "todoread",
+  "list",
+  "question",
+  "invalid",
+]);
+
+function pathValues(value: unknown): string[] {
+  const record = recordValue(value);
+  if (!record) return [];
+
+  const direct = ["filePath", "file_path", "path", "targetPath", "target_path", "directory"]
+    .map((key) => stringValue(record[key]))
+    .filter((item): item is string => Boolean(item));
+  const arrays = ["paths", "files"].flatMap((key) => stringArray(record[key]));
+  const nested = ["arguments", "args", "input"].flatMap((key) => pathValues(record[key]));
+
+  return [...new Set([...direct, ...arrays, ...nested])];
+}
+
+const PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
+
+function containsSecret(value: unknown): boolean {
+  const text = collectStrings(value).join("\n");
+  if (!text) return false;
+  return PRIVATE_KEY_PATTERN.test(text)
+    || /\b(AKIA|ASIA)[A-Z0-9]{16}\b/.test(text)
+    || /(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^"']{16,}["']/i.test(text)
+    || /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/.test(text);
+}
+
+function collectStrings(value: unknown, depth = 0, output: string[] = []): string[] {
+  if (depth > 6 || output.length >= 500) return output;
+  if (typeof value === "string") {
+    if (value.length <= 20000) output.push(value);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, depth + 1, output);
+    return output;
+  }
+  const record = recordValue(value);
+  if (record) {
+    for (const item of Object.values(record)) collectStrings(item, depth + 1, output);
+  }
+  return output;
+}
+
+function appendViolation(result: HookResult, violation: HookViolation): HookResult {
+  const violations = [...result.violations, violation];
+  return {
+    ...result,
+    violations,
+    decision: strongestDecision(violations),
+  };
+}
+
+function strongestDecision(violations: HookViolation[]): HookDecision {
+  const weight: Record<HookDecision, number> = { allow: 0, warn: 1, ask: 2, deny: 3 };
+  return violations.reduce<HookDecision>((current, violation) => (
+    weight[violation.decision] > weight[current] ? violation.decision : current
+  ), "allow");
+}
+
+function decisionEffect(decision: HookDecision): PermissionEffect {
+  if (decision === "deny") return "deny";
+  if (decision === "ask") return "ask";
+  return "allow";
+}
+
+function permissionEffect(value: unknown): PermissionEffect {
+  return value === "deny" || value === "ask" ? value : "allow";
+}
+
+function strongerEffect(left: PermissionEffect, right: PermissionEffect): PermissionEffect {
+  const weight: Record<PermissionEffect, number> = { allow: 0, ask: 1, deny: 2 };
+  return weight[right] > weight[left] ? right : left;
+}
+
+function pluginMessage(result: HookResult): string | null {
+  const relevant = result.violations.filter((violation) => violation.decision === "deny" || violation.decision === "ask");
+  if (relevant.length === 0) return null;
+  return `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
+}
+
+function mergeMessage(current: unknown, next: string): string {
+  const prefix = stringValue(current);
+  return prefix ? `${prefix} ${next}` : next;
+}
+
+function isCredentialEnvKey(key: string): boolean {
+  return /(token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth|session|cookie|aws_|azure_|gcp_|google_|github_|gitlab_|npm_)/i.test(key);
+}
+
+function isSafeEnvKey(key: string): boolean {
+  return /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|COLORTERM|NO_COLOR|LANG|LC_.*|TZ|TMPDIR|PWD|XDG_.*|CI|NODE_ENV|BUN_ENV)$/.test(key);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberValue(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}

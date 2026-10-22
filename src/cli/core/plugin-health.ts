@@ -294,7 +294,7 @@ export function inspectPluginState(context: PluginHealthContext): PluginHealthCh
 }
 
 export function parsePluginVersion(content: string): string | null {
-  const match = /\bconst\s+PLUGIN_VERSION\s*=\s*"([^"]+)"/.exec(content);
+  const match = /\b(?:const|let|var)\s+PLUGIN_VERSION\s*=\s*"([^"]+)"/.exec(content);
   return match?.[1] ?? null;
 }
 

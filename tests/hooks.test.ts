@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { assertHooksAllowed, evaluateHookRules, hookExitCode, runHooks } from "../src/cli/core/hooks/engine";
-import type { HookContext, HookPolicyMeta, HookRule } from "../src/cli/core/hooks/types";
+import { HOOK_EVENTS, type HookContext, type HookPolicyMeta, type HookRule } from "../src/cli/core/hooks/types";
 import { callTool } from "../src/mnemo/tools";
 
 const baseContext = (overrides: Partial<HookContext>): HookContext => ({
@@ -31,6 +31,20 @@ const policyMeta = (overrides: Partial<HookPolicyMeta>): HookPolicyMeta => ({
 });
 
 describe("malahor hooks", () => {
+  test("el CLI expone los eventos del runtime V2", () => {
+    const events = new Set<string>(HOOK_EVENTS);
+    for (const event of [
+      "shell.exec.before",
+      "file.read.before",
+      "file.write.before",
+      "tool.execute.before",
+      "session.prompt.before",
+      "plugin.permission.before",
+    ]) {
+      expect(events.has(event)).toBe(true);
+    }
+  });
+
   test("bloquea comandos git destructivos", () => {
     const result = runHooks(baseContext({
       event: "git.reset.before",

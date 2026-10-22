@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { MalahorExecutionPolicy, MalahorIntervention } from "./config";
+import { stripJsonComments } from "./jsonc";
 import type { MalahorPaths } from "./paths";
+
+export { stripJsonComments } from "./jsonc";
 
 export const MALAHOR_POLICY_FORMAT = 2;
 
@@ -243,10 +246,10 @@ function applyBuildAgentConfig(current: OpenCodeAgentConfig | undefined, executi
     const permission = { ...(asRecord(next.permission) ?? {}) };
 
     if (execution.intervention === "ejecutar") {
-      // Sin bloqueos: remover solo lo que Malahor escribe (o el lock legacy "deny").
+      // Sin bloqueos: remover edit/task que Malahor escribe. La whitelist bash
+      // legacy se conserva hasta T-5.1.7; ya no es la fuente de verdad.
       if (permission.edit === "deny") delete permission.edit;
       if (permission.task === "deny") delete permission.task;
-      if (permission.bash === "deny" || isMalahorBashPolicy(permission.bash)) delete permission.bash;
 
       if (Object.keys(permission).length > 0) {
         next.permission = permission;
@@ -254,12 +257,12 @@ function applyBuildAgentConfig(current: OpenCodeAgentConfig | undefined, executi
         delete next.permission;
       }
     } else {
-      // Whitelist agent-safe: edit/task deny, pero bash conserva la ruta de reparacion.
+      // La autorizacion real vive en el motor de hooks/plugin. No escribimos
+      // permission.bash: la whitelist legacy existente se reporta, no se borra.
       next.permission = {
         ...permission,
         edit: "deny",
         task: "deny",
-        bash: expectedBashPolicy(execution.intervention) ?? GUIAR_BASH_POLICY,
       };
     }
   }
@@ -292,63 +295,4 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   }
 
   return undefined;
-}
-
-export function stripJsonComments(input: string): string {
-  let output = "";
-  let inString = false;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-
-  for (let index = 0; index < input.length; index += 1) {
-    const current = input[index];
-    const next = input[index + 1];
-
-    if (inLineComment) {
-      if (current === "\n") {
-        inLineComment = false;
-        output += current;
-      }
-      continue;
-    }
-
-    if (inBlockComment) {
-      if (current === "*" && next === "/") {
-        inBlockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-
-    if (!inString && current === "/" && next === "/") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-
-    if (!inString && current === "/" && next === "*") {
-      inBlockComment = true;
-      index += 1;
-      continue;
-    }
-
-    output += current;
-
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (current === "\\") {
-      escaped = true;
-      continue;
-    }
-
-    if (current === '"') {
-      inString = !inString;
-    }
-  }
-
-  return output;
 }

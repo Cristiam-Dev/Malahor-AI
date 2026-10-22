@@ -213,33 +213,63 @@ export interface HookPolicyMeta {
   warnings: string[];
 }
 
-export type HookEvent =
-  | "project.resolve.before"
-  | "context.recover.before"
-  | "context.save.before"
-  | "memory.write.before"
-  | "memory.delete.preview"
-  | "memory.delete.apply"
-  | "memory.move.preview"
-  | "memory.move.apply"
-  | "memory.restore.preview"
-  | "memory.restore.apply"
-  | "obsidian.write.before"
-  | "graphify.generate.before"
-  | "install.preflight"
-  | "install.beforePolicy"
-  | "update.preflight"
-  | "uninstall.beforeRemove"
-  | "git.commit.before"
-  | "git.push.before"
-  | "git.reset.before"
-  | "git.checkout.before"
-  | "git.rebase.before"
-  | "file.stage.before"
-  | "dependency.add.before"
-  | "api.change.before"
-  | "database.change.before"
-  | "quality.check.before";
+export const HOOK_EVENTS = [
+  "project.resolve.before",
+  "context.recover.before",
+  "context.save.before",
+  "memory.write.before",
+  "memory.delete.preview",
+  "memory.delete.apply",
+  "memory.move.preview",
+  "memory.move.apply",
+  "memory.restore.preview",
+  "memory.restore.apply",
+  "obsidian.write.before",
+  "graphify.generate.before",
+  "install.preflight",
+  "install.beforePolicy",
+  "update.preflight",
+  "uninstall.beforeRemove",
+  "git.commit.before",
+  "git.push.before",
+  "git.reset.before",
+  "git.checkout.before",
+  "git.rebase.before",
+  "file.stage.before",
+  "shell.exec.before",
+  "file.read.before",
+  "file.write.before",
+  "tool.execute.before",
+  "session.prompt.before",
+  "session.context.before",
+  "session.compaction.before",
+  "session.generate.before",
+  "session.title.before",
+  "session.model-request.before",
+  "session.http-request.before",
+  "session.http-response.after",
+  "plugin.permission.before",
+  "dependency.add.before",
+  "api.change.before",
+  "database.change.before",
+  "quality.check.before",
+] as const;
+
+export type HookEvent = typeof HOOK_EVENTS[number];
+
+// Code Mode/REPL puede invocar tools sin pasar por los hooks del host. No se
+// media dentro de ese sandbox: se bloquea el punto de entrada hasta T-5.5.5.
+export const CODE_MODE_TOOL_NAMES = new Set([
+  "code",
+  "code_mode",
+  "codemode",
+  "repl",
+  "eval",
+  "execute",
+  "javascript",
+  "typescript",
+  "python",
+]);
 
 export interface HookContext {
   event: HookEvent;

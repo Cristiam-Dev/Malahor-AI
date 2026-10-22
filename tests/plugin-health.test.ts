@@ -244,8 +244,9 @@ describe("salud del plugin gestionado", () => {
     expect(inspectManagedPlugin(v1).status).toBe("warn");
   });
 
-  test("parsePluginVersion lee la constante del asset", () => {
+  test("parsePluginVersion lee la constante del asset y el var del bundle", () => {
     expect(parsePluginVersion(pluginContent("9.9.9"))).toBe("9.9.9");
+    expect(parsePluginVersion('var PLUGIN_VERSION = "9.9.9";')).toBe("9.9.9");
     expect(parsePluginVersion("export default {}")).toBeNull();
   });
 });
