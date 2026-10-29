@@ -1,7 +1,7 @@
 import * as json from "./json-store";
 import { observationType } from "./engine/observations";
 import { MemoryError } from "./engine";
-import { assertJsonMemory, withMemoryStorage } from "./storage";
+import { withJsonMemoryWrite, withMemoryStorage } from "./storage";
 
 export type { ObservationType, Observation, SessionSummary, MnemoDb, SaveObservationInput } from "./json-store";
 export { dbPath, normalizeProject } from "./json-store";
@@ -12,9 +12,8 @@ export function loadDb(filePath = json.dbPath()): json.MnemoDb {
 
 export function saveDb(db: json.MnemoDb, filePath = json.dbPath()): void {
   // La sustitucion de snapshots legados no puede descartar pins, relaciones ni
-  // escrituras concurrentes en v2. Solo el futuro migrador importa snapshots.
-  assertJsonMemory(filePath);
-  json.saveDb(db, filePath);
+  // escrituras concurrentes en v2. Solo el migrador importa snapshots a SQLite.
+  withJsonMemoryWrite(filePath, (file) => json.saveDb(db, file));
 }
 
 export function saveObservation(input: json.SaveObservationInput, filePath = json.dbPath()): json.Observation {

@@ -4,11 +4,16 @@ import type { HookContext, HookEvent } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
 
 /**
- * Contexto comun para operaciones MCP que ejecutan efectos propios.
+ * Contexto comun para operaciones Mnemo de CLI/MCP que ejecutan efectos propios.
  * Carga la misma politica efectiva que CLI/plugin para no saltarse el suelo
  * corporativo ni la auditoria obligatoria.
  */
 export function mcpHookContext(event: HookEvent, overrides: Partial<HookContext> = {}): HookContext {
+  return mnemoHookContext(event, "mcp", overrides);
+}
+
+export function mnemoHookContext(event: HookEvent, harness: HookContext["harness"],
+  overrides: Partial<HookContext> = {}): HookContext {
   const paths = resolvePaths();
   const metadataProject = typeof overrides.metadata?.project === "string" ? overrides.metadata.project : undefined;
   const project = resolveRegisteredProject(paths, {}, {
@@ -21,7 +26,7 @@ export function mcpHookContext(event: HookEvent, overrides: Partial<HookContext>
 
   return {
     event,
-    harness: "mcp",
+    harness,
     profile: policyLoad.policy.profile,
     cwd: paths.cwd,
     projectRoot: project.root,

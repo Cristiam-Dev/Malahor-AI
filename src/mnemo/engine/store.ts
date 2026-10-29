@@ -109,6 +109,15 @@ export class MemoryStore {
     });
   }
 
+  checkpoint(): void {
+    if (this.access === "read") throw new MemoryError("MEMORY_UNSUPPORTED", "Checkpoint requiere conexion de escritura.");
+    if (this.transactionActive) throw new MemoryError("MEMORY_UNSUPPORTED", "Checkpoint requiere una conexion fuera de transaccion.");
+    const result = this.get("PRAGMA wal_checkpoint(TRUNCATE)");
+    if (result && "busy" in result && rowNumber(result, "busy") !== 0) {
+      throw new MemoryError("MEMORY_BUSY", "SQLite no pudo cerrar el WAL provisional.");
+    }
+  }
+
   close(): void {
     if (this.closed) return;
     this.db.close();

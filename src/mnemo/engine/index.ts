@@ -16,6 +16,13 @@ export type { BudgetedContext, ContextOptions, MemoryBrief, MemoryBriefOptions }
 export interface ScopeEntry { path: string; parent: string | null; depth: number; observations: number; sessions: number; }
 export interface EngineOptions { access?: StoreAccess; aliases?: ProjectAliases; }
 export interface ScopeDeleteExpectation { observations: number; sessions: number; latest: string | null; }
+export interface LegacyImportState {
+  sessionIds: string[];
+  nextObservationPosition: number;
+  nextSessionPosition: number;
+  pins: number;
+  relations: number;
+}
 
 export class MemoryEngine {
   private constructor(private readonly store: MemoryStore, private readonly aliases: ProjectAliases) {}
@@ -58,6 +65,48 @@ export class MemoryEngine {
       this.store.run("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", [randomUUID(), project, sanitized, item.created_at, position]);
       this.store.run("UPDATE memory_state SET next_session_position = ? WHERE singleton = 1", [position + 1]);
       return item;
+    });
+  }
+
+  importLegacySnapshot(snapshot: MnemoDb, sessionIds: string[]): void {
+    if (sessionIds.length !== snapshot.sessions.length || new Set(sessionIds).size !== sessionIds.length) {
+      throw new MemoryError("MEMORY_INPUT", "Las sesiones legadas requieren identidades tecnicas unicas y estables.");
+    }
+    this.store.transaction(() => {
+      const state = this.store.get(`SELECT *,
+        (SELECT count(*) FROM observations) AS observations,
+        (SELECT count(*) FROM sessions) AS sessions,
+        (SELECT count(*) FROM pins) AS pins,
+        (SELECT count(*) FROM relations) AS relations
+        FROM memory_state WHERE singleton = 1`);
+      if (rowNumber(state, "next_observation_id") !== 1 || rowNumber(state, "next_observation_position") !== 0
+        || rowNumber(state, "next_session_position") !== 0 || rowNumber(state, "observations") !== 0
+        || rowNumber(state, "sessions") !== 0 || rowNumber(state, "pins") !== 0 || rowNumber(state, "relations") !== 0) {
+        throw new MemoryError("MEMORY_FORMAT", "El import solo acepta una base SQLite provisional vacia.");
+      }
+      for (const [position, item] of snapshot.observations.entries()) {
+        const scope = this.normalize(item.project);
+        if (scope !== item.project) throw new MemoryError("MEMORY_INPUT", "El snapshot debe llegar con scopes canonicos.");
+        observationType(item.type);
+        boundedInteger(item.id, 1, Number.MAX_SAFE_INTEGER);
+        ensureScope(this.store, scope);
+        this.store.run("INSERT INTO observations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [item.id, scope, item.type, item.title, item.content, item.tags, item.created_at, position]);
+      }
+      for (const [position, item] of snapshot.sessions.entries()) {
+        const scope = this.normalize(item.project);
+        if (scope !== item.project) throw new MemoryError("MEMORY_INPUT", "El snapshot debe llegar con scopes canonicos.");
+        ensureScope(this.store, scope);
+        this.store.run("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+          [sessionIds[position], scope, item.summary, item.created_at, position]);
+      }
+      const maxId = snapshot.observations.reduce((max, item) => Math.max(max, item.id), 0);
+      if (!Number.isSafeInteger(snapshot.nextId) || snapshot.nextId <= maxId) {
+        throw new MemoryError("MEMORY_INPUT", "nextId legado invalido.");
+      }
+      this.store.run(`UPDATE memory_state SET next_observation_id = ?, next_observation_position = ?,
+        next_session_position = ? WHERE singleton = 1`,
+      [snapshot.nextId, snapshot.observations.length, snapshot.sessions.length]);
     });
   }
 
@@ -166,8 +215,21 @@ export class MemoryEngine {
   }
 
   snapshot(): MnemoDb { return this.store.transaction(() => this.readScopes(), false); }
+  legacyImportState(): LegacyImportState {
+    return this.store.transaction(() => {
+      const counters = this.store.get("SELECT * FROM memory_state WHERE singleton = 1");
+      return {
+        sessionIds: this.store.all("SELECT id FROM sessions ORDER BY position").map((row) => rowText(row, "id")),
+        nextObservationPosition: rowNumber(counters, "next_observation_position"),
+        nextSessionPosition: rowNumber(counters, "next_session_position"),
+        pins: rowNumber(this.store.get("SELECT count(*) AS total FROM pins"), "total"),
+        relations: rowNumber(this.store.get("SELECT count(*) AS total FROM relations"), "total"),
+      };
+    }, false);
+  }
   backup(destination: string): string { return this.store.backup(destination); }
   integrity(): void { this.store.integrity(); }
+  checkpoint(): void { this.store.checkpoint(); }
   close(): void { this.store.close(); }
 
   private readProject(root: string): MnemoDb {

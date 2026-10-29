@@ -5,12 +5,30 @@ import { MemoryEngine, MemoryError } from "./engine";
 import { privateDirectory, privateFile } from "./engine/paths";
 import { MEMORY_SCHEMA_VERSION } from "./engine/schema";
 import { dbPath } from "./json-store";
+import { withLegacyWriteLock } from "./migration/locks";
 
 export type MemoryLocation = { backend: "json" | "sqlite"; file: string; marker: string };
 
+export interface MemoryV2Paths {
+  directory: string;
+  database: string;
+  marker: string;
+  manifest: string;
+}
+
+export function memoryV2Paths(legacyFile = dbPath()): MemoryV2Paths {
+  const directory = path.join(path.dirname(path.dirname(path.resolve(legacyFile))), "memory");
+  return {
+    directory,
+    database: path.join(directory, "db.sqlite"),
+    marker: path.join(directory, "active.json"),
+    manifest: path.join(directory, "migration.json"),
+  };
+}
+
 export function memoryLocation(legacyFile = dbPath()): MemoryLocation {
-  const directory = path.join(path.dirname(path.dirname(legacyFile)), "memory");
-  const marker = path.join(directory, "active.json");
+  const paths = memoryV2Paths(legacyFile);
+  const { directory, marker } = paths;
   let raw: string;
   try {
     privateDirectory(directory);
@@ -33,7 +51,7 @@ export function memoryLocation(legacyFile = dbPath()): MemoryLocation {
       && "schemaVersion" in parsed && parsed.schemaVersion === MEMORY_SCHEMA_VERSION)) {
     throw new MemoryError("MEMORY_ACTIVATION", "Marcador de memoria no soportado; requiere migracion verificada.");
   }
-  return { backend: "sqlite", file: path.join(directory, "db.sqlite"), marker };
+  return { backend: "sqlite", file: paths.database, marker };
 }
 
 export function withMemoryStorage<T>(legacyFile: string, access: "read" | "write", handlers: {
@@ -41,9 +59,35 @@ export function withMemoryStorage<T>(legacyFile: string, access: "read" | "write
   sqlite: (engine: MemoryEngine) => T;
 }): T {
   const location = memoryLocation(legacyFile);
-  if (location.backend === "json") return handlers.json(location.file);
+  if (location.backend === "json") {
+    return access === "write"
+      ? withLegacyWriteLock(location.file, () => {
+        assertLegacyStillActive(location.file);
+        return handlers.json(location.file);
+      })
+      : handlers.json(location.file);
+  }
   const engine = MemoryEngine.open(location.file, { access, aliases: loadConfig().projects.aliases });
   try { return handlers.sqlite(engine); } finally { engine.close(); }
+}
+
+export function withJsonMemoryWrite<T>(legacyFile: string, operation: (file: string) => T): T {
+  const location = memoryLocation(legacyFile);
+  if (location.backend !== "json") {
+    throw new MemoryError("MEMORY_UNSUPPORTED",
+      "Operacion administrativa pendiente de adaptacion SQLite (T-5.3.5); no se escribe al JSON retenido.");
+  }
+  return withLegacyWriteLock(location.file, () => {
+    assertLegacyStillActive(location.file);
+    return operation(location.file);
+  });
+}
+
+function assertLegacyStillActive(legacyFile: string): void {
+  if (memoryLocation(legacyFile).backend !== "json") {
+    throw new MemoryError("MEMORY_ACTIVATION",
+      "SQLite se activo antes de iniciar la escritura; el JSON retenido no se modifica.");
+  }
 }
 
 export function assertJsonMemory(legacyFile = dbPath()): void {

@@ -8,6 +8,7 @@ import { listProjects, loadDb, normalizeProject, saveDb, type MnemoDb, type Obse
 import { contextForProject } from "../../mnemo/context";
 import { backupMemory } from "../../mnemo/admin-backup";
 import { assertJsonMemory, memoryLocation } from "../../mnemo/storage";
+import { applyMemoryMigration, previewMemoryMigration } from "../../mnemo/migration";
 
 export interface MemoryOptions {
   action: string;
@@ -16,6 +17,8 @@ export interface MemoryOptions {
   confirm: string | undefined;
   dryRun: boolean;
   yes: boolean;
+  apply?: boolean;
+  approval?: string;
 }
 
 export function runMemory(options: MemoryOptions): void {
@@ -24,9 +27,13 @@ export function runMemory(options: MemoryOptions): void {
   const action = options.action || "help";
 
   printHeader("malahor-ai memory");
-  printLine(`Mnemo DB: ${memoryLocation(paths.mnemoDb).file}`);
   printLine(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}`);
   printLine(`Dry-run: ${options.dryRun ? "yes" : "no"}`);
+  if (action === "migrate") {
+    printMigration(options, paths.mnemoDb, config.projects.aliases);
+    return;
+  }
+  printLine(`Mnemo DB: ${memoryLocation(paths.mnemoDb).file}`);
 
   switch (action) {
     case "list":
@@ -55,8 +62,50 @@ export function runMemory(options: MemoryOptions): void {
       printMemoryHelp();
       return;
     default:
-      throw new Error(`Comando memory invalido: ${action}. Usa list, inspect, backup, reset o restore.`);
+      throw new Error(`Comando memory invalido: ${action}. Usa list, inspect, backup, migrate, reset o restore.`);
   }
+}
+
+function printMigration(options: MemoryOptions, source: string,
+  aliases: ReturnType<typeof loadConfig>["projects"]["aliases"]): void {
+  assertArgCount(options.args, 0, "Uso: malahor-ai memory migrate [--dry-run|--apply --yes --confirm <token>]");
+  if (options.apply && options.dryRun) throw new Error("memory migrate no combina --apply con --dry-run.");
+  const preview = previewMemoryMigration({ source, aliases });
+  printLine(`Migration: ${preview.state}`);
+  printLine(`Source: ${preview.source}`);
+  printLine(`Destination: ${preview.destination}`);
+  if (preview.sourceHash) printLine(`Snapshot sha256: ${preview.sourceHash}`);
+  printLine(`Records: observations=${preview.observations} sessions=${preview.sessions} nextId=${preview.nextId ?? "unknown"}`);
+  for (const count of preview.counts) {
+    printLine(`- ${count.scope}: observations=${count.observations} sessions=${count.sessions}`);
+  }
+  for (const count of preview.typeCounts) printLine(`- type ${count.type}: observations=${count.count}`);
+  for (const mapping of preview.mappings.filter((item) => item.changed)) {
+    printLine(`Alias: ${mapping.source} -> ${mapping.target} (${mapping.observations} observations, ${mapping.sessions} sessions)`);
+  }
+  for (const warning of preview.warnings) printLine(`Warning: ${warning}`);
+  if (preview.issue) printLine(`Blocked: ${preview.issue}`);
+  if (!options.apply) {
+    if (preview.confirmation) {
+      printLine(`Token: ${preview.confirmation}`);
+      printLine("Para aplicar: malahor-ai memory migrate --apply --yes --confirm <token>");
+    }
+    printLine("Plan: pause JSON writers -> exact backup -> staged SQLite import -> full verification -> atomic marker.");
+    printLine("Before marker: JSON remains active and failed SQLite artifacts are isolated.");
+    printLine("After marker: SQLite remains active; automatic rollback is disabled to preserve new writes.");
+    printLine("Preview only: no se escribio ningun archivo.");
+    if (preview.state === "blocked") process.exitCode = 1;
+    return;
+  }
+  if (!options.yes || !options.confirm) {
+    throw new Error("memory migrate --apply requiere --yes --confirm <token> obtenido del preview.");
+  }
+  const result = applyMemoryMigration(options.confirm, { source, aliases, approval: options.approval });
+  printLine(result.applied ? "Result: imported and activated"
+    : result.resumed ? "Result: verified import activated" : "Result: already active; no-op");
+  if (result.backup) printLine(`Legacy backup: ${result.backup}`);
+  if (result.databaseHash) printLine(`SQLite sha256: ${result.databaseHash}`);
+  printLine("Rollback automatic: disabled after activation; preserve post-migration writes.");
 }
 
 function printProjects(dbPath: string): void {
@@ -317,6 +366,8 @@ Usage:
   malahor-ai memory list
   malahor-ai memory inspect <project>
   malahor-ai memory backup [--dry-run]
+  malahor-ai memory migrate [--dry-run]
+  malahor-ai memory migrate --apply --yes --confirm <token>
   malahor-ai memory reset <project> --yes --confirm <project>
   malahor-ai memory reset --all --yes --confirm ALL
   malahor-ai memory restore <backup-file> --yes --confirm RESTORE
