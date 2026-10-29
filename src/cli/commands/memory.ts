@@ -6,6 +6,8 @@ import { isSandbox } from "../core/paths";
 import { sanitizeMemoryContent } from "../../mnemo/sanitizer";
 import { listProjects, loadDb, normalizeProject, saveDb, type MnemoDb, type Observation, type ObservationType, type SessionSummary } from "../../mnemo/db";
 import { contextForProject } from "../../mnemo/context";
+import { backupMemory } from "../../mnemo/admin-backup";
+import { assertJsonMemory, memoryLocation } from "../../mnemo/storage";
 
 export interface MemoryOptions {
   action: string;
@@ -22,7 +24,7 @@ export function runMemory(options: MemoryOptions): void {
   const action = options.action || "help";
 
   printHeader("malahor-ai memory");
-  printLine(`Mnemo DB: ${paths.mnemoDb}`);
+  printLine(`Mnemo DB: ${memoryLocation(paths.mnemoDb).file}`);
   printLine(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}`);
   printLine(`Dry-run: ${options.dryRun ? "yes" : "no"}`);
 
@@ -40,9 +42,11 @@ export function runMemory(options: MemoryOptions): void {
       printBackup(paths.mnemoDb, paths.backupsDir, options.dryRun);
       return;
     case "reset":
+      assertJsonMemory(paths.mnemoDb);
       printReset(options, paths.mnemoDb, paths.backupsDir);
       return;
     case "restore":
+      assertJsonMemory(paths.mnemoDb);
       printRestore(options, paths.cwd, paths.mnemoDb, paths.backupsDir);
       return;
     case "help":
@@ -97,7 +101,7 @@ function printProjectContext(project: string | undefined, dbPath: string): void 
 }
 
 function printBackup(dbPath: string, backupsDir: string, dryRun: boolean): void {
-  const result = backupFile(dbPath, backupsDir, dryRun);
+  const result = backupMemory(dbPath, dryRun, backupsDir);
 
   if (!result.created) {
     printLine("Backup: skipped, Mnemo DB does not exist");

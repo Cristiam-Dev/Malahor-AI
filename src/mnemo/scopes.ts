@@ -14,32 +14,37 @@ export function buildScopeChain(scope: string): string[] {
 
   const segments = scope.split("/");
   const ancestors = segments.map((_, index) => segments.slice(0, index + 1).join("/"));
-  return ["global", ...ancestors];
+  return [...new Set(["global", ...ancestors])];
 }
 
 export function observationsAcrossScopes(observations: Observation[], scopes: string[], limit: number): Observation[] {
   const safeLimit = boundedLimit(limit, 8, 50);
+  const result: Observation[] = [];
+  for (const observation of iterateObservationsAcrossScopes(observations, scopes)) {
+    result.push(observation);
+    if (result.length >= safeLimit) break;
+  }
+  return result;
+}
+
+export function* iterateObservationsAcrossScopes(observations: Observation[], scopes: string[]): Generator<Observation> {
   const byScope = new Map(scopes.map((scope) => [scope, observations
     .filter((observation) => observation.project === scope)
     .sort((a, b) => b.created_at.localeCompare(a.created_at))]));
   const orderedScopes = [...scopes].reverse();
-  const result: Observation[] = [];
   let position = 0;
 
-  while (result.length < safeLimit) {
+  while (true) {
     let added = false;
     for (const scope of orderedScopes) {
       const observation = byScope.get(scope)?.[position];
       if (!observation) continue;
-      result.push(observation);
+      yield observation;
       added = true;
-      if (result.length >= safeLimit) break;
     }
     if (!added) break;
     position += 1;
   }
-
-  return result;
 }
 
 export function newest<T extends { created_at: string }>(items: T[]): T | null {

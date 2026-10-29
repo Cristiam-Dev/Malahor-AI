@@ -4,7 +4,7 @@ import { copyAssets } from "../core/assets";
 import { backupFile } from "../core/backup";
 import { formatExecutionPolicy, loadConfig, type MalahorConfig, type MalahorExecutionPolicy } from "../core/config";
 import { levelForProject } from "../core/context";
-import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostInfo, type OpenCodeHostKind } from "../core/detector";
+import { detectEnvironment, detectOpenCodeHost, supportsMemoryRuntime, type DetectionResult, type OpenCodeHostInfo, type OpenCodeHostKind } from "../core/detector";
 import { graphifyStatus } from "../core/graphify";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
@@ -64,7 +64,7 @@ function renderReport(
   const graphStatus = graphifyStatus(paths);
   const checks: CheckResult[] = [];
 
-  checks.push({ name: "Node", ok: detection.nodeMajor >= 22, message: detection.nodeVersion, critical: true });
+  checks.push({ name: "Node", ok: supportsMemoryRuntime(detection.nodeVersion), message: `${detection.nodeVersion} (required >=22.18.0)`, critical: true });
   checks.push({ name: "Supported runtime", ok: detection.platform === "linux" || detection.platform === "darwin" || detection.platform === "win32", message: `platform=${detection.platform} wsl=${String(detection.isWsl)}`, critical: true });
   checks.push({ name: "OpenCode command", ok: detection.commands.opencode, message: detection.commands.opencode ? "found" : "not found", critical: true });
   checks.push(checkOpenCodeHost(host));

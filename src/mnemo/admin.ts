@@ -1,8 +1,9 @@
-import { backupFile, type BackupResult } from "../cli/core/backup";
+import type { BackupResult } from "../cli/core/backup";
 import { assertHooksAllowed } from "../cli/core/hooks/engine";
 import { mcpHookContext } from "./hook-context";
 import { dbPath, loadDb, normalizeProject, saveDb, type Observation, type ObservationType, type SessionSummary } from "./db";
-import { backupsDirForDb } from "./admin-backup";
+import { backupMemory } from "./admin-backup";
+import { memoryLocation, withSqliteMemory } from "./storage";
 
 export interface MemoryDeletePreview {
   project: string;
@@ -111,18 +112,20 @@ export function deleteProjectMemory(project: string, confirm: string, filePath =
     },
   }));
 
-  const db = loadDb(filePath);
-  const next = {
-    ...db,
-    observations: db.observations.filter((observation) => observation.project !== preview.project),
-    sessions: db.sessions.filter((session) => session.project !== preview.project),
-  };
-  const deletedObservations = db.observations.length - next.observations.length;
-  const deletedSessions = db.sessions.length - next.sessions.length;
-  const backup = backupFile(filePath, backupsDirForDb(filePath), false);
-
-  if (deletedObservations > 0 || deletedSessions > 0) {
-    saveDb(next, filePath);
+  const location = memoryLocation(filePath);
+  const backup = backupMemory(filePath);
+  let deletedObservations: number;
+  let deletedSessions: number;
+  if (location.backend === "sqlite") {
+    ({ deletedObservations, deletedSessions } = withSqliteMemory("write", (engine) => engine.deleteScope(preview.project, preview), filePath));
+  } else {
+    const db = loadDb(filePath);
+    const next = { ...db,
+      observations: db.observations.filter((observation) => observation.project !== preview.project),
+      sessions: db.sessions.filter((session) => session.project !== preview.project) };
+    deletedObservations = db.observations.length - next.observations.length;
+    deletedSessions = db.sessions.length - next.sessions.length;
+    if (deletedObservations > 0 || deletedSessions > 0) saveDb(next, filePath);
   }
 
   return { ...preview, deletedObservations, deletedSessions, backup };
@@ -165,15 +168,15 @@ export function moveMemory(id: number, targetProject: string, confirm: string, f
     },
   }));
 
-  const db = loadDb(filePath);
-  const backup = backupFile(filePath, backupsDirForDb(filePath), false);
-  const next = {
-    ...db,
-    observations: db.observations.map((observation) => observation.id === id
-      ? { ...observation, project: preview.toProject }
-      : observation),
-  };
-  saveDb(next, filePath);
+  const location = memoryLocation(filePath);
+  const backup = backupMemory(filePath);
+  if (location.backend === "sqlite") {
+    withSqliteMemory("write", (engine) => engine.move(id, preview.toProject, preview.fromProject), filePath);
+  } else {
+    const db = loadDb(filePath);
+    saveDb({ ...db, observations: db.observations.map((observation) => observation.id === id
+      ? { ...observation, project: preview.toProject } : observation) }, filePath);
+  }
 
   return { ...preview, backup, moved: true };
 }

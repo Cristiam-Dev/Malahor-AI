@@ -8,6 +8,7 @@ import { getObservation, listProjects, saveObservation, saveSessionSummary, sear
 import { contextForProject, memoryBrief } from "./context";
 import { deleteProjectMemory, inspectProjectMemory, moveMemory, previewMemoryMove, previewProjectDeletion } from "./admin";
 import { backupMemory, previewMemoryRestore, restoreMemoryBackup } from "./admin-backup";
+import { memoryTree, pinMemory, promoteMemory, previewMemoryPromotion, unpinMemory } from "./v2-tools";
 
 export { toolDefinitions };
 
@@ -30,22 +31,36 @@ export function callTool(call: ToolCall): unknown {
         tags: stringArg(args.tags, ""),
       });
     case "mem_search":
-      return searchObservations(stringArg(args.query, ""), stringArg(args.project, ""), stringArg(args.type, ""), numberArg(args.limit, 5));
+      return searchObservations(stringArg(args.query, ""), stringArg(args.project, ""), stringArg(args.type, ""),
+        numberArg(args.limit, 5), booleanArg(args.subtree));
     case "mem_get":
       return getObservation(numberArg(args.id, 0));
     case "mem_context":
-      return contextForProject(stringArg(args.project), numberArg(args.limit, 8));
+      return contextForProject(stringArg(args.project), numberArg(args.limit, 8), undefined, {
+        budget: optionalNumberArg(args.budget), rollup: booleanArg(args.rollup),
+      });
     case "mem_brief":
       return memoryBrief(stringArg(args.request), {
         project: optionalStringArg(args.project),
         scope: optionalStringArg(args.scope),
         limit: numberArg(args.limit, 8),
         relatedLimit: numberArg(args.relatedLimit, 5),
+        budget: optionalNumberArg(args.budget),
       });
     case "mem_session_summary":
       return saveSessionSummary(stringArg(args.project), stringArg(args.summary));
     case "mem_list_projects":
       return listProjects();
+    case "mem_tree":
+      return memoryTree(stringArg(args.prefix, ""));
+    case "mem_pin":
+      return pinMemory(numberArg(args.id, 0));
+    case "mem_unpin":
+      return unpinMemory(numberArg(args.id, 0));
+    case "mem_promote_preview":
+      return previewMemoryPromotion(numberArg(args.id, 0), stringArg(args.ancestor));
+    case "mem_promote":
+      return promoteMemory(numberArg(args.id, 0), stringArg(args.ancestor), stringArg(args.confirm));
     case "mem_delete_project_preview":
       return previewProjectDeletion(stringArg(args.project));
     case "mem_delete_project":
@@ -106,6 +121,16 @@ function stringArg(value: unknown, fallback?: string): string {
 
 function numberArg(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function optionalNumberArg(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+  throw new Error("Expected a non-negative safe integer argument");
+}
+
+function booleanArg(value: unknown): boolean {
+  return value === true;
 }
 
 function optionalStringArg(value: unknown): string | undefined {

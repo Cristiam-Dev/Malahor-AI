@@ -10,6 +10,7 @@ export interface DetectionResult {
   isWsl: boolean;
   nodeVersion: string;
   nodeMajor: number;
+  nodeMinor: number;
   opencodeConfigExists: boolean;
   agentsMdExists: boolean;
   agents: Record<MalahorAgentId, boolean>;
@@ -61,6 +62,11 @@ export function hostKindForVersion(version: string): OpenCodeHostKind {
   return "unknown";
 }
 
+export function supportsMemoryRuntime(version: string): boolean {
+  const [major = 0, minor = 0] = version.split(".").map(Number);
+  return major > 22 || (major === 22 && minor >= 18);
+}
+
 function defaultOpenCodeVersion(binary: string, cwd: string, env: NodeJS.ProcessEnv): string {
   return execFileSync(binary, ["--version"], {
     cwd,
@@ -73,6 +79,7 @@ function defaultOpenCodeVersion(binary: string, cwd: string, env: NodeJS.Process
 
 export function detectEnvironment(paths: MalahorPaths): DetectionResult {
   const nodeVersion = process.versions.node;
+  const [nodeMajor = 0, nodeMinor = 0] = nodeVersion.split(".").map(Number);
   const agents = Object.fromEntries(
     MALAHOR_AGENT_IDS.map((agentId) => [agentId, fs.existsSync(malahorAgentPath(paths, agentId))]),
   ) as Record<MalahorAgentId, boolean>;
@@ -82,7 +89,8 @@ export function detectEnvironment(paths: MalahorPaths): DetectionResult {
     arch: os.arch(),
     isWsl: detectWsl(),
     nodeVersion,
-    nodeMajor: Number(nodeVersion.split(".")[0] ?? 0),
+    nodeMajor,
+    nodeMinor,
     opencodeConfigExists: fs.existsSync(paths.opencodeConfig),
     agentsMdExists: fs.existsSync(paths.agentsMd),
     agents,

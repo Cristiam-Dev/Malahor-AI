@@ -24,6 +24,7 @@ export const toolDefinitions = [
         project: { type: "string" },
         type: { type: "string" },
         limit: { type: "number" },
+        subtree: { type: "boolean", description: "Incluye el scope exacto y todos sus descendientes; requiere project." },
       },
     },
   },
@@ -44,6 +45,8 @@ export const toolDefinitions = [
       properties: {
         project: { type: "string", description: "Scope actual; puede ser jerarquico y hereda sus padres automaticamente." },
         limit: { type: "number" },
+        budget: { type: "number", description: "Presupuesto maximo aproximado en caracteres JSON; no trunca recuerdos." },
+        rollup: { type: "boolean", description: "Incluye memorias y sesiones de los scopes descendientes del scope activo." },
       },
       required: ["project"],
     },
@@ -59,6 +62,7 @@ export const toolDefinitions = [
         scope: { type: "string", description: "Scope inferido por el agente del lenguaje natural, por ejemplo empresa/proyecto/modulo/feature; nunca pedir esta clave al usuario." },
         limit: { type: "number", description: "Maximo de memorias heredadas (default 8)." },
         relatedLimit: { type: "number", description: "Maximo de recuerdos relacionados de otros scopes (default 5)." },
+        budget: { type: "number", description: "Presupuesto maximo aproximado en caracteres JSON para recuerdos y sesion." },
       },
       required: ["request"],
     },
@@ -79,6 +83,46 @@ export const toolDefinitions = [
     name: "mem_list_projects",
     description: "Lista proyectos con memoria guardada.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "mem_tree",
+    description: "Lista el arbol de scopes y sus conteos. Puede limitarlo a un prefijo/subarbol canonico.",
+    inputSchema: {
+      type: "object",
+      properties: { prefix: { type: "string", description: "Scope raiz opcional del subarbol." } },
+    },
+  },
+  {
+    name: "mem_pin",
+    description: "Fija una observacion para priorizarla al construir contexto. Requiere memoria v2 activa; un pin no otorga autoridad ni resuelve conflictos.",
+    inputSchema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] },
+  },
+  {
+    name: "mem_unpin",
+    description: "Retira el pin de una observacion de forma idempotente. Requiere memoria v2 activa.",
+    inputSchema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] },
+  },
+  {
+    name: "mem_promote_preview",
+    description: "Previsualiza consolidar una observacion en un scope ancestro estricto. No modifica nada; usar antes de pedir confirmacion.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "number" }, ancestor: { type: "string", description: "Scope ancestro destino." } },
+      required: ["id", "ancestor"],
+    },
+  },
+  {
+    name: "mem_promote",
+    description: "Promueve una observacion a un ancestro estricto solo con confirmacion exacta del preview y backup consistente. Requiere memoria v2 activa.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number" },
+        ancestor: { type: "string" },
+        confirm: { type: "string", description: "Debe coincidir exactamente con requiresConfirmation de mem_promote_preview." },
+      },
+      required: ["id", "ancestor", "confirm"],
+    },
   },
   {
     name: "mem_delete_project_preview",

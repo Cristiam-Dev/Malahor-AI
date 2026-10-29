@@ -8,10 +8,15 @@ interface RpcMessage {
 }
 
 let buffer = Buffer.alloc(0);
+const MAX_MESSAGE_BYTES = 1024 * 1024;
 
 process.stdin.on("data", (chunk: Buffer) => {
   buffer = Buffer.concat([buffer, chunk]);
   readMessages();
+  if (buffer.length > MAX_MESSAGE_BYTES) {
+    buffer = Buffer.alloc(0);
+    respondError(null, -32700, "Mensaje JSON-RPC excede 1 MiB.");
+  }
 });
 
 function readMessages(): void {
@@ -19,11 +24,19 @@ function readMessages(): void {
     const lineEnd = buffer.indexOf("\n");
     if (lineEnd === -1) return;
 
-    const line = buffer.subarray(0, lineEnd).toString("utf8").replace(/\r$/, "");
+    const lineBytes = buffer.subarray(0, lineEnd);
     buffer = buffer.subarray(lineEnd + 1);
-
+    if (lineBytes.length > MAX_MESSAGE_BYTES) {
+      respondError(null, -32700, "Mensaje JSON-RPC excede 1 MiB.");
+      continue;
+    }
+    const line = lineBytes.toString("utf8").replace(/\r$/, "");
     if (!line.trim()) continue;
-    handleMessage(JSON.parse(line) as RpcMessage);
+    try {
+      handleMessage(JSON.parse(line) as RpcMessage);
+    } catch (error) {
+      respondError(null, -32700, error instanceof SyntaxError ? "JSON-RPC invalido." : "Mensaje JSON-RPC no procesable.");
+    }
   }
 }
 

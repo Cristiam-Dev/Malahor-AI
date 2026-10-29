@@ -4,6 +4,8 @@ import { backupFile, type BackupResult } from "../cli/core/backup";
 import { assertHooksAllowed } from "../cli/core/hooks/engine";
 import { mcpHookContext } from "./hook-context";
 import { dbPath, loadDb, saveDb, type MnemoDb } from "./db";
+import { randomUUID } from "node:crypto";
+import { assertJsonMemory, withMemoryStorage } from "./storage";
 
 export interface MemoryRestorePreview {
   backup: string;
@@ -19,11 +21,20 @@ export interface MemoryRestoreResult extends MemoryRestorePreview {
   restored: true;
 }
 
-export function backupMemory(filePath = dbPath()): BackupResult {
-  return backupFile(filePath, backupsDirForDb(filePath), false);
+export function backupMemory(filePath = dbPath(), dryRun = false, backupsDir = backupsDirForDb(filePath)): BackupResult {
+  return withMemoryStorage(filePath, "read", {
+    json: (file) => backupFile(file, backupsDir, dryRun),
+    sqlite: (engine) => {
+      const source = path.join(path.dirname(path.dirname(filePath)), "memory", "db.sqlite");
+      const destination = path.join(backupsDir, `memory-${Date.now()}-${randomUUID()}.sqlite`);
+      if (!dryRun) engine.backup(destination);
+      return { source, destination, created: true };
+    },
+  });
 }
 
 export function previewMemoryRestore(backupPath: string, filePath = dbPath()): MemoryRestorePreview {
+  assertJsonMemory(filePath);
   const sourcePath = resolveBackupPath(backupPath, filePath);
   const db = loadRestoreDbStrict(sourcePath);
   const maxObservationId = db.observations.reduce((max, observation) => Math.max(max, observation.id), 0);
@@ -39,6 +50,7 @@ export function previewMemoryRestore(backupPath: string, filePath = dbPath()): M
 }
 
 export function restoreMemoryBackup(backupPath: string, confirm: string, filePath = dbPath()): MemoryRestoreResult {
+  assertJsonMemory(filePath);
   const preview = previewMemoryRestore(backupPath, filePath);
 
   if (confirm !== preview.requiresConfirmation) {

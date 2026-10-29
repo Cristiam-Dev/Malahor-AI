@@ -16,9 +16,8 @@ import {
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveCanonicalProjectKey, type ProjectAliases } from "../core/project";
 import { detectStack } from "../core/stack";
-import { loadDb, saveDb } from "../../mnemo/db";
+import { saveSessionSummary } from "../../mnemo/db";
 import { contextForProject } from "../../mnemo/context";
-import { sanitizeMemoryContent } from "../../mnemo/sanitizer";
 import { artifactPaths, resolveObsidianMode } from "./obsidian";
 
 export interface ContextOptions {
@@ -157,13 +156,7 @@ function printContextSave(paths: MalahorPaths, aliases: ProjectAliases, options:
   const summary = options.args.join(" ").trim() || `Checkpoint manual. Root: ${root}. Context level: ${level}. Completar con objetivo, decisiones, archivos modificados, validaciones y proximo paso si se invoca desde un agente.`;
 
   if (!options.dryRun) {
-    const db = loadDb(paths.mnemoDb);
-    db.sessions.push({
-      project: target.canonicalKey,
-      summary: sanitizeMemoryContent(summary),
-      created_at: new Date().toISOString(),
-    });
-    saveDb(db, paths.mnemoDb);
+    saveSessionSummary(target.canonicalKey, summary, paths.mnemoDb);
   }
 
   printLine("Context save:");
