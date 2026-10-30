@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import { loadConfig } from "../core/config";
+import { statusCodegraph } from "../core/codegraph-index";
 import {
+  codegraphEnabled,
   contextLevelLabel,
+  legacyContextLevel,
   levelForProject,
   obsidianEnabled,
   registerProjectRoot,
@@ -73,9 +76,19 @@ function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: str
   printLine(`- Registered roots: ${target.registeredRoots?.length ? target.registeredRoots.join(", ") : "none"}`);
   printLine(`- Context level: ${contextLevelLabel(level)}`);
   printLine("- Memory: enabled (always)");
-  printLine(`- Code context: ${level === "mnemo" ? "disabled" : "provider pending"}`);
+  printLine(`- Code context: ${codeContextStatus(paths, target.canonicalKey, target.root, level)}`);
   printLine(`- Obsidian: ${obsidianEnabled(level) ? "enabled" : "disabled"}`);
-  printLine(`- Obsidian bridge: ${bridgeLabel(paths)}`);
+  if (obsidianEnabled(level)) printLine(`- Obsidian bridge: ${bridgeLabel(paths)}`);
+  if (legacyContextLevel(level)) printLine("- Migration: nivel legacy preservado; conversion asistida con backup en T-5.6.5, nunca automatica.");
+}
+
+function codeContextStatus(paths: MalahorPaths, project: string, root: string, level: ReturnType<typeof levelForProject>): string {
+  if (!codegraphEnabled(level)) return "disabled";
+  if (!root) return "degradado: falta raiz registrada; memoria y lecturas dirigidas disponibles";
+  const status = statusCodegraph(paths, project, root);
+  return status.startsWith("{")
+    ? "available (symgraph con indice gestionado, MCP solo lectura)"
+    : `degradado: ${status}`;
 }
 
 function printDetect(paths: MalahorPaths, aliases: ProjectAliases, override: string | undefined): void {
@@ -108,6 +121,8 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   printLine(`- Canonical key: ${target.canonicalKey}`);
   printLine(`- Root: ${root}`);
   printLine(`- Context level: ${contextLevelLabel(level)}`);
+  printLine(`- Code context: ${codegraphEnabled(level) ? "configured by level (use only when index is managed)" : "disabled"}`);
+  printLine(`- Obsidian: ${obsidianEnabled(level) ? "enabled" : "disabled"}`);
   printLine(`- Stack signals: ${detection.signals.length > 0 ? detection.signals.map((item) => item.signal).join(", ") : "none"}`);
   printLine(`- Suggested skills: ${detection.skills.length > 0 ? detection.skills.join(", ") : "none"}`);
   printLine(`- Memory scopes: ${memory.scopeChain.join(" → ")}`);
@@ -126,8 +141,9 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   printLine("");
   printLine("Recovery protocol:");
   printLine("- Use this capsule first; do not dump full files or full memory unless needed.");
-  printLine("- If code structure is needed, use the configured code-context capability when available; otherwise use targeted searches.");
-  printLine("- If product/PM context is needed and Obsidian is enabled, read only the target note(s).");
+  printLine("- Orden: proyecto canonico -> memoria mem_* -> CodeGraph solo habilitado y gestionado -> Obsidian solo habilitado -> lecturas dirigidas.");
+  printLine("- Sin indice CodeGraph gestionado, degrada a lecturas dirigidas; no instales ni indexes automaticamente.");
+  printLine("- Si hay contexto documental habilitado, lee solo las notas necesarias.");
   printLine("- Keep the working summary under ~1500 tokens and proceed with the next concrete action.");
 }
 
@@ -198,8 +214,10 @@ Usage:
 
 Reglas:
   La memoria siempre esta activa.
-  Los niveles persistidos existentes solo se leen hasta su migracion asistida.
-  La reconfiguracion de niveles se incorporara con esa migracion.
+  Proyectos nuevos: memory+codegraph por defecto (instalacion e indexado requieren consentimiento).
+  Niveles: memory, memory+codegraph, memory+codegraph+obsidian.
+  Niveles mnemo* heredados se preservan; NO activan CodeGraph, incluso con indice.
+  Conversion de projects.json con backup y verificacion: T-5.6.5 (no automatica).
 
 Detect:
   context detect lee manifiestos del proyecto (package.json, pom.xml, pyproject.toml,

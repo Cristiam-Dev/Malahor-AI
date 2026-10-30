@@ -222,7 +222,15 @@ function mergeAliases(base, extra) {
 }
 
 // src/cli/core/context.ts
-var CONTEXT_LEVELS = ["mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"];
+var CONTEXT_LEVELS = [
+  "memory",
+  "memory+codegraph",
+  "memory+codegraph+obsidian",
+  "mnemo",
+  "mnemo+graphify",
+  "mnemo+graphify+obsidian"
+];
+var DEFAULT_CONTEXT_LEVEL = "memory+codegraph";
 function parseContextLevel(value) {
   if (typeof value !== "string" || !CONTEXT_LEVELS.includes(value)) {
     throw new Error(`Nivel de contexto invalido: ${String(value)}. Consulta \`malahor-ai context help\`; los valores persistidos siguen en compatibilidad transitoria.`);
@@ -264,6 +272,9 @@ function loadProjectsFile(filePath) {
   }
   return result;
 }
+function levelForProject(projectsFile, canonicalKey) {
+  return loadProjectsFile(projectsFile)[canonicalKey]?.context ?? DEFAULT_CONTEXT_LEVEL;
+}
 function rootsForProject(projectsFile, canonicalKey) {
   const entry = loadProjectsFile(projectsFile)[canonicalKey];
   if (!entry)
@@ -298,6 +309,12 @@ function readRoot(value, key) {
     throw new Error(`La configuracion ${key} debe ser un string.`);
   return normalizeRoot(value);
 }
+function obsidianEnabled(level) {
+  return level === "memory+codegraph+obsidian" || level === "mnemo+graphify+obsidian";
+}
+function codegraphEnabled(level) {
+  return level === "memory+codegraph" || level === "memory+codegraph+obsidian";
+}
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -309,7 +326,7 @@ import path4 from "node:path";
 var CODEGRAPH_PROVIDER = "symgraph";
 var CODEGRAPH_VERSION = "2026.10.18";
 var CODEGRAPH_RELEASE = `v${CODEGRAPH_VERSION}`;
-var CODEGRAPH_PROXY_SHA256 = "1b033cd201f89bf2f9873e9fb2ab9479d0bf49dd507eec2f52b3a117b91b928b";
+var CODEGRAPH_PROXY_SHA256 = "a4ca5c34ff82cfbf9bb8b49db0f667091a4471ba151f00fb16058fd5204f03ce";
 var CODEGRAPH_BINARIES = {
   "linux:x64": "0a20a58846850bfe5ceca9b8ea437b81f9069364543fd6a7c21f7081de67cfb3",
   "linux:arm64": "4d9ab74d52c5ba45654d05ababd569dd552e9a8280a19be17fc988b3b7508a30",
@@ -3258,7 +3275,8 @@ Proyecto y contexto
 - Resuelve el proyecto activo a su clave canónica antes de consultar memoria, código o documentación; reutiliza aliases existentes y no crees duplicados.
 - Si el proyecto está registrado, usa su raíz/defaultRoot autorizada para el contexto de código aunque la sesión esté en otra ubicación; no pidas una ruta si la registry es inequívoca.
 - Si no hay raíz registrada o hay varias candidatas, pide una sola aclaración antes de operar sobre código.
-- Ordena el contexto así: resolver de proyecto, memoria mediante mem_*, contexto técnico configurado, documentación habilitada y lecturas puntuales.
+- Ordena el contexto así: resolver de proyecto (clave y raíz canónica) → memoria mediante mem_* → CodeGraph solo si está habilitado por el nivel y gestionado → Obsidian solo si está habilitado → lecturas dirigidas puntuales.
+- Los niveles legados mnemo* son de lectura/preservación; no activan CodeGraph ni se migran automáticamente. Sin índice gestionado, degrada a memoria y lecturas dirigidas.
 - Respeta el nivel de contexto del proyecto. No actives MCP, documentación o herramientas opcionales solo por comodidad.
 - La configuración global, memoria, grafos, índices y assets de Malahor viven fuera del repositorio del usuario.
 
@@ -3710,21 +3728,26 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
           warnings.push("mcp.mnemo-foreign-definition");
         }
       }
-      const existingObsidian = editor.get("obsidian");
-      if (!existingObsidian) {
-        warnings.push("mcp.obsidian-definition-missing");
-      } else if (existingObsidian.type !== "remote") {
-        warnings.push("mcp.obsidian-legacy-local");
-      } else {
-        editor.set("obsidian", { ...existingObsidian, disabled: false, codemode: false });
-      }
-      const existingCodegraph = editor.get("codegraph");
       let target;
       try {
         const registered = canonical ? registeredProjectRoots(paths.projectsFile).find((entry) => fs8.realpathSync(entry.root) === fs8.realpathSync(canonical)) : undefined;
         if (!canonical || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
+      const level = target ? levelForProject(paths.projectsFile, target.project) : undefined;
+      const existingObsidian = editor.get("obsidian");
+      if (existingObsidian?.type === "remote") {
+        editor.set("obsidian", { ...existingObsidian, disabled: !level || !obsidianEnabled(level), codemode: false });
+      } else if (level && obsidianEnabled(level)) {
+        warnings.push(existingObsidian ? "mcp.obsidian-legacy-local" : "mcp.obsidian-definition-missing");
+      }
+      const existingCodegraph = editor.get("codegraph");
+      if (!level || !codegraphEnabled(level)) {
+        if (existingCodegraph && isManagedCodegraph(existingCodegraph, paths)) {
+          editor.set("codegraph", { ...existingCodegraph, disabled: true });
+        }
+        return;
+      }
       const runtime = target && codegraphRuntime(paths, target.project, target.root);
       if (!runtime) {
         warnings.push("mcp.codegraph-no-managed-index");

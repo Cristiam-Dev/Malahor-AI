@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline/promises";
 
 import { loadConfig } from "../core/config";
+import { codegraphEnabled, levelForProject } from "../core/context";
 import { assertExternalIndex, codegraphRoot, codegraphIndex, CODEGRAPH_PROVIDER, CODEGRAPH_VERSION, verifiedCodegraphBinary, verifiedCodegraphProxy } from "../core/codegraph-runtime";
 import { indexCodegraph, statusCodegraph } from "../core/codegraph-index";
 import { archiveFor, setupCodegraph } from "../core/codegraph-setup";
@@ -21,7 +22,7 @@ export async function runCodegraph(options: CodegraphOptions): Promise<void> {
     process.stdout.write("setup: descarga release fija con SHA-256 bajo MALAHOR_HOME; requiere --confirm INSTALL_SYMGRAPH.\n");
     process.stdout.write("index: inspecciona el arbol y escribe solo bajo MALAHOR_HOME; requiere --confirm INDEX_SYMGRAPH:<proyecto>.\n");
     process.stdout.write("Cargo fallback (manual y con version fijada): cargo install symgraph --version 2026.10.18 --locked; no se adopta automaticamente un binario ajeno.\n");
-    process.stdout.write("El servidor MCP solo se habilita tras un indice gestionado; tras setup/index, abre una sesion nueva.\n");
+    process.stdout.write("El servidor MCP requiere nivel memory+codegraph*, indice gestionado y sesion nueva; niveles legacy no activan CodeGraph.\n");
     return;
   }
   if (!["status", "setup", "index"].includes(options.action)) throw new Error(`Accion desconocida: ${options.action}`);
@@ -29,6 +30,9 @@ export async function runCodegraph(options: CodegraphOptions): Promise<void> {
   const paths = config.paths;
   const key = options.project ? resolveCanonicalProjectKey(options.project, config.projects.aliases) : undefined;
   const target = codegraphRoot(paths, key);
+  if (options.action !== "status" && !codegraphEnabled(levelForProject(paths.projectsFile, target.project))) {
+    throw new Error("El nivel actual no habilita CodeGraph; cambia el nivel mediante la migracion asistida, no se indexa un proyecto legacy.");
+  }
   if (options.action !== "status") assertExternalIndex(paths, target.root);
   const index = codegraphIndex(paths, target.root);
   if (options.action === "status") {
@@ -54,6 +58,10 @@ export async function runCodegraph(options: CodegraphOptions): Promise<void> {
 
 /** Opt-in interactivo del instalador; nunca se activa con --yes/bootstrap. */
 export async function offerCodegraphSetup(paths: ReturnType<typeof loadConfig>["paths"], project: string, root: string): Promise<void> {
+  if (!codegraphEnabled(levelForProject(paths.projectsFile, project))) {
+    process.stdout.write("CodeGraph inactivo para el nivel actual; no se ofrece instalacion para proyectos legacy.\n");
+    return;
+  }
   if (verifiedCodegraphBinary(paths) && verifiedCodegraphProxy(paths)) return;
   process.stdout.write("CodeGraph no instalado: memoria y lectura puntual siguen disponibles.\n");
   if (!process.stdin.isTTY || !process.stdout.isTTY) {

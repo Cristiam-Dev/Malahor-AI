@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { MalahorPaths } from "./paths";
+import { codegraphEnabled, levelForProject } from "./context";
 import { assertCodegraphHook } from "./codegraph-setup";
 import {
   assertCodegraphProject,
@@ -18,6 +19,9 @@ import {
 
 export function indexCodegraph(paths: MalahorPaths, project: string, root: string): string {
   assertCodegraphProject(paths, project, root);
+  if (!codegraphEnabled(levelForProject(paths.projectsFile, project))) {
+    throw new Error("CodeGraph inactivo: el nivel de contexto del proyecto no habilita el indexado.");
+  }
   assertExternalIndex(paths, root);
   const binary = verifiedCodegraphBinary(paths);
   if (!binary) throw new Error("Instala primero symgraph con `malahor-ai codegraph setup`.");

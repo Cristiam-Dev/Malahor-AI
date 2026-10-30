@@ -28,13 +28,19 @@ function contained(child, parent) {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
+function registeredCodeContext(registry) {
+  const entry = registry[project];
+  return ["memory+codegraph", "memory+codegraph+obsidian"].includes(entry?.context)
+    && entry.roots?.some((registered) => fs.realpathSync(registered) === root);
+}
+
 function verify() {
   if ([binary, root, database, project, projectsFile, malahorHome].some((value) => !value)) throw new Error("argumentos incompletos");
   const home = fs.realpathSync(malahorHome);
   if (fs.realpathSync(root) !== root || !fs.statSync(root).isDirectory()) throw new Error("raiz no canonica");
   if (contained(home, root) || contained(root, home)) throw new Error("indice dentro del proyecto");
   const registry = JSON.parse(fs.readFileSync(projectsFile, "utf8"));
-  if (!registry[project]?.roots?.some((entry) => fs.realpathSync(entry) === root)) throw new Error("proyecto no registrado");
+  if (!registeredCodeContext(registry)) throw new Error("nivel de contexto no habilita CodeGraph o proyecto no registrado");
   for (const record of Object.values(registry)) {
     for (const entry of record?.roots ?? []) {
       if (contained(home, fs.realpathSync(entry))) throw new Error("MALAHOR_HOME dentro de un proyecto registrado");
@@ -160,6 +166,13 @@ function startMcp(snapshot) {
       const method = pending.get(key);
       if (!method) return; // Never expose unsolicited upstream requests or notifications.
       pending.delete(key);
+      // Un cambio de nivel durante una consulta tampoco puede filtrar la
+      // respuesta de una peticion que comenzo bajo el nivel anterior.
+      if (!registeredCodeContext(JSON.parse(fs.readFileSync(projectsFile, "utf8")))) {
+        reply(message.id, undefined, { code: -32601, message: "CodeGraph inactivo para el nivel del proyecto" });
+        child.kill();
+        return;
+      }
       if (method === "tools/list" && Array.isArray(message.result?.tools)) {
         message.result.tools = message.result.tools.filter((tool) => SAFE_TOOLS.has(tool.name));
       }
@@ -180,6 +193,19 @@ function startMcp(snapshot) {
     try { request = JSON.parse(line); } catch { reply(null, undefined, { code: -32700, message: "JSON invalido" }); return; }
     const id = request?.id;
     const method = request?.method;
+    // Un MCP que ya esta ejecutandose tampoco puede seguir sirviendo codigo
+    // despues de que el nivel del proyecto cambie a memory/legacy.
+    try {
+      if (!registeredCodeContext(JSON.parse(fs.readFileSync(projectsFile, "utf8")))) {
+        reply(id ?? null, undefined, { code: -32601, message: "CodeGraph inactivo para el nivel del proyecto" });
+        child.kill();
+        return;
+      }
+    } catch {
+      reply(id ?? null, undefined, { code: -32601, message: "Registro de proyecto no disponible" });
+      child.kill();
+      return;
+    }
     if (method === "notifications/initialized" && id === undefined) { child.stdin.write(`${line}\n`); return; }
     if ((typeof id !== "string" && typeof id !== "number") || !Number.isFinite(id) && typeof id === "number") return;
     if (["resources/list", "resources/templates/list", "prompts/list"].includes(method)) {

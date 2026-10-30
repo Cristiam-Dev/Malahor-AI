@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
-import { registeredProjectRoots } from "../cli/core/context";
+import { codegraphEnabled, levelForProject, obsidianEnabled, registeredProjectRoots } from "../cli/core/context";
 import { resolveProject } from "../cli/core/project";
 import { codegraphRoot, codegraphRuntime } from "../cli/core/codegraph-runtime";
 import { loadHookPolicy } from "../cli/core/hooks/policy-loader";
@@ -475,24 +475,30 @@ async function registerMcpTransform(
         }
       }
 
-      const existingObsidian = editor.get("obsidian");
-      if (!existingObsidian) {
-        warnings.push("mcp.obsidian-definition-missing");
-      } else if (existingObsidian.type !== "remote") {
-        warnings.push("mcp.obsidian-legacy-local");
-      } else {
-        // La definición remota aprobada se conserva sin copiar headers ni secretos
-        // a otro store; la resolución dinámica del host pertenece a T-5.11.8.
-        editor.set("obsidian", { ...existingObsidian, disabled: false, codemode: false });
-      }
-
-      const existingCodegraph = editor.get("codegraph");
       let target: ReturnType<typeof codegraphRoot> | undefined;
       try {
         const registered = canonical ? registeredProjectRoots(paths.projectsFile)
           .find((entry) => fs.realpathSync(entry.root) === fs.realpathSync(canonical)) : undefined;
         if (!canonical || registered) target = codegraphRoot(paths, registered?.canonicalKey);
       } catch { /* No registered root at this location. */ }
+      const level = target ? levelForProject(paths.projectsFile, target.project) : undefined;
+
+      const existingObsidian = editor.get("obsidian");
+      if (existingObsidian?.type === "remote") {
+        // No copiar headers ni secretos a otro store; solo habilitar el MCP remoto
+        // cuando el proyecto registrado permite documentacion.
+        editor.set("obsidian", { ...existingObsidian, disabled: !level || !obsidianEnabled(level), codemode: false });
+      } else if (level && obsidianEnabled(level)) {
+        warnings.push(existingObsidian ? "mcp.obsidian-legacy-local" : "mcp.obsidian-definition-missing");
+      }
+
+      const existingCodegraph = editor.get("codegraph");
+      if (!level || !codegraphEnabled(level)) {
+        if (existingCodegraph && isManagedCodegraph(existingCodegraph, paths)) {
+          editor.set("codegraph", { ...existingCodegraph, disabled: true });
+        }
+        return;
+      }
       const runtime = target && codegraphRuntime(paths, target.project, target.root);
       if (!runtime) {
         warnings.push("mcp.codegraph-no-managed-index");

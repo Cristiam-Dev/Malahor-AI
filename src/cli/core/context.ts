@@ -4,12 +4,16 @@ import path from "node:path";
 import type { MalahorPaths } from "./paths";
 import { resolveCanonicalProjectKey, resolveProject, type ProjectAliases, type ProjectInfo } from "./project";
 
-// Formato persistido heredado: solo lectura/preservacion hasta la migracion asistida de T-5.4.3.
-// No usar estos valores para activar o instalar proveedores de contexto de codigo.
-export type ContextLevel = "mnemo" | "mnemo+graphify" | "mnemo+graphify+obsidian";
+// Los valores antiguos siguen siendo legibles, pero NO habilitan CodeGraph.
+// La conversion asistida de projects.json con backup pertenece a T-5.6.5.
+export type ContextLevel = "memory" | "memory+codegraph" | "memory+codegraph+obsidian"
+  | "mnemo" | "mnemo+graphify" | "mnemo+graphify+obsidian";
 
-export const CONTEXT_LEVELS: readonly ContextLevel[] = ["mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"];
-export const DEFAULT_CONTEXT_LEVEL: ContextLevel = "mnemo";
+export const CONTEXT_LEVELS: readonly ContextLevel[] = [
+  "memory", "memory+codegraph", "memory+codegraph+obsidian",
+  "mnemo", "mnemo+graphify", "mnemo+graphify+obsidian",
+];
+export const DEFAULT_CONTEXT_LEVEL: ContextLevel = "memory+codegraph";
 
 export interface ProjectContext {
   context: ContextLevel;
@@ -234,13 +238,20 @@ function readRoot(value: unknown, key: string): string | undefined {
 }
 
 export function obsidianEnabled(level: ContextLevel): boolean {
-  return level === "mnemo+graphify+obsidian";
+  return level === "memory+codegraph+obsidian" || level === "mnemo+graphify+obsidian";
+}
+
+export function codegraphEnabled(level: ContextLevel): boolean {
+  return level === "memory+codegraph" || level === "memory+codegraph+obsidian";
+}
+
+export function legacyContextLevel(level: ContextLevel): boolean {
+  return level.startsWith("mnemo");
 }
 
 export function contextLevelLabel(level: ContextLevel): string {
-  if (level === "mnemo") return "memory";
-  if (obsidianEnabled(level)) return "memory+code-context+obsidian (provider pending)";
-  return "memory+code-context (provider pending)";
+  if (!legacyContextLevel(level)) return level;
+  return `${level} (legacy; CodeGraph inactivo hasta migracion asistida)`;
 }
 
 function secureChmod(target: string, mode: number): void {

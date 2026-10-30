@@ -13,7 +13,8 @@ Proyecto y contexto
 - Resuelve el proyecto activo a su clave canónica antes de consultar memoria, código o documentación; reutiliza aliases existentes y no crees duplicados.
 - Si el proyecto está registrado, usa su raíz/defaultRoot autorizada para el contexto de código aunque la sesión esté en otra ubicación; no pidas una ruta si la registry es inequívoca.
 - Si no hay raíz registrada o hay varias candidatas, pide una sola aclaración antes de operar sobre código.
-- Ordena el contexto así: resolver de proyecto, memoria mediante mem_*, contexto técnico configurado, documentación habilitada y lecturas puntuales.
+- Ordena el contexto así: resolver de proyecto (clave y raíz canónica) → memoria mediante mem_* → CodeGraph solo si está habilitado por el nivel y gestionado → Obsidian solo si está habilitado → lecturas dirigidas puntuales.
+- Los niveles legados mnemo* son de lectura/preservación; no activan CodeGraph ni se migran automáticamente. Sin índice gestionado, degrada a memoria y lecturas dirigidas.
 - Respeta el nivel de contexto del proyecto. No actives MCP, documentación o herramientas opcionales solo por comodidad.
 - La configuración global, memoria, grafos, índices y assets de Malahor viven fuera del repositorio del usuario.
 

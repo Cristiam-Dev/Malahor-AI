@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { codegraphEnabled, levelForProject } from "./context";
 
 import { assertHooksAllowed } from "./hooks/engine";
 import { loadHookPolicy } from "./hooks/policy-loader";
@@ -31,6 +32,9 @@ export function archiveFor(platform = process.platform, arch = process.arch): { 
 
 export async function setupCodegraph(paths: MalahorPaths, project: string, root: string): Promise<string> {
   assertCodegraphProject(paths, project, root);
+  if (!codegraphEnabled(levelForProject(paths.projectsFile, project))) {
+    throw new Error("CodeGraph inactivo: el nivel de contexto del proyecto no habilita la instalacion.");
+  }
   assertExternalIndex(paths, root);
   const existing = verifiedCodegraphBinary(paths);
   const managedProxy = verifiedCodegraphProxy(paths);

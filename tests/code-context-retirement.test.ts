@@ -40,7 +40,8 @@ describe("retiro del proveedor de contexto de código", () => {
 
     const context = runCli("context", "status");
     expect(context.status).toBe(0);
-    expect(context.stdout).toContain("Code context: disabled");
+    expect(context.stdout).toContain("Context level: memory+codegraph");
+    expect(context.stdout).toContain("Code context: degradado");
     expect(context.stdout).not.toMatch(new RegExp(RETIRED_PROVIDER, "i"));
 
     const retired = runCli(RETIRED_PROVIDER);

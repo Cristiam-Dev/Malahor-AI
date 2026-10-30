@@ -11,7 +11,7 @@ export const CODEGRAPH_PROVIDER = "symgraph";
 export const CODEGRAPH_VERSION = "2026.10.18";
 export const CODEGRAPH_RELEASE = `v${CODEGRAPH_VERSION}`;
 // Hash of the reviewed asset. A foreign/modified bridge is never registered.
-export const CODEGRAPH_PROXY_SHA256 = "1b033cd201f89bf2f9873e9fb2ab9479d0bf49dd507eec2f52b3a117b91b928b";
+export const CODEGRAPH_PROXY_SHA256 = "a4ca5c34ff82cfbf9bb8b49db0f667091a4471ba151f00fb16058fd5204f03ce";
 
 export const CODEGRAPH_ARCHIVES: Record<string, { name: string; sha256: string }> = {
   "linux:x64": { name: "symgraph-v2026.10.18-x86_64-unknown-linux-gnu.tar.gz", sha256: "5e52d232f2bef2fac7ee2cc6b446b8ac5af68442c7b47f4f36209466eeb11077" },

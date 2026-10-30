@@ -5,7 +5,7 @@ import { codegraphRoot, codegraphRuntime, verifiedCodegraphBinary } from "../cor
 import { statusCodegraph } from "../core/codegraph-index";
 import { backupFile } from "../core/backup";
 import { formatExecutionPolicy, loadConfig, type MalahorConfig, type MalahorExecutionPolicy } from "../core/config";
-import { contextLevelLabel, levelForProject } from "../core/context";
+import { codegraphEnabled, contextLevelLabel, levelForProject, resolveRegisteredProject, type ContextLevel } from "../core/context";
 import { detectEnvironment, detectOpenCodeHost, supportsMemoryRuntime, type DetectionResult, type OpenCodeHostInfo, type OpenCodeHostKind } from "../core/detector";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
@@ -27,7 +27,6 @@ import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { pluginHealthChecks, type PluginHealthCheck } from "../core/plugin-health";
-import { resolveProject } from "../core/project";
 
 export interface DoctorOptions {
   dryRun: boolean;
@@ -61,7 +60,8 @@ function renderReport(
   repairs: string[],
   options: DoctorOptions,
 ): void {
-  const project = resolveProject(packagePaths?.root ?? paths.cwd, config.projects.aliases);
+  const project = resolveRegisteredProject(paths, config.projects.aliases);
+  const level = levelForProject(paths.projectsFile, project.canonicalKey);
   const checks: CheckResult[] = [];
 
   checks.push({ name: "Node", ok: supportsMemoryRuntime(detection.nodeVersion), message: `${detection.nodeVersion} (required >=22.18.0)`, critical: true });
@@ -84,7 +84,7 @@ function renderReport(
     checks.push(fromPluginHealth(check));
   }
   checks.push(checkHookPolicy(paths, project.canonicalKey));
-  checks.push(checkCodegraph(paths, host));
+  checks.push(checkCodegraph(paths, host, project.canonicalKey, level));
   checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution, host, paths));
   process.stdout.write(`\nmalahor-ai doctor${options.selfHeal ? " --self-heal" : ""}\n=================\n`);
   process.stdout.write(`Mode: ${config.mode}\n`);
@@ -95,7 +95,7 @@ function renderReport(
   process.stdout.write(`Project: ${project.name}\n`);
   process.stdout.write(`Project root: ${project.root}\n`);
   process.stdout.write(`Canonical key: ${project.canonicalKey}\n`);
-  process.stdout.write(`Project context: ${contextLevelLabel(levelForProject(paths.projectsFile, project.canonicalKey))}\n`);
+  process.stdout.write(`Project context: ${contextLevelLabel(level)}\n`);
   process.stdout.write(`Project aliases: ${project.aliases.length > 0 ? project.aliases.join(", ") : "none"}\n`);
   process.stdout.write(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}\n\n`);
 
@@ -134,12 +134,13 @@ function renderReport(
   process.stdout.write("\nStatus: ready\n");
 }
 
-function checkCodegraph(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult {
+function checkCodegraph(paths: MalahorPaths, host: OpenCodeHostInfo, project: string, level: ContextLevel): CheckResult {
+  if (!codegraphEnabled(level)) return { name: "CodeGraph", ok: true, message: `inactivo para nivel ${level}; no requiere indice`, critical: false };
   const guide = "`malahor-ai codegraph guide` (degradado: memoria y lectura puntual; nunca bloquea la sesion)";
   if (host.kind !== "v2") return { name: "CodeGraph", ok: false, message: `MCP gestionado solo disponible en V2; ${guide}`, critical: false };
   try {
     // The package installation root is not necessarily the active code project.
-    const target = codegraphRoot(paths);
+    const target = codegraphRoot(paths, project);
     if (!verifiedCodegraphBinary(paths)) return { name: "CodeGraph", ok: false, message: `Binario verificado ausente; ${guide}`, critical: false };
     if (!codegraphRuntime(paths, target.project, target.root)) return { name: "CodeGraph", ok: false, message: `Indice externo o puente MCP no gestionado para ${target.root}; ${guide}`, critical: false };
     const status = statusCodegraph(paths, target.project, target.root);

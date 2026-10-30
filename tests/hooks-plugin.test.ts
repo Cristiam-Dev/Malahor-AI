@@ -675,13 +675,16 @@ describe("adaptador de plugin V2", () => {
     }
   });
 
-  test("ctx.mcp.transform no pisa Mnemo ajeno y registra Obsidian remoto globalmente", async () => {
+  test("ctx.mcp.transform no pisa Mnemo ajeno y habilita Obsidian remoto solo para nivel documental", async () => {
     const originalHome = process.env.MALAHOR_HOME;
     const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
     process.env.MALAHOR_HOME = home;
     process.env.MALAHOR_OPENCODE_DIR = opencode;
     fs.mkdirSync(path.join(home, "mnemo"), { recursive: true });
     fs.writeFileSync(path.join(home, "mnemo", "index.js"), "// mnemo\n", "utf8");
+    fs.writeFileSync(path.join(home, "projects.json"), JSON.stringify({
+      demo: { context: "memory+codegraph+obsidian", roots: [repo], defaultRoot: repo },
+    }));
 
     const sets: string[] = [];
     const state: Record<string, Record<string, unknown>> = {

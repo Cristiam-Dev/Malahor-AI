@@ -23,6 +23,7 @@ import {
 import { archiveFor, setupCodegraph } from "../src/cli/core/codegraph-setup";
 import { resolvePaths, type MalahorPaths } from "../src/cli/core/paths";
 import { runCodegraph } from "../src/cli/commands/codegraph";
+import { runContext } from "../src/cli/commands/context";
 import { runDoctor } from "../src/cli/commands/doctor";
 import { isMcpToolName } from "../src/cli/core/hooks/types";
 import plugin from "../src/plugin/index";
@@ -38,9 +39,9 @@ let home: string;
 let outside: string;
 let paths: MalahorPaths;
 
-function writeRegistry(roots = [repo], defaultRoot = repo): void {
+function writeRegistry(roots = [repo], defaultRoot = repo, context = "memory+codegraph"): void {
   fs.writeFileSync(paths.projectsFile, JSON.stringify({
-    [PROJECT]: { context: "mnemo", roots, defaultRoot },
+    [PROJECT]: { context, roots, defaultRoot },
   }), "utf8");
 }
 
@@ -262,6 +263,95 @@ describe("CodeGraph: puente MCP read-only", () => {
   });
 });
 
+test("MCP CodeGraph solo se registra con nivel nuevo e indice gestionado; legacy nunca activa codigo", async () => {
+  // Nunca sustituir el hash de confianza en memoria: usar solo un binario
+  // fijado real de la sandbox para probar el camino positivo, si esta presente.
+  const available = process.platform === "linux" && process.arch === "x64" && fs.existsSync(SANDBOX_BINARY);
+  if (available) copySandboxBinary();
+  writeReadyIndex();
+  fs.mkdirSync(paths.mnemoDir, { recursive: true });
+  fs.writeFileSync(paths.mnemoIndex, "// synthetic Mnemo fixture\n");
+  expect(Boolean(codegraphRuntime(paths, PROJECT, repo))).toBe(available);
+  await withFixtureEnvironment(async () => {
+      for (const level of ["memory", "memory+codegraph", "memory+codegraph+obsidian",
+        "mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"]) {
+        writeRegistry([repo], repo, level);
+        const before = fs.readFileSync(paths.projectsFile, "utf8");
+        const state: Record<string, Record<string, unknown>> = {
+          codegraph: { type: "local", command: ["node", codegraphProxy(paths)], disabled: false },
+          obsidian: { type: "remote", url: "http://127.0.0.1/fixture", disabled: true },
+        };
+        const editor = {
+          get: (name: string) => state[name],
+          set: (name: string, config: Record<string, unknown>) => { state[name] = config; },
+        };
+        const cleanup = await plugin.setup({
+          location: { directory: outside, project: { canonical: repo } },
+          mcp: { transform: (callback: (input: typeof editor) => void) => callback(editor) },
+        });
+        await cleanup?.();
+
+        const codeEnabled = level === "memory+codegraph" || level === "memory+codegraph+obsidian";
+        expect(state.codegraph.disabled).toBe(!codeEnabled || !available);
+        if (codeEnabled && available) {
+          expect(state.codegraph.command).toEqual([
+            "node", codegraphProxy(paths), codegraphBinary(paths), repo, codegraphIndex(paths, repo).database,
+            PROJECT, paths.projectsFile, home,
+          ]);
+        }
+        expect(state.obsidian.disabled).toBe(!level.endsWith("+obsidian"));
+        expect(fs.readFileSync(paths.projectsFile, "utf8")).toBe(before);
+      }
+
+      writeRegistry([repo], repo, "memory+codegraph");
+      const originalWrite = process.stdout.write;
+      let output = "";
+      try {
+        process.stdout.write = ((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write;
+        runContext({ action: "status", args: [], dryRun: false, limit: undefined, project: PROJECT });
+      } finally {
+        process.stdout.write = originalWrite;
+      }
+      // Una base sintética no es SQLite valida aunque el binario sea gestionado.
+      expect(output).toMatch(/- Code context: .*degrad|\bCodeGraph: .*degrad/i);
+      expect(output).not.toMatch(/- Code context: .*\b(?:enabled|available|ready|active)\b/i);
+  });
+});
+
+test("un proxy directo rechaza nivel legacy antes de abrir snapshots", () => {
+  writeRegistry([repo], repo, "mnemo+graphify+obsidian");
+  const binary = codegraphBinary(paths);
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(binary, "binario fixture sin confianza");
+  writeReadyIndex();
+  const index = codegraphIndex(paths, repo);
+  const before = fs.readFileSync(index.database);
+  const result = spawnSync("node", [ASSET_PROXY, binary, repo, index.database, PROJECT, paths.projectsFile, home], {
+    input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) + "\n",
+    encoding: "utf8", timeout: 10_000,
+  });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toMatch(/nivel de contexto no habilita CodeGraph/);
+  expect(result.stdout).toBe("");
+  expect(fs.readFileSync(index.database)).toEqual(before);
+  expect(hasEntry(path.join(home, "codegraph", "snapshots"))).toBe(false);
+});
+
+test("setup e index nunca preparan un proyecto legacy, aun con confirmacion exacta", async () => {
+  writeRegistry([repo], repo, "mnemo+graphify+obsidian");
+  const before = fs.readFileSync(paths.projectsFile, "utf8");
+  await withFixtureEnvironment(async () => {
+    await expect(runCodegraph({ action: "setup", project: PROJECT, dryRun: false, confirm: "INSTALL_SYMGRAPH" }))
+      .rejects.toThrow(/nivel actual no habilita CodeGraph/);
+    await expect(runCodegraph({ action: "index", project: PROJECT, dryRun: false, confirm: `INDEX_SYMGRAPH:${PROJECT}` }))
+      .rejects.toThrow(/nivel actual no habilita CodeGraph/);
+    await expect(setupCodegraph(paths, PROJECT, repo)).rejects.toThrow(/inactivo/);
+    expect(() => indexCodegraph(paths, PROJECT, repo)).toThrow(/inactivo/);
+  });
+  expect(fs.readFileSync(paths.projectsFile, "utf8")).toBe(before);
+  expect(hasEntry(path.join(home, "codegraph"))).toBe(false);
+});
+
 if (process.platform === "linux" && process.arch === "x64" && fs.existsSync(SANDBOX_BINARY)) {
   describe("CodeGraph: integracion opcional con binario sandbox", () => {
     test("no activa markers ajenos y solo registra MCP V2 para un indice gestionado, sin pisar conflictos", async () => {
@@ -321,7 +411,7 @@ if (process.platform === "linux" && process.arch === "x64" && fs.existsSync(SAND
       });
     });
 
-    test("indexa solo una fixture y permite buscar su simbolo por el MCP real", () => {
+    test("indexa solo una fixture y permite buscar su simbolo por el MCP real", async () => {
       copySandboxBinary();
       fs.mkdirSync(path.join(repo, "src"));
       fs.writeFileSync(path.join(repo, "src", "fixture.ts"), "export function fixtureSearchSymbol() { return 42; }\n");
@@ -329,6 +419,17 @@ if (process.platform === "linux" && process.arch === "x64" && fs.existsSync(SAND
       expect(indexCodegraph(paths, PROJECT, repo)).toContain(index.database);
       expect(codegraphRuntime(paths, PROJECT, repo)?.database).toBe(index.database);
       expect(hasEntry(path.join(repo, ".symgraph"))).toBe(false);
+      await withFixtureEnvironment(async () => {
+        const originalWrite = process.stdout.write;
+        let output = "";
+        try {
+          process.stdout.write = ((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write;
+          runContext({ action: "status", args: [], dryRun: false, limit: undefined, project: PROJECT });
+        } finally {
+          process.stdout.write = originalWrite;
+        }
+        expect(output).toContain("- Code context: available");
+      });
       const responses = proxyRequests([
         { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } },
         { jsonrpc: "2.0", id: 2, method: "tools/list" },
@@ -445,7 +546,7 @@ test("doctor sin self-heal avisa CodeGraph ausente sin bloquear un host V2 aisla
   fs.writeFileSync(fakeHost, "#!/bin/sh\nprintf '2.1.2\\n'\n", { mode: 0o700 });
   writeJson(path.join(repo, "package.json"), { name: "malahor-ai" });
   fs.mkdirSync(path.join(repo, "assets"));
-  writeJson(paths.projectsFile, { malahor: { context: "mnemo", roots: [repo], defaultRoot: repo } });
+  writeJson(paths.projectsFile, { malahor: { context: "memory+codegraph", roots: [repo], defaultRoot: repo } });
   fs.mkdirSync(paths.mnemoDir);
   fs.writeFileSync(paths.mnemoIndex, "// synthetic Mnemo stub\n");
   fs.mkdirSync(paths.assetsDir);
@@ -468,12 +569,26 @@ test("doctor sin self-heal avisa CodeGraph ausente sin bloquear un host V2 aisla
       process.stdout.write = ((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write;
       runDoctor({ dryRun: false, selfHeal: false });
     }, { MALAHOR_OPENCODE_BIN: fakeHost });
+    expect(output).toMatch(/Project context: .*memory\+codegraph/);
     expect(output).toMatch(/^WARN CodeGraph: /m);
     expect(output).not.toMatch(/^FAIL /m);
     expect(output).toMatch(/Status: ready with \d+ warning\(s\)/);
     expect(process.exitCode).not.toBe(1);
     expect(fs.readdirSync(home).sort()).toEqual(before);
     expect(hasEntry(path.join(home, "codegraph"))).toBe(false);
+
+    for (const disabledLevel of ["memory", "mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"]) {
+      writeJson(paths.projectsFile, { malahor: { context: disabledLevel, roots: [repo], defaultRoot: repo } });
+      const registry = fs.readFileSync(paths.projectsFile, "utf8");
+      output = "";
+      await withFixtureEnvironment(async () => {
+        runDoctor({ dryRun: false, selfHeal: false });
+      }, { MALAHOR_OPENCODE_BIN: fakeHost });
+      expect(output).not.toMatch(/^WARN CodeGraph: /m);
+      expect(output).toMatch(/Project context: /);
+      expect(fs.readFileSync(paths.projectsFile, "utf8")).toBe(registry);
+      expect(hasEntry(path.join(home, "codegraph"))).toBe(false);
+    }
   } finally {
     process.stdout.write = originalWrite;
     process.exitCode = originalExitCode;
