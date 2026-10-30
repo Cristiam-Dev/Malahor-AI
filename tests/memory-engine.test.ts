@@ -265,17 +265,61 @@ describe("memory v2: concurrencia, backups y privacidad", () => {
     const backup = path.join(root, "backups", "copy.sqlite");
     const readonly = track(MemoryEngine.open(file));
     expect(readonly.backup(backup)).toBe(backup);
-    const copy = track(MemoryStore.open(backup, "write"));
-    copy.integrity();
+    const copy = track(MemoryStore.open(backup));
+    copy.verifyReadOnly();
     for (const table of ["scopes", "observations", "sessions", "memory_state", "pins", "relations"]) {
       expect(copy.all(`SELECT * FROM ${table} ORDER BY 1`)).toEqual(peer.all(`SELECT * FROM ${table} ORDER BY 1`));
     }
+    copy.close();
     const before = fs.readFileSync(backup);
     expect(() => engine.backup(backup)).toThrow();
     expect(fs.readFileSync(backup)).toEqual(before);
     for (const target of [file, `${file}-wal`, `${file}-shm`, backup]) expect(fs.statSync(target).mode & 0o777).toBe(0o600);
     expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
     expect(fs.statSync(path.dirname(backup)).mode & 0o777).toBe(0o700);
+    expect(fs.existsSync(`${backup}-wal`)).toBe(false);
+    expect(fs.existsSync(`${backup}-shm`)).toBe(false);
+  });
+
+  test("restore reproduce todas las tablas y el indice dentro de una transaccion", () => {
+    const engine = seed(); engine.pin(5); engine.sessionSummary("acme", "Antes del backup");
+    const raw = track(MemoryStore.open(file, "write"));
+    raw.run("INSERT INTO relations VALUES (5, 4, 'conflicts', 'synthetic')");
+    const backup = path.join(root, "backups", "restore.sqlite");
+    engine.backup(backup);
+
+    engine.unpin(5);
+    engine.promote(5, "acme/store");
+    engine.save(input("acme/after-backup", "Descartar"));
+    engine.sessionSummary("acme", "Despues del backup");
+    expect(engine.snapshot().observations).toHaveLength(6);
+
+    engine.restore(backup);
+    const restored = track(MemoryStore.open(file));
+    const source = track(MemoryStore.open(backup));
+    for (const table of ["scopes", "observations", "sessions", "memory_state", "pins", "relations"]) {
+      expect(restored.all(`SELECT * FROM ${table} ORDER BY 1`)).toEqual(source.all(`SELECT * FROM ${table} ORDER BY 1`));
+    }
+    expect(engine.search({ query: "Descartar", match: "fts" })).toEqual([]);
+    expect(engine.search({ query: "cupones", match: "fts" }).map((item) => item.id)).toEqual([5]);
+    engine.integrity();
+  });
+
+  test("un fallo durante restore revierte datos, contadores y FTS", () => {
+    const engine = seed();
+    const backup = path.join(root, "backups", "rollback-restore.sqlite");
+    engine.backup(backup);
+    const preserved = engine.save(input("acme/preserved", "Preservar"));
+    const before = engine.snapshot();
+    const raw = track(MemoryStore.open(file, "write"));
+    raw.run(`CREATE TRIGGER reject_restore AFTER INSERT ON observations WHEN NEW.id = 1
+      BEGIN SELECT RAISE(ABORT, 'synthetic restore failure'); END`);
+
+    expect(() => engine.restore(backup)).toThrow(MemoryError);
+    expect(engine.snapshot()).toEqual(before);
+    expect(engine.get(preserved.id)).toEqual(preserved);
+    expect(engine.search({ query: "Preservar", match: "fts" }).map((item) => item.id)).toEqual([preserved.id]);
+    engine.integrity();
   });
 
   test("rechaza permisos amplios y enlaces sin reparar archivos desconocidos", () => {

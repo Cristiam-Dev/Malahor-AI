@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import fs from "node:fs";
+import path from "node:path";
 import { deleteProjectMemory, inspectProjectMemory, moveMemory, previewMemoryMove, previewProjectDeletion } from "../src/mnemo/admin";
 import { backupMemory, previewMemoryRestore, restoreMemoryBackup } from "../src/mnemo/admin-backup";
-import { dbPath, saveDb } from "../src/mnemo/db";
+import { previewMemoryReset, resetMemory } from "../src/mnemo/admin-reset";
+import { dbPath, loadDb, saveDb } from "../src/mnemo/db";
 import { contextForProject } from "../src/mnemo/context";
 import { callTool, toolDefinitions } from "../src/mnemo/tools";
 import { cleanupTestEnv, fixtureDb, setupTestEnv, type TestEnvSnapshot } from "./mnemo-fixture";
@@ -60,6 +62,46 @@ describe("Mnemo memory administration", () => {
     expect(result.restored).toBe(true);
     expect(result.currentBackup.created).toBe(true);
     expect(context.observations.some((item) => item.project === "acme/store/checkout/coupons")).toBe(true);
+  });
+
+  it("resetea scope exacto o toda la memoria JSON con preview, hook y backup", () => {
+    saveDb(fixtureDb());
+    const restoreSource = backupMemory(dbPath()).destination!;
+    const preview = previewMemoryReset("acme/store", dbPath());
+    expect(preview).toMatchObject({ backend: "json", observations: 1, sessions: 1,
+      requiresConfirmation: "acme/store", canReset: true });
+    expect(preview.childScopes).toEqual([
+      "acme/store/checkout/coupons",
+      "acme/store/checkout/payments",
+    ]);
+    expect(() => resetMemory("acme/store", "wrong", dbPath())).toThrow("Confirmacion invalida");
+
+    const exact = resetMemory("acme/store", "acme/store", dbPath());
+    expect(exact.backup.destination).toEndWith(".bak");
+    expect(loadDb().observations.map((item) => item.id)).toEqual([1, 2, 4, 5]);
+    expect(loadDb().sessions).toEqual([]);
+
+    restoreMemoryBackup(restoreSource, "RESTORE", dbPath());
+    const total = resetMemory(null, "ALL", dbPath());
+    expect(total).toMatchObject({ removedObservations: 5, removedSessions: 1, reset: true });
+    expect(loadDb()).toEqual({ observations: [], sessions: [], nextId: 1 });
+    const backupsBeforeNoOp = fs.readdirSync(path.dirname(restoreSource)).length;
+    expect(resetMemory(null, "ALL", dbPath())).toMatchObject({ reset: false, removedObservations: 0, removedSessions: 0 });
+    expect(fs.readdirSync(path.dirname(restoreSource))).toHaveLength(backupsBeforeNoOp);
+  });
+
+  it("rechaza restore desde enlaces o fuera de la carpeta de backups", () => {
+    saveDb(fixtureDb());
+    const backup = backupMemory(dbPath()).destination!;
+    const outside = path.join(testEnv.root, "outside.json");
+    fs.copyFileSync(backup, outside);
+    fs.chmodSync(outside, 0o600);
+    const link = path.join(path.dirname(backup), "linked.json");
+    fs.symlinkSync(outside, link);
+
+    expect(() => previewMemoryRestore(link, dbPath())).toThrow("sin enlaces");
+    expect(() => previewMemoryRestore(outside, dbPath())).toThrow("solo acepta backups");
+    expect(loadDb()).toEqual(fixtureDb());
   });
 
   it("inspects and moves an observation between scopes with preview confirmation", () => {

@@ -57,9 +57,19 @@ if (action === "exercise") {
     if (action === "append") {
       assert.equal(engine.save({ ...item, title: "interopunico" }).id, 3);
       engine.integrity();
+      runMemory({ action: "tree", args: ["acme"], all: false, yes: false, dryRun: false, confirm: undefined });
+      runMemory({ action: "search", args: ["interopunico"], all: false, yes: false, dryRun: false,
+        confirm: undefined, project: "acme", subtree: true });
+      const backup = backupMemory();
+      runMemory({ action: "reset", args: ["acme/hu-1"], all: false, yes: false, dryRun: true, confirm: undefined });
+      runMemory({ action: "reset", args: ["acme/hu-1"], all: false, yes: true, dryRun: false, confirm: "acme/hu-1" });
+      assert.equal(getObservation(3), null);
+      runMemory({ action: "restore", args: [backup.destination!], all: false, yes: false, dryRun: true, confirm: undefined });
+      runMemory({ action: "restore", args: [backup.destination!], all: false, yes: true, dryRun: false, confirm: "RESTORE" });
+      assert.equal(getObservation(3)?.title, "interopunico");
     }
     assert.equal(engine.get(3)?.title, "interopunico");
     assert.equal(engine.snapshot().nextId, 4);
   } finally { engine.close(); }
 }
-console.log(JSON.stringify({ task: "T-5.3.2", action, passed: true, root, runtime: { node: process.version, bun: process.versions.bun ?? null }, legacyHash: hash() }));
+console.log(JSON.stringify({ task: "T-5.3.5", action, passed: true, root, runtime: { node: process.version, bun: process.versions.bun ?? null }, legacyHash: hash() }));

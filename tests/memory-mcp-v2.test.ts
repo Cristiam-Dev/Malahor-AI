@@ -165,10 +165,27 @@ describe("MCP memoria v2: contrato compatible y herramientas nuevas", () => {
     expect(fs.readFileSync(dbPath())).toEqual(legacy);
   });
 
-  test("restore SQLite permanece bloqueado hasta T-5.3.5, sin fallback JSON", () => {
+  test("mem_restore previsualiza, confirma y restaura SQLite sin fallback JSON", () => {
     activate();
-    expect(() => callTool({ name: "mem_restore_preview", arguments: { backup: "any.sqlite" } })).toThrow("pendiente de adaptacion SQLite");
-    expect(() => callTool({ name: "mem_restore", arguments: { backup: "any.sqlite", confirm: "RESTORE" } })).toThrow("pendiente de adaptacion SQLite");
+    callTool({ name: "mem_pin", arguments: { id: 5 } });
+    const backup = callTool({ name: "mem_backup" }) as { destination: string };
+    const saved = callTool({ name: "mem_save", arguments: {
+      project: "acme", title: "Posterior al backup", content: "Debe desaparecer",
+    } }) as { id: number };
+    const backupName = path.basename(backup.destination);
+    const preview = callTool({ name: "mem_restore_preview", arguments: { backup: backupName } }) as {
+      backend: string; observations: number; sessions: number; pins: number; requiresConfirmation: string;
+    };
+    expect(preview).toMatchObject({ backend: "sqlite", observations: 5, sessions: 1, pins: 1, requiresConfirmation: "RESTORE" });
+    expect(() => callTool({ name: "mem_restore", arguments: { backup: backupName, confirm: "NO" } })).toThrow("Confirmacion invalida");
+    const restored = callTool({ name: "mem_restore", arguments: { backup: backupName, confirm: "RESTORE" } }) as {
+      restored: boolean; currentBackup: { destination: string };
+    };
+    expect(restored.restored).toBe(true);
+    expect(fs.existsSync(restored.currentBackup.destination)).toBe(true);
+    expect(callTool({ name: "mem_get", arguments: { id: saved.id } })).toBeNull();
+    const engine = MemoryEngine.open(file);
+    try { expect(engine.legacyImportState().pins).toBe(1); } finally { engine.close(); }
     expect(fs.readFileSync(dbPath())).toEqual(legacy);
   });
 });

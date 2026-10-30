@@ -33,7 +33,7 @@ function run(executable: string, action: string, root: string): Report {
 
 describe("engine y fachada en runtime real desde bundle autocontenido", () => {
   for (const [origin, peer] of [["node", "bun"], ["bun", "node"]]) {
-    test(`${origin} -> ${peer} -> ${origin}: MCP/CLI/contexto, FTS, backup e IDs`, () => {
+    test(`${origin} -> ${peer} -> ${origin}: MCP/CLI/contexto, backup, reset/restore e IDs`, () => {
       const { root } = memorySandbox();
       const first = run(origin, "exercise", root);
       const append = run(peer, "append", root);

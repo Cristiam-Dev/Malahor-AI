@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { MemoryError } from "../engine/errors";
@@ -104,7 +105,31 @@ export function quarantineArtifact(file: string, transactionId: string): string 
 }
 
 export function hashPrivateFile(file: string): string {
-  return digest(readPrivateFile(file));
+  privateDirectory(path.dirname(file));
+  privateFile(file);
+  const before = fs.lstatSync(file);
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fs.fstatSync(descriptor);
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size
+      || opened.mtimeMs !== before.mtimeMs || opened.ctimeMs !== before.ctimeMs) {
+      throw new MemoryError("MEMORY_BUSY", `El archivo cambio antes de calcular su hash: ${file}`);
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let bytesRead: number;
+    while ((bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    const after = fs.fstatSync(descriptor);
+    if (opened.dev !== after.dev || opened.ino !== after.ino || opened.size !== after.size
+      || opened.mtimeMs !== after.mtimeMs || opened.ctimeMs !== after.ctimeMs) {
+      throw new MemoryError("MEMORY_BUSY", `El archivo cambio durante el calculo de hash: ${file}`);
+    }
+    return hash.digest("hex");
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 export function readPrivateFile(file: string, maximumBytes = Number.MAX_SAFE_INTEGER): Buffer {

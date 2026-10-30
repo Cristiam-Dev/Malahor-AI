@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { dbPath, getObservation, listProjects, loadDb, saveDb, saveObservation, saveSessionSummary, searchObservations } from "../src/mnemo/db";
 import { MemoryEngine } from "../src/mnemo/engine";
+import { MemoryStore } from "../src/mnemo/engine/store";
 import { memoryLocation } from "../src/mnemo/storage";
 import { contextForProject, memoryBrief } from "../src/mnemo/context";
 import { backupMemory, previewMemoryRestore, restoreMemoryBackup } from "../src/mnemo/admin-backup";
+import { previewMemoryReset, resetMemory } from "../src/mnemo/admin-reset";
 import { deleteProjectMemory, inspectProjectMemory, moveMemory } from "../src/mnemo/admin";
 import { callTool } from "../src/mnemo/tools";
 import { runContext } from "../src/cli/commands/context";
@@ -42,6 +45,14 @@ function unchangedJson(): void { expect(fs.readFileSync(dbPath())).toEqual(legac
 function silent<T>(operation: () => T): T {
   const output = spyOn(process.stdout, "write").mockReturnValue(true);
   try { return operation(); } finally { output.mockRestore(); }
+}
+function captured(operation: () => void): string {
+  let value = "";
+  const output = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    value += String(chunk);
+    return true;
+  });
+  try { operation(); return value; } finally { output.mockRestore(); }
 }
 function contextAction(action: string, args: string[] = [], dryRun = false): void {
   fs.writeFileSync(path.join(root, "projects.json"), JSON.stringify({ acme: { context: "mnemo", roots: [root], defaultRoot: root } }), { mode: 0o600 });
@@ -96,6 +107,39 @@ describe("fachada compartida y seleccion explicita", () => {
     unchangedJson();
   });
 
+  test("CLI tree/search/inspect ofrecen administracion visual sobre SQLite", () => {
+    activateFixture();
+    const tree = captured(() => runMemory({ action: "tree", args: ["acme/store"], all: false,
+      confirm: undefined, dryRun: false, yes: false }));
+    const search = captured(() => runMemory({ action: "search", args: ["transaccion"], all: false,
+      confirm: undefined, dryRun: false, yes: false, project: "acme/store", subtree: true, limit: "10" }));
+    const inspect = captured(() => runMemory({ action: "inspect", args: ["acme/store"], all: false,
+      confirm: undefined, dryRun: false, yes: false }));
+
+    expect(tree).toContain("acme/store/checkout/payments");
+    expect(tree).toContain("observations=1 sessions=1");
+    expect(search).toContain("#4 acme/store/checkout/payments");
+    expect(search).not.toContain("#5 acme/store/checkout/coupons");
+    expect(inspect).toContain("Exact records: observations=1 sessions=1");
+    expect(inspect).toContain("Children: 2");
+    expect(() => silent(() => runMemory({ action: "search", args: ["pagos"], all: false,
+      confirm: undefined, dryRun: false, yes: false, subtree: true }))).toThrow("requiere --project");
+    unchangedJson();
+  });
+
+  test("el parser CLI conecta --project, --subtree, --type y --limit", () => {
+    activateFixture();
+    const result = spawnSync("bun", [path.resolve(import.meta.dir, "../src/cli/index.ts"), "memory", "search",
+      "transaccion", "--project", "acme/store", "--subtree", "--type", "general", "--limit", "10"], {
+      encoding: "utf8",
+      env: { ...process.env },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("#4 acme/store/checkout/payments");
+    expect(result.stdout).not.toContain("#5 acme/store/checkout/coupons");
+    unchangedJson();
+  });
+
   test("dry-run no escribe sesiones ni backups", () => {
     activateFixture();
     const before = loadDb();
@@ -142,17 +186,78 @@ describe("fachada compartida y seleccion explicita", () => {
     unchangedJson();
   });
 
-  test("snapshot replace/restore/reset no adaptados bloquean antes de tocar JSON", () => {
+  test("la sustitucion directa de snapshots sigue bloqueada sin tocar el JSON retenido", () => {
     activateFixture();
-    for (const action of [
-      () => saveDb({ observations: [], sessions: [], nextId: 1 }),
-      () => previewMemoryRestore("absent"),
-      () => restoreMemoryBackup("absent", "RESTORE"),
-      () => silent(() => runMemory({ action: "reset", args: [], all: true, yes: true, confirm: "ALL", dryRun: false })),
-      () => silent(() => runMemory({ action: "restore", args: ["absent"], all: false, yes: true, confirm: "RESTORE", dryRun: false })),
-    ]) expect(action).toThrow("pendiente de adaptacion SQLite");
+    expect(() => saveDb({ observations: [], sessions: [], nextId: 1 })).toThrow("sustitucion directa");
     expect(loadDb()).toEqual(fixtureDb());
     expect(fs.existsSync(path.join(root, "backups"))).toBe(false);
+    unchangedJson();
+  });
+
+  test("reset exacto/total y restore operan transaccionalmente sobre SQLite", () => {
+    activateFixture();
+    const marker = path.join(root, "memory", "active.json");
+    const markerBytes = fs.readFileSync(marker);
+    callTool({ name: "mem_pin", arguments: { id: 5 } });
+    const relationStore = MemoryStore.open(file, "write");
+    try { relationStore.run("INSERT INTO relations VALUES (5, 4, 'conflicts', 'synthetic')"); }
+    finally { relationStore.close(); }
+    const original = loadDb();
+    const restoreSource = backupMemory().destination!;
+
+    const exactPreview = previewMemoryReset("acme/store/checkout/coupons");
+    expect(exactPreview).toMatchObject({ backend: "sqlite", observations: 1, sessions: 0, pins: 1, relations: 1,
+      requiresConfirmation: "acme/store/checkout/coupons" });
+    const exact = resetMemory("acme/store/checkout/coupons", "acme/store/checkout/coupons");
+    expect(exact.reset).toBe(true);
+    expect(exact.backup.destination).toEndWith(".sqlite");
+    expect(loadDb().observations.map((item) => item.id)).not.toContain(5);
+
+    const restorePreview = previewMemoryRestore(restoreSource);
+    expect(restorePreview).toMatchObject({ backend: "sqlite", observations: 5, sessions: 1, pins: 1, nextId: 6 });
+    const restored = restoreMemoryBackup(restoreSource, "RESTORE");
+    expect(restored.currentBackup.destination).toEndWith(".sqlite");
+    expect(loadDb()).toEqual(original);
+    const afterRestore = MemoryEngine.open(file);
+    try { expect(afterRestore.legacyImportState()).toMatchObject({ pins: 1, relations: 1 }); } finally { afterRestore.close(); }
+
+    const total = resetMemory(null, "ALL");
+    expect(total).toMatchObject({ reset: true, removedObservations: 5, removedSessions: 1 });
+    const empty = MemoryEngine.open(file, { access: "write" });
+    try {
+      expect(empty.snapshot()).toEqual({ observations: [], sessions: [], nextId: 1 });
+      expect(empty.tree().map((entry) => entry.path)).toEqual(["global"]);
+      expect(empty.legacyImportState()).toMatchObject({ pins: 0, relations: 0 });
+      empty.integrity();
+    } finally { empty.close(); }
+    expect(fs.readFileSync(marker)).toEqual(markerBytes);
+    unchangedJson();
+  });
+
+  test("dry-run CLI de reset/restore no crea backups ni modifica SQLite", () => {
+    activateFixture();
+    const restoreSource = backupMemory().destination!;
+    const before = loadDb();
+    const backupCount = fs.readdirSync(path.join(root, "backups")).length;
+    const resetOutput = captured(() => runMemory({ action: "reset", args: [], all: true,
+      yes: false, confirm: undefined, dryRun: true }));
+    const restoreOutput = captured(() => runMemory({ action: "restore", args: [restoreSource], all: false,
+      yes: false, confirm: undefined, dryRun: true }));
+    expect(resetOutput).toContain("preview only");
+    expect(restoreOutput).toContain("preview only");
+    expect(fs.readdirSync(path.join(root, "backups"))).toHaveLength(backupCount);
+    expect(loadDb()).toEqual(before);
+    unchangedJson();
+  });
+
+  test("el lock compartido tambien excluye escritores SQLite", () => {
+    activateFixture();
+    const lock = `${path.resolve(dbPath())}.write.lock`;
+    fs.writeFileSync(lock, "synthetic\n", { mode: 0o600 });
+    expect(() => saveObservation({ project: "acme", type: "general", title: "blocked", content: "", tags: "" }))
+      .toThrow("otra escritura");
+    fs.unlinkSync(lock);
+    expect(loadDb()).toEqual(fixtureDb());
     unchangedJson();
   });
 

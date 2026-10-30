@@ -16,6 +16,15 @@ export type { BudgetedContext, ContextOptions, MemoryBrief, MemoryBriefOptions }
 export interface ScopeEntry { path: string; parent: string | null; depth: number; observations: number; sessions: number; }
 export interface EngineOptions { access?: StoreAccess; aliases?: ProjectAliases; }
 export interface ScopeDeleteExpectation { observations: number; sessions: number; latest: string | null; }
+export interface MemoryStatistics {
+  observations: number;
+  sessions: number;
+  pins: number;
+  relations: number;
+  nextId: number;
+  maxObservationId: number;
+  latest: string | null;
+}
 export interface LegacyImportState {
   sessionIds: string[];
   nextObservationPosition: number;
@@ -30,6 +39,8 @@ export class MemoryEngine {
   static open(file: string, options: EngineOptions = {}): MemoryEngine {
     return new MemoryEngine(MemoryStore.open(file, options.access), options.aliases ?? {});
   }
+
+  get file(): string { return this.store.file; }
 
   save(input: SaveObservationInput): Observation {
     const project = this.normalize(input.project);
@@ -153,6 +164,11 @@ export class MemoryEngine {
         depth: rowNumber(row, "depth"), observations: rowNumber(row, "observations"), sessions: rowNumber(row, "sessions") }));
   }
 
+  statistics(scope?: string): MemoryStatistics {
+    const target = scope ? this.normalize(scope) : undefined;
+    return this.store.transaction(() => this.readStatistics(target), false);
+  }
+
   deleteScope(scope: string, expected: ScopeDeleteExpectation): { deletedObservations: number; deletedSessions: number } {
     const target = this.normalize(scope);
     return this.store.transaction(() => {
@@ -174,6 +190,23 @@ export class MemoryEngine {
         )`, [target, target]);
       }
       return { deletedObservations: observations, deletedSessions: sessions };
+    });
+  }
+
+  resetAll(expected: MemoryStatistics): MemoryStatistics {
+    return this.store.transaction(() => {
+      const current = this.readStatistics();
+      if (!sameStatistics(current, expected)) {
+        throw new MemoryError("MEMORY_INPUT", "La memoria cambio desde el preview; solicita uno nuevo.");
+      }
+      this.store.run("DELETE FROM observations");
+      this.store.run("DELETE FROM sessions");
+      for (const scope of this.tree().filter((entry) => entry.path !== "global").sort((a, b) => b.depth - a.depth)) {
+        this.store.run("DELETE FROM scopes WHERE path = ?", [scope.path]);
+      }
+      this.store.run(`UPDATE memory_state SET next_observation_id = 1,
+        next_observation_position = 0, next_session_position = 0 WHERE singleton = 1`);
+      return current;
     });
   }
 
@@ -228,8 +261,11 @@ export class MemoryEngine {
     }, false);
   }
   backup(destination: string): string { return this.store.backup(destination); }
+  restore(source: string): void { this.store.restore(source); }
   integrity(): void { this.store.integrity(); }
+  verifyReadOnly(): void { this.store.verifyReadOnly(); }
   checkpoint(): void { this.store.checkpoint(); }
+  seal(): void { this.store.seal(); }
   close(): void { this.store.close(); }
 
   private readProject(root: string): MnemoDb {
@@ -245,6 +281,33 @@ export class MemoryEngine {
     return { observations, sessions, nextId: rowNumber(this.store.get("SELECT next_observation_id FROM memory_state WHERE singleton = 1"), "next_observation_id") };
   }
 
+  private readStatistics(scope?: string): MemoryStatistics {
+    const where = scope ? " WHERE scope_path = ?" : "";
+    const values = scope ? [scope] : [];
+    const observations = rowNumber(this.store.get(`SELECT count(*) AS total FROM observations${where}`, values), "total");
+    const sessions = rowNumber(this.store.get(`SELECT count(*) AS total FROM sessions${where}`, values), "total");
+    const pins = rowNumber(this.store.get(scope
+      ? "SELECT count(*) AS total FROM pins p JOIN observations o ON o.id = p.observation_id WHERE o.scope_path = ?"
+      : "SELECT count(*) AS total FROM pins", values), "total");
+    const relations = rowNumber(this.store.get(scope
+      ? `SELECT count(*) AS total FROM relations r WHERE EXISTS (
+        SELECT 1 FROM observations o WHERE o.id IN (r.source_id, r.target_id) AND o.scope_path = ?
+      )`
+      : "SELECT count(*) AS total FROM relations", values), "total");
+    const latestRow = this.store.get(`SELECT max(created_at) AS latest FROM (
+      SELECT created_at FROM observations${where} UNION ALL SELECT created_at FROM sessions${where}
+    )`, [...values, ...values]);
+    return {
+      observations,
+      sessions,
+      pins,
+      relations,
+      nextId: rowNumber(this.store.get("SELECT next_observation_id FROM memory_state WHERE singleton = 1"), "next_observation_id"),
+      maxObservationId: rowNumber(this.store.get(`SELECT coalesce(max(id), 0) AS maximum FROM observations${where}`, values), "maximum"),
+      latest: latestRow?.latest === null ? null : latestRow ? rowText(latestRow, "latest") : null,
+    };
+  }
+
   private normalize(scope: string): string { return canonicalScope(scope, this.aliases); }
   private advanceable(value: number): void {
     if (value >= Number.MAX_SAFE_INTEGER) throw new MemoryError("MEMORY_FORMAT", "Contador de memoria agotado; no se reciclan IDs/posiciones.");
@@ -253,4 +316,11 @@ export class MemoryEngine {
     if (typeof value !== "string" || value.includes("\0")) throw new MemoryError("MEMORY_INPUT", "Texto de memoria invalido.");
     return sanitizeMemoryContent(value);
   }
+}
+
+function sameStatistics(left: MemoryStatistics, right: MemoryStatistics): boolean {
+  return left.observations === right.observations && left.sessions === right.sessions
+    && left.pins === right.pins && left.relations === right.relations
+    && left.nextId === right.nextId && left.maxObservationId === right.maxObservationId
+    && left.latest === right.latest;
 }

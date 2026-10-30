@@ -58,42 +58,32 @@ export function withMemoryStorage<T>(legacyFile: string, access: "read" | "write
   json: (file: string) => T;
   sqlite: (engine: MemoryEngine) => T;
 }): T {
+  if (access === "write") {
+    return withLegacyWriteLock(legacyFile, () => dispatchMemoryStorage(legacyFile, access, handlers));
+  }
+  return dispatchMemoryStorage(legacyFile, access, handlers);
+}
+
+function dispatchMemoryStorage<T>(legacyFile: string, access: "read" | "write", handlers: {
+  json: (file: string) => T;
+  sqlite: (engine: MemoryEngine) => T;
+}): T {
   const location = memoryLocation(legacyFile);
   if (location.backend === "json") {
-    return access === "write"
-      ? withLegacyWriteLock(location.file, () => {
-        assertLegacyStillActive(location.file);
-        return handlers.json(location.file);
-      })
-      : handlers.json(location.file);
+    return handlers.json(location.file);
   }
   const engine = MemoryEngine.open(location.file, { access, aliases: loadConfig().projects.aliases });
   try { return handlers.sqlite(engine); } finally { engine.close(); }
 }
 
 export function withJsonMemoryWrite<T>(legacyFile: string, operation: (file: string) => T): T {
-  const location = memoryLocation(legacyFile);
-  if (location.backend !== "json") {
-    throw new MemoryError("MEMORY_UNSUPPORTED",
-      "Operacion administrativa pendiente de adaptacion SQLite (T-5.3.5); no se escribe al JSON retenido.");
-  }
-  return withLegacyWriteLock(location.file, () => {
-    assertLegacyStillActive(location.file);
-    return operation(location.file);
+  return withMemoryStorage(legacyFile, "write", {
+    json: operation,
+    sqlite: () => {
+      throw new MemoryError("MEMORY_UNSUPPORTED",
+        "La sustitucion directa de snapshots no esta disponible con SQLite activo; el JSON retenido no se modifica.");
+    },
   });
-}
-
-function assertLegacyStillActive(legacyFile: string): void {
-  if (memoryLocation(legacyFile).backend !== "json") {
-    throw new MemoryError("MEMORY_ACTIVATION",
-      "SQLite se activo antes de iniciar la escritura; el JSON retenido no se modifica.");
-  }
-}
-
-export function assertJsonMemory(legacyFile = dbPath()): void {
-  if (memoryLocation(legacyFile).backend !== "json") {
-    throw new MemoryError("MEMORY_UNSUPPORTED", "Operacion administrativa pendiente de adaptacion SQLite (T-5.3.5); no se escribe al JSON retenido.");
-  }
 }
 
 export function withSqliteMemory<T>(access: "read" | "write", operation: (engine: MemoryEngine) => T,

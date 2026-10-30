@@ -76,13 +76,55 @@ export class MemoryStore {
   }
 
   integrity(): void {
+    this.transaction(() => this.assertIntegrity());
+  }
+
+  verifyReadOnly(): void {
     this.transaction(() => {
       if (this.get("PRAGMA integrity_check")?.integrity_check !== "ok" || this.all("PRAGMA foreign_key_check").length > 0) {
         throw new MemoryError("MEMORY_FORMAT", "Memoria no supera la comprobacion de integridad SQLite/FK.");
       }
       this.validateFormat();
-      this.run("INSERT INTO observations_fts(observations_fts, rank) VALUES ('integrity-check', 1)");
-    });
+    }, false);
+  }
+
+  restore(source: string): void {
+    if (this.access === "read") throw new MemoryError("MEMORY_UNSUPPORTED", "Restore requiere conexion de escritura.");
+    if (this.transactionActive) throw new MemoryError("MEMORY_UNSUPPORTED", "Restore requiere una conexion fuera de transaccion.");
+    const resolved = path.resolve(source);
+    existingDatabase(resolved);
+    this.run("ATTACH DATABASE ? AS restore_source", [resolved]);
+    try {
+      this.transaction(() => {
+        this.assertAttachedFormat();
+        this.run("DELETE FROM relations");
+        this.run("DELETE FROM pins");
+        this.run("DELETE FROM observations");
+        this.run("DELETE FROM sessions");
+        for (const row of this.all("SELECT path FROM scopes WHERE path <> 'global' ORDER BY depth DESC, path DESC")) {
+          this.run("DELETE FROM scopes WHERE path = ?", [rowText(row, "path")]);
+        }
+        this.run(`INSERT INTO scopes(path, parent_path, depth)
+          SELECT path, parent_path, depth FROM restore_source.scopes WHERE path <> 'global' ORDER BY depth, path`);
+        this.run(`INSERT INTO observations(id, scope_path, type, title, content, tags, created_at, position)
+          SELECT id, scope_path, type, title, content, tags, created_at, position FROM restore_source.observations ORDER BY position`);
+        this.run(`INSERT INTO sessions(id, scope_path, summary, created_at, position)
+          SELECT id, scope_path, summary, created_at, position FROM restore_source.sessions ORDER BY position`);
+        this.run(`INSERT INTO pins(observation_id, created_at)
+          SELECT observation_id, created_at FROM restore_source.pins ORDER BY observation_id`);
+        this.run(`INSERT INTO relations(source_id, target_id, kind, created_at)
+          SELECT source_id, target_id, kind, created_at FROM restore_source.relations ORDER BY source_id, target_id, kind`);
+        this.run(`UPDATE memory_state SET
+          next_observation_id = (SELECT next_observation_id FROM restore_source.memory_state WHERE singleton = 1),
+          next_observation_position = (SELECT next_observation_position FROM restore_source.memory_state WHERE singleton = 1),
+          next_session_position = (SELECT next_session_position FROM restore_source.memory_state WHERE singleton = 1)
+          WHERE singleton = 1`);
+        this.assertRestoreMatchesSource();
+        this.assertIntegrity();
+      });
+    } finally {
+      this.run("DETACH DATABASE restore_source");
+    }
   }
 
   backup(destination: string): string {
@@ -94,7 +136,13 @@ export class MemoryStore {
         this.statement("VACUUM INTO ?", (statement) => statement.run(target));
         privateFile(target);
         const copy = MemoryStore.open(target, "write");
-        try { copy.integrity(); } finally { copy.close(); }
+        try {
+          copy.integrity();
+          copy.seal();
+        } finally { copy.close(); }
+        if (fs.existsSync(`${target}-wal`) || fs.existsSync(`${target}-shm`)) {
+          throw new MemoryError("MEMORY_SQLITE", "El backup SQLite conserva WAL/SHM despues de sellarse.");
+        }
         return target;
       } catch (error) {
         for (const suffix of ["-shm", "-wal", ""]) {
@@ -115,6 +163,15 @@ export class MemoryStore {
     const result = this.get("PRAGMA wal_checkpoint(TRUNCATE)");
     if (result && "busy" in result && rowNumber(result, "busy") !== 0) {
       throw new MemoryError("MEMORY_BUSY", "SQLite no pudo cerrar el WAL provisional.");
+    }
+  }
+
+  seal(): void {
+    if (this.access === "read") throw new MemoryError("MEMORY_UNSUPPORTED", "Sellar SQLite requiere conexion de escritura.");
+    if (this.transactionActive) throw new MemoryError("MEMORY_UNSUPPORTED", "Sellar SQLite requiere una conexion fuera de transaccion.");
+    this.checkpoint();
+    if (this.get("PRAGMA journal_mode = DELETE")?.journal_mode !== "delete") {
+      throw new MemoryError("MEMORY_SQLITE", "SQLite no pudo sellar el backup sin WAL.");
     }
   }
 
@@ -158,5 +215,45 @@ export class MemoryStore {
       throw new MemoryError("MEMORY_FORMAT", "Contadores de memoria inconsistentes.");
     }
     this.all("SELECT rowid FROM observations_fts WHERE observations_fts MATCH ? LIMIT 1", ['"capabilityprobe"']);
+  }
+
+  private assertAttachedFormat(): void {
+    if (rowNumber(this.get("PRAGMA restore_source.application_id"), "application_id") !== MEMORY_APPLICATION_ID
+      || rowNumber(this.get("PRAGMA restore_source.user_version"), "user_version") !== MEMORY_SCHEMA_VERSION
+      || this.get("PRAGMA restore_source.integrity_check")?.integrity_check !== "ok"
+      || this.all("PRAGMA restore_source.foreign_key_check").length > 0) {
+      throw new MemoryError("MEMORY_FORMAT", "El backup SQLite no supera formato/integridad/FK.");
+    }
+  }
+
+  private assertRestoreMatchesSource(): void {
+    const tables: Array<[string, string]> = [
+      ["memory_state", "singleton, next_observation_id, next_observation_position, next_session_position"],
+      ["scopes", "path, parent_path, depth"],
+      ["observations", "id, scope_path, type, title, content, tags, created_at, position"],
+      ["sessions", "id, scope_path, summary, created_at, position"],
+      ["pins", "observation_id, created_at"],
+      ["relations", "source_id, target_id, kind, created_at"],
+    ];
+    for (const [table, columns] of tables) {
+      const difference = this.get(`SELECT 1 AS mismatch FROM (
+        SELECT 1 FROM (
+          SELECT ${columns} FROM main.${table} EXCEPT SELECT ${columns} FROM restore_source.${table}
+        )
+        UNION ALL
+        SELECT 1 FROM (
+          SELECT ${columns} FROM restore_source.${table} EXCEPT SELECT ${columns} FROM main.${table}
+        )
+      ) LIMIT 1`);
+      if (difference) throw new MemoryError("MEMORY_FORMAT", `Restore SQLite no reprodujo la tabla ${table}.`);
+    }
+  }
+
+  private assertIntegrity(): void {
+    if (this.get("PRAGMA integrity_check")?.integrity_check !== "ok" || this.all("PRAGMA foreign_key_check").length > 0) {
+      throw new MemoryError("MEMORY_FORMAT", "Memoria no supera la comprobacion de integridad SQLite/FK.");
+    }
+    this.validateFormat();
+    this.run("INSERT INTO observations_fts(observations_fts, rank) VALUES ('integrity-check', 1)");
   }
 }
