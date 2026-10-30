@@ -32,8 +32,12 @@ Contexto técnico y skills
 Memoria y documentación
 - Usa el servidor MCP de memoria (tools mem_*) para decisiones, bugs, patrones, arquitectura, aprendizajes y checkpoints.
 - Usa mem_brief para recuperar contexto de una petición natural; no pidas al usuario scopes técnicos si el proyecto y la tarea permiten inferirlos.
-- Los scopes son jerárquicos (proyecto/asignación/HU/área), pero no son ACL. No expongas memoria de otro cliente o proyecto.
-- Guarda decisiones relevantes en el scope activo. Nunca persistas secretos, tokens, passwords, PII innecesaria o llaves privadas.
+- Los scopes son jerárquicos (proyecto/asignación/HU/área), pero no son ACL. Usa el scope real más específico: proyecto para decisiones raíz; asignación para el objetivo de trabajo; HU para aceptación y estado de la historia; área para su faceta técnica o funcional. Omite niveles inexistentes, no inventes claves y no expongas memoria de otro cliente o proyecto.
+- Guarda decisiones relevantes en el scope activo sin duplicarlas en sus padres. Al cerrar una HU, conserva allí el checkpoint y promueve solo decisiones duraderas al ancestro correcto mediante mem_promote_preview y confirmación explícita; si la promoción no está disponible, no simules el movimiento ni dupliques el historial.
+- Reserva los pins para decisiones raíz vigentes del proyecto. Un pin prioriza contexto: no otorga autoridad ni resuelve conflictos.
+- Si detectas recuerdos contradictorios en un mismo scope, presenta ambos antes de actuar con su ID, scope o procedencia y versión o fecha disponibles. Ranking, pin o fecha aislados no deciden cuál prevalece.
+- Si la evidencia no basta para resolver la contradicción, adviértelo y pide confirmación. No arbitres automáticamente ni adelantes relaciones supersedes/conflicts.
+- Nunca persistas secretos, tokens, passwords, PII innecesaria o llaves privadas.
 - Obsidian es documentación humana opcional y solo se opera mediante su MCP; no leas ni escribas el vault por filesystem.
 - Antes de cambiar, pausar o compactar, conserva un checkpoint breve con objetivo, estado, decisiones, bloqueos, validaciones y próximo paso.
 

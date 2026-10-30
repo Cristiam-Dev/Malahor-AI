@@ -77,6 +77,13 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toContain("mem_brief");
     expect(system[0]?.text).toContain("Principio de socio");
     expect(system[0]?.text).toContain("no convierte en interactivos los guardados rutinarios de memoria");
+    expect(system[0]?.text).toContain("scope real más específico");
+    expect(system[0]?.text).toContain("no expongas memoria de otro cliente o proyecto");
+    expect(system[0]?.text).toContain("mem_promote_preview");
+    expect(system[0]?.text).toContain("Un pin prioriza contexto: no otorga autoridad");
+    expect(system[0]?.text).toContain("recuerdos contradictorios en un mismo scope");
+    expect(system[0]?.text).toContain("Ranking, pin o fecha aislados no deciden");
+    expect(system[0]?.text).toContain("No arbitres automáticamente");
   });
 
   test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {
@@ -559,6 +566,8 @@ describe("adaptador de plugin V2", () => {
       const system = contextInput.system as Array<{ text: string }>;
       expect(system).toHaveLength(1);
       expect(system[0]?.text).toContain(MALAHOR_PROTOCOL_MARKER);
+      expect(system[0]?.text).toContain("proyecto/asignación/HU/área");
+      expect(system[0]?.text).toContain("recuerdos contradictorios en un mismo scope");
 
       const compactionHooks = calls.filter((call) => call.domain === "session" && call.name === "compaction");
       const compactionInput: Record<string, unknown> = {

@@ -49,7 +49,7 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 
 ## Conceptos
 
-- **Memoria (Mnemo)**: decisiones, bugs, patrones, arquitectura y resumen de sesion en scopes `empresa/proyecto/modulo/feature`, guardados en `~/.malahor/mnemo/`. La recuperacion hereda padres y `global`; `mem_brief` entiende solicitudes naturales y busca recuerdos relacionados en otros scopes.
+- **Memoria**: decisiones, bugs, patrones, arquitectura y resumen de sesion en scopes jerarquicos `proyecto/asignacion/HU/area`, guardados por el backend activo fuera de los repos. La recuperacion hereda padres y `global`; `mem_brief` entiende solicitudes naturales y busca recuerdos relacionados en otros scopes.
 - **Administracion segura de memoria**: el agente puede inspeccionar, respaldar, mover/reclasificar, borrar y restaurar memoria via MCP con preview + confirmacion (`mem_inspect_project`, `mem_backup`, `mem_move_preview`/`mem_move`, `mem_delete_project_preview`/`mem_delete_project`, `mem_restore_preview`/`mem_restore`).
 - **Contexto por proyecto**: niveles `mnemo`, `mnemo+graphify` (default) y `mnemo+graphify+obsidian`, guardados en `~/.malahor/projects.json` por clave canonica.
 - **Graphify**: contexto tecnico del codigo, escrito siempre fuera del repo, en `~/.malahor/graphs/<proyecto>`.
@@ -62,6 +62,29 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 - **Consentimiento git**: `git add` y `git commit` quedan bloqueados por hooks si no hay una orden explicita de stage/commit; "continuar" o "cerrar fase" no cuentan como autorizacion.
 - **Skill canonica de commits**: `git-commit-text` es regla de oro para proponer mensajes: icono + Conventional Commit en espanol y cuerpo con viñetas siempre que aporte contexto.
 - **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
+
+## Convencion enterprise de memoria
+
+El agente infiere el scope a partir del workspace y de la tarea; el usuario no
+necesita escribir claves internas. Se usa siempre el nivel real mas especifico:
+
+- `proyecto`: arquitectura, politicas y decisiones raiz que afectan al conjunto.
+- `proyecto/asignacion`: objetivo, requisitos y decisiones de una unidad de trabajo.
+- `proyecto/asignacion/HU`: aceptacion, estado, riesgos y hallazgos de una historia.
+- `proyecto/asignacion/HU/area`: detalle de una faceta tecnica o funcional, por
+  ejemplo frontend, backend o demo. Los niveles inexistentes se omiten; no se
+  inventan identificadores para completar la ruta.
+
+Al cerrar una HU, su checkpoint e historial permanecen en ese scope. Solo una
+decision durable se promueve al ancestro adecuado, con preview y confirmacion;
+no se copia toda la historia. Los pins se reservan para decisiones raiz vigentes
+del proyecto y solo priorizan el contexto: no otorgan autoridad.
+
+Si dos recuerdos del mismo scope se contradicen, el agente presenta ambos con
+su ID, scope o procedencia y version o fecha disponibles. Ranking, pin o fecha
+aislados no determinan cual prevalece. Si la evidencia no basta, el agente
+advierte el conflicto y pide confirmacion antes de actuar; el motor no arbitra
+automaticamente ni crea relaciones `supersedes`/`conflicts` por esta regla.
 
 ## Principio central
 
@@ -120,7 +143,7 @@ En OpenCode, Malahor instala comandos slash equivalentes:
 
 Tambien puedes escribir “recuperar contexto”, “guardar contexto”, “commit” o “comitea” y el agente debe aplicar el mismo protocolo. “Commit” o “comitea” disparan el flujo verificado: status/diff, diagnostico, testing y build; si algo falla, no se commitea. `/malahor-commit` nunca hace push.
 
-Para trabajar en una asignacion grande, describe el proyecto/modulo/feature en lenguaje natural; el agente consulta Mnemo por MCP y no necesitas escribir scopes ni usar comandos CLI.
+Para trabajar en una asignacion grande, describe el proyecto, la asignacion, la HU o el area en lenguaje natural; el agente consulta la memoria por MCP y no necesitas escribir scopes ni usar comandos CLI.
 
 Los comandos destructivos de memoria requieren confirmacion fuerte:
 
