@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { hookResourceAuditIdentity } from "./resources";
 import { sha256 } from "./security-policy";
 import type { HookContext, HookDecision, HookResult } from "./types";
 
@@ -102,7 +103,7 @@ function auditFilePrefix(filePath: string): string {
 
 export function buildAuditEntry(context: HookContext, result: HookResult, now: Date = new Date()): AuditEntry {
   const policy = result.policy ?? context.policyMeta;
-  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(path.normalize(path.resolve(context.cwd, target)))}`))].sort();
+  const resourceRefs = [...new Set((context.targetPaths ?? []).map((target) => `sha256:${sha256(hookResourceAuditIdentity(context, target))}`))].sort();
   const policyHash = policy?.policyHash ? `sha256:${policy.policyHash}` : "sha256:unknown";
 
   return {

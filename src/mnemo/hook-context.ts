@@ -1,5 +1,6 @@
 import { resolveRegisteredProject } from "../cli/core/context";
 import { loadHookPolicy } from "../cli/core/hooks/policy-loader";
+import { usesFilesystemResources } from "../cli/core/hooks/resources";
 import type { HookContext, HookEvent } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
 
@@ -19,7 +20,7 @@ export function mnemoHookContext(event: HookEvent, harness: HookContext["harness
   const project = resolveRegisteredProject(paths, {}, {
     override: metadataProject,
     preferredRoot: overrides.projectRoot,
-    targetPaths: overrides.targetPaths,
+    targetPaths: usesFilesystemResources(overrides.resourceKind) ? overrides.targetPaths : [],
     projectHint: overrides.memoryScope,
   });
   const policyLoad = loadHookPolicy(paths, project.canonicalKey);

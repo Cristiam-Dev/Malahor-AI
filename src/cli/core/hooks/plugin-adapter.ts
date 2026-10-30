@@ -5,12 +5,14 @@ import { resolvePaths, type MalahorPaths } from "../paths";
 import { resolveProject } from "../project";
 import { auditHookResult, runHooks } from "./engine";
 import { loadHookPolicy } from "./policy-loader";
+import { usesFilesystemResources } from "./resources";
 import {
   CODE_MODE_TOOL_NAMES,
   isMcpToolName,
   type HookContext,
   type HookDecision,
   type HookEvent,
+  type HookResourceKind,
   type HookResult,
   type HookViolation,
 } from "./types";
@@ -40,6 +42,7 @@ interface EvaluationDetails {
   event: HookEvent;
   cwd?: string;
   command?: string;
+  resourceKind?: HookResourceKind;
   targetPaths?: string[];
   metadata?: Record<string, unknown>;
   destructive?: boolean;
@@ -62,6 +65,7 @@ export async function evaluatePermission(
   const scope = await resolveEvaluationScope(input, options, details.cwd);
   const built = scope.error ? undefined : buildContext(details.event, scope.options, {
     command: details.command,
+    resourceKind: details.resourceKind,
     targetPaths: details.targetPaths,
     metadata: {
       ...metadata,
@@ -100,6 +104,7 @@ export async function evaluateToolHook(
   const scope = await resolveEvaluationScope(input, options, mapped.cwd);
   const built = scope.error ? undefined : buildContext(mapped.event, scope.options, {
     command: mapped.command,
+    resourceKind: mapped.resourceKind,
     targetPaths: mapped.targetPaths,
     metadata: {
       ...mapped.metadata,
@@ -299,7 +304,7 @@ function buildContext(
 
   try {
     const paths = pluginPaths(cwd, env);
-    const project = resolveOperationProject(cwd, details.targetPaths, paths);
+    const project = resolveOperationProject(cwd, details.resourceKind, details.targetPaths, paths);
     const loaded = loadHookPolicy(paths, project.canonicalKey);
     const context: HookContext = {
       event,
@@ -313,6 +318,7 @@ function buildContext(
       security: loaded.security,
       policyMeta: loaded.policyMeta,
       command: details.command,
+      resourceKind: details.resourceKind,
       targetPaths: details.targetPaths,
       destructive: details.destructive,
       audit: {
@@ -367,10 +373,17 @@ function pluginPaths(cwd: string, env: NodeJS.ProcessEnv): MalahorPaths {
   return resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
 }
 
-function resolveOperationProject(cwd: string, targetPaths: string[] | undefined, paths: MalahorPaths): ReturnType<typeof resolveProject> {
+function resolveOperationProject(
+  cwd: string,
+  resourceKind: HookResourceKind | undefined,
+  targetPaths: string[] | undefined,
+  paths: MalahorPaths,
+): ReturnType<typeof resolveProject> {
   const candidates = registeredProjectRoots(paths.projectsFile)
     .sort((left, right) => right.root.length - left.root.length);
-  const absoluteTargets = (targetPaths ?? []).map((target) => path.resolve(cwd, target));
+  const absoluteTargets = usesFilesystemResources(resourceKind)
+    ? (targetPaths ?? []).map((target) => path.resolve(cwd, target))
+    : [];
   const candidate = candidates.find((entry) => (
     isWithinPath(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root))
   ));
@@ -398,11 +411,11 @@ function permissionDetails(action: string, resources: string[], metadata: Record
   }
 
   if (normalized === "read" || normalized === "glob" || normalized === "grep") {
-    return { event: "file.read.before", targetPaths: resources, metadata };
+    return { event: "file.read.before", resourceKind: "filesystem", targetPaths: resources, metadata };
   }
 
   if (normalized === "edit" || normalized === "write" || normalized === "patch" || normalized === "create") {
-    return { event: "file.write.before", targetPaths: resources, metadata };
+    return { event: "file.write.before", resourceKind: "filesystem", targetPaths: resources, metadata };
   }
 
   if (normalized === "webfetch" || normalized === "fetch" || normalized === "http") {
@@ -415,6 +428,7 @@ function permissionDetails(action: string, resources: string[], metadata: Record
   if (normalized === "external_directory") {
     return {
       event: metadata.write === true ? "file.write.before" : "file.read.before",
+      resourceKind: "filesystem",
       targetPaths: resources,
       metadata,
     };
@@ -461,11 +475,11 @@ function toolDetails(tool: string, input: unknown, options: PluginAdapterOptions
   }
 
   if (normalized === "read" || normalized === "glob" || normalized === "grep") {
-    return { event: "file.read.before", targetPaths: pathValues(args), metadata: { tool } };
+    return { event: "file.read.before", resourceKind: "filesystem", targetPaths: pathValues(args), metadata: { tool } };
   }
 
   if (normalized === "write" || normalized === "edit" || normalized === "patch") {
-    return { event: "file.write.before", targetPaths: pathValues(args), metadata: { tool } };
+    return { event: "file.write.before", resourceKind: "filesystem", targetPaths: pathValues(args), metadata: { tool } };
   }
 
   if (normalized === "webfetch") {

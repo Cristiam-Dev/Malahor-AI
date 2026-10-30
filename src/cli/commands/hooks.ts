@@ -6,7 +6,8 @@ import { approvalsDirectory, grantApproval } from "../core/hooks/approvals";
 import { auditFilePath } from "../core/hooks/audit";
 import { assertHooksAllowed, auditHookResult, formatHookResult, hookExitCode, runHooks } from "../core/hooks/engine";
 import { loadHookPolicy, parseHookProfile, saveHookProfile } from "../core/hooks/policy-loader";
-import { HOOK_EVENTS, type HookContext, type HookEvent, type HookResult } from "../core/hooks/types";
+import { usesFilesystemResources } from "../core/hooks/resources";
+import { HOOK_EVENTS, HOOK_RESOURCE_KINDS, type HookContext, type HookEvent, type HookResourceKind, type HookResult } from "../core/hooks/types";
 import { isSandbox } from "../core/paths";
 import { resolveCanonicalProjectKey } from "../core/project";
 
@@ -15,6 +16,7 @@ export interface HooksOptions {
   args: string[];
   command: string | undefined;
   paths: string | undefined;
+  resourceKind: string | undefined;
   profile: string | undefined;
   project: string | undefined;
   scope: string | undefined;
@@ -64,9 +66,10 @@ function resolveHookContext(options: HooksOptions, eventValue = options.args[0])
   const config = loadConfig();
   const event = parseHookEvent(eventValue);
   const targetPaths = parseTargetPaths(options.paths, config.paths.cwd, event);
+  const resourceKind = parseResourceKind(options.resourceKind);
   const project = resolveRegisteredProject(config.paths, config.projects.aliases, {
     override: options.project,
-    targetPaths,
+    targetPaths: usesFilesystemResources(resourceKind) ? targetPaths : [],
   });
   const projectKey = options.project ? resolveCanonicalProjectKey(options.project, config.projects.aliases) : project.canonicalKey;
   const profileOverride = options.profile ? parseHookProfile(options.profile) : undefined;
@@ -83,6 +86,7 @@ function resolveHookContext(options: HooksOptions, eventValue = options.args[0])
     security: policyLoad.security,
     policyMeta: policyLoad.policyMeta,
     command: options.command,
+    resourceKind,
     targetPaths,
     memoryScope: options.scope,
     confirmation: options.confirm,
@@ -260,6 +264,12 @@ function parseTargetPaths(value: string | undefined, cwd: string, event: HookEve
   return [];
 }
 
+function parseResourceKind(value: string | undefined): HookResourceKind | undefined {
+  if (!value?.trim()) return undefined;
+  if (HOOK_RESOURCE_KINDS.includes(value as HookResourceKind)) return value as HookResourceKind;
+  throw new Error(`Tipo de recurso invalido: ${value}. Usa ${HOOK_RESOURCE_KINDS.join(" o ")}.`);
+}
+
 function changedFiles(cwd: string): string[] {
   try {
     const out = execFileSync("git", ["status", "--short"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
@@ -297,8 +307,8 @@ function printEvents(): void {
 function printHooksHelp(): void {
   process.stdout.write(`
 Usage:
-  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--scope <scope>] [--confirm TOKEN] [--approval <nonce>] [--json]
-  malahor-ai hooks approval grant <event> --confirm APPROVE [--ttl <segundos>] [--command <cmd>] [--paths a,b] [--scope <scope>] [--json]
+  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--resource-kind filesystem|obsidian-vault] [--scope <scope>] [--confirm TOKEN] [--approval <nonce>] [--json]
+  malahor-ai hooks approval grant <event> --confirm APPROVE [--ttl <segundos>] [--command <cmd>] [--paths a,b] [--resource-kind filesystem|obsidian-vault] [--scope <scope>] [--json]
   malahor-ai hooks status [--project <key>]
   malahor-ai hooks profile get [--project <key>]
   malahor-ai hooks profile set off|light|standard|strict|release [--project <key>]
@@ -309,6 +319,7 @@ Ejemplos:
   malahor-ai hooks check git.push.before --profile release
   malahor-ai hooks check git.reset.before --command "git reset --hard"
   malahor-ai hooks check file.stage.before --paths .env,src/index.ts
+  malahor-ai hooks check obsidian.write.before --resource-kind obsidian-vault --paths Malahor-AI/Product/pm/plan.md
   malahor-ai hooks approval grant git.push.before --profile release --confirm APPROVE --ttl 300
 
 Decisiones:

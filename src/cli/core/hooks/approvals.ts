@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { writeAudit } from "./audit";
+import { normalizeHookResource } from "./resources";
 import { sha256 } from "./security-policy";
 import type { HookContext, HookResult } from "./types";
 
@@ -182,7 +183,7 @@ function bindingForContext(context: HookContext): Omit<ApprovalRecord, "nonce" |
     throw new Error("la aprobacion requiere politica efectiva y hash");
   }
 
-  const resources = [...new Set((context.targetPaths ?? []).map((target) => normalizeResource(context.cwd, target)))].sort();
+  const resources = [...new Set((context.targetPaths ?? []).map((target) => normalizeHookResource(context, target)))].sort();
   return {
     operation: context.event,
     resources,
@@ -205,10 +206,6 @@ function sameBinding(record: ApprovalRecord, binding: ReturnType<typeof bindingF
     && record.contractVersion === binding.contractVersion
     && record.resources.length === binding.resources.length
     && record.resources.every((resource, index) => resource === binding.resources[index]);
-}
-
-function normalizeResource(cwd: string, target: string): string {
-  return path.normalize(path.resolve(cwd, target));
 }
 
 function effectiveTtlSeconds(context: HookContext, requested: number | undefined): number {

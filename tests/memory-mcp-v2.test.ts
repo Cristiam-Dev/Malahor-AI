@@ -40,6 +40,11 @@ describe("MCP memoria v2: contrato compatible y herramientas nuevas", () => {
     expect(context.inputSchema.properties).toHaveProperty("rollup");
     expect(context.inputSchema.properties).toHaveProperty("budget");
     expect(brief.inputSchema.properties).toHaveProperty("budget");
+
+    const hook = toolDefinitions.find((definition) => definition.name === "malahor_hook_check")!;
+    expect(hook.inputSchema.properties.resourceKind).toEqual(expect.objectContaining({
+      enum: ["filesystem", "obsidian-vault"],
+    }));
   });
 
   test("subtree conserva exact por defecto y funciona igual en JSON/SQLite", () => {

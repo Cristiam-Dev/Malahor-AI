@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { filesystemTargetPaths, hookResourceIssues } from "./resources";
 import { CODE_MODE_TOOL_NAMES, isMcpToolName, type HookContext, type HookEvent, type HookProfile, type HookRule, type HookViolation } from "./types";
 
 export const builtInHookRules: HookRule[] = [
   { id: "policy-integrity", run: policyIntegrityGuard },
+  { id: "resource-contract", run: resourceContractGuard },
   { id: "repo-boundary", run: repoBoundaryGuard },
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
@@ -20,6 +22,21 @@ export const builtInHookRules: HookRule[] = [
   { id: "egress-policy", run: egressPolicyGuard },
   { id: "programming-quality", critical: false, run: programmingQualityGuard },
 ];
+
+function resourceContractGuard(context: HookContext): HookViolation[] {
+  return hookResourceIssues(context).map((issue) => ({
+    id: issue.code === "kind"
+      ? "MAL-HOOK-RESOURCE-KIND"
+      : issue.code === "missing"
+        ? "MAL-HOOK-RESOURCE-MISSING"
+        : "MAL-HOOK-VAULT-PATH",
+    decision: "deny",
+    message: issue.message,
+    fix: issue.code === "kind"
+      ? "Usa filesystem para rutas fisicas y obsidian-vault exclusivamente con obsidian.write.before."
+      : "Proporciona una ruta vault-relative canonica, sin traversal, prefijos absolutos ni separadores Windows.",
+  }));
+}
 
 function policyIntegrityGuard(context: HookContext): HookViolation[] {
   const meta = context.policyMeta;
@@ -49,9 +66,10 @@ function policyIntegrityGuard(context: HookContext): HookViolation[] {
 
 function repoBoundaryGuard(context: HookContext): HookViolation[] {
   const writesMalahorData = Boolean(context.metadata?.writesMalahorData);
-  if (!writesMalahorData || !context.targetPaths || context.targetPaths.length === 0) return [];
+  const targets = filesystemTargetPaths(context);
+  if (!writesMalahorData || targets.length === 0) return [];
 
-  const unsafe = context.targetPaths
+  const unsafe = targets
     .map((targetPath) => path.resolve(context.cwd, targetPath))
     .filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
 
@@ -313,7 +331,7 @@ function fileBoundaryGuard(context: HookContext): HookViolation[] {
   if (context.event !== "file.read.before" && context.event !== "file.write.before") return [];
 
   const controls = context.security?.files;
-  const paths = (context.targetPaths ?? []).map((target) => path.resolve(context.cwd, target));
+  const paths = filesystemTargetPaths(context).map((target) => path.resolve(context.cwd, target));
   if (paths.length === 0) return [];
 
   const violations: HookViolation[] = [];
@@ -614,7 +632,7 @@ function parseHttpUrl(value: string): URL | null {
 
 function programmingQualityGuard(context: HookContext): HookViolation[] {
   const violations: HookViolation[] = [];
-  const files = context.targetPaths ?? [];
+  const files = filesystemTargetPaths(context);
 
   const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
@@ -640,7 +658,7 @@ function programmingQualityGuard(context: HookContext): HookViolation[] {
 }
 
 function readableTargetPaths(context: HookContext): string[] {
-  return (context.targetPaths ?? [])
+  return filesystemTargetPaths(context)
     .map((targetPath) => path.resolve(context.cwd, targetPath))
     .filter((targetPath) => fs.existsSync(targetPath) && fs.statSync(targetPath).isFile() && fs.statSync(targetPath).size <= 512 * 1024);
 }

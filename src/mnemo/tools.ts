@@ -2,7 +2,8 @@ import { toolDefinitions } from "./tool-definitions";
 import { resolveRegisteredProject } from "../cli/core/context";
 import { auditHookResult, runHooks } from "../cli/core/hooks/engine";
 import { loadHookPolicy, parseHookProfile } from "../cli/core/hooks/policy-loader";
-import type { HookEvent } from "../cli/core/hooks/types";
+import { usesFilesystemResources } from "../cli/core/hooks/resources";
+import { HOOK_RESOURCE_KINDS, type HookEvent, type HookResourceKind } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
 import { getObservation, listProjects, saveObservation, saveSessionSummary, searchObservations, type ObservationType } from "./db";
 import { contextForProject, memoryBrief } from "./context";
@@ -86,16 +87,18 @@ export function callTool(call: ToolCall): unknown {
 
 function checkMalahorHooks(args: Record<string, unknown>): unknown {
   const paths = resolvePaths();
+  const event = hookEventArg(args.event);
   const targetPaths = stringListArg(args.paths);
+  const resourceKind = hookResourceKindArg(args.resourceKind);
   const metadata = recordArg(args.metadata);
   const project = resolveRegisteredProject(paths, {}, {
     override: optionalStringArg(metadata.project),
-    targetPaths,
+    targetPaths: usesFilesystemResources(resourceKind) ? targetPaths : [],
   });
   const profileOverride = typeof args.profile === "string" && args.profile.trim() ? parseHookProfile(args.profile) : undefined;
   const policyLoad = loadHookPolicy(paths, project.canonicalKey, profileOverride);
   const context = {
-    event: hookEventArg(args.event),
+    event,
     harness: "mcp" as const,
     profile: policyLoad.policy.profile,
     cwd: paths.cwd,
@@ -106,6 +109,7 @@ function checkMalahorHooks(args: Record<string, unknown>): unknown {
     security: policyLoad.security,
     policyMeta: policyLoad.policyMeta,
     command: optionalStringArg(args.command),
+    resourceKind,
     targetPaths,
     confirmation: optionalStringArg(args.confirm),
     metadata,
@@ -145,6 +149,14 @@ function observationTypeArg(value: unknown): ObservationType {
 function hookEventArg(value: unknown): HookEvent {
   if (typeof value === "string" && value.trim()) return value as HookEvent;
   throw new Error("Expected hook event string");
+}
+
+function hookResourceKindArg(value: unknown): HookResourceKind | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" && HOOK_RESOURCE_KINDS.includes(value as HookResourceKind)) {
+    return value as HookResourceKind;
+  }
+  throw new Error(`Expected resourceKind to be one of: ${HOOK_RESOURCE_KINDS.join(", ")}`);
 }
 
 function stringListArg(value: unknown): string[] {

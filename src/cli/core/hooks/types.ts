@@ -2,6 +2,10 @@ export type HookDecision = "allow" | "warn" | "ask" | "deny";
 
 export type HookProfile = "off" | "light" | "standard" | "strict" | "release";
 
+export const HOOK_RESOURCE_KINDS = ["filesystem", "obsidian-vault"] as const;
+
+export type HookResourceKind = typeof HOOK_RESOURCE_KINDS[number];
+
 export interface HookPolicy {
   profile: HookProfile;
   git: {
@@ -299,6 +303,8 @@ export interface HookContext {
   security?: SecurityControls;
   policyMeta?: HookPolicyMeta;
   command?: string;
+  /** Tipo de todos los recursos de targetPaths; filesystem es el default legacy. */
+  resourceKind?: HookResourceKind;
   targetPaths?: string[];
   memoryScope?: string;
   confirmation?: string;

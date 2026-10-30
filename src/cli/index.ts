@@ -64,6 +64,7 @@ async function main(argv: string[]): Promise<void> {
           args: parsed.args.slice(1),
           command: parsed.options.command,
           paths: parsed.options.paths,
+          resourceKind: parsed.options["resource-kind"],
           profile: parsed.options.profile,
           project: parsed.options.project,
           scope: parsed.options.scope,
@@ -147,7 +148,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       const key = arg.slice(2);
       flags.add(key);
 
-      if ((key === "command" || key === "confirm" || key === "mode" || key === "paths" || key === "profile" || key === "project" || key === "limit" || key === "policy-after" || key === "message" || key === "type" || key === "scope" || key === "icon" || key === "approval" || key === "ttl") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
+      if ((key === "command" || key === "confirm" || key === "mode" || key === "paths" || key === "resource-kind" || key === "profile" || key === "project" || key === "limit" || key === "policy-after" || key === "message" || key === "type" || key === "scope" || key === "icon" || key === "approval" || key === "ttl") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
         options[key] = rest[index + 1];
         index += 1;
       }

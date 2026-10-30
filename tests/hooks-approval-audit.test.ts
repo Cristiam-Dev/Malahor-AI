@@ -94,6 +94,35 @@ describe("approval ledger", () => {
     expect(consumeApproval(record.nonce, context(home)).ok).toBe(true);
   });
 
+  test("vincula recursos del vault por identidad logica independiente del cwd", () => {
+    const home = temporaryHome();
+    const targetPaths = ["Malahor-AI/Product/pm/plan.md"];
+    const ctx = context(home, {
+      event: "obsidian.write.before",
+      command: "",
+      resourceKind: "obsidian-vault",
+      targetPaths,
+    });
+    const record = grantApproval(ctx, { channel: "cli-tty" });
+
+    expect(record.resources).toEqual(["obsidian-vault:Malahor-AI/Product/pm/plan.md"]);
+    expect(consumeApproval(record.nonce, { ...ctx, resourceKind: "filesystem" }).ok).toBe(false);
+    expect(consumeApproval(record.nonce, {
+      ...ctx,
+      cwd: path.join(home, "otro-cwd"),
+    }).ok).toBe(true);
+  });
+
+  test("no emite aprobaciones para rutas de vault invalidas", () => {
+    const home = temporaryHome();
+    expect(() => grantApproval(context(home, {
+      event: "obsidian.write.before",
+      command: "",
+      resourceKind: "obsidian-vault",
+      targetPaths: ["../fuera.md"],
+    }), { channel: "cli-tty" })).toThrow(/traversal/);
+  });
+
   test("rechaza registros con vigencia invalida, permisos inseguros o TTL excedido", () => {
     const home = temporaryHome();
     const ctx = context(home);
@@ -209,6 +238,21 @@ describe("assert with approvals and audit", () => {
     expect(String((entry.resourceRefs as string[])[0]).startsWith("sha256:")).toBe(true);
     expect(fs.statSync(auditFilePath(home)).mode & 0o777).toBe(0o600);
     expect(fs.statSync(path.dirname(auditFilePath(home))).mode & 0o777).toBe(0o700);
+  });
+
+  test("auditoria de vault es estable aunque cambie el cwd", () => {
+    const home = temporaryHome();
+    const ctx = context(home, {
+      event: "obsidian.write.before",
+      command: "",
+      resourceKind: "obsidian-vault",
+      targetPaths: ["Malahor-AI/Product/manual.md"],
+    });
+
+    const first = buildAuditEntry(ctx, runHooks(ctx));
+    const second = buildAuditEntry({ ...ctx, cwd: path.join(home, "otro-cwd") }, runHooks(ctx));
+    expect(first.resourceRefs).toEqual(second.resourceRefs);
+    expect(first.resourceRefs).toHaveLength(1);
   });
 
   test("auditoria auxiliar no disponible reporta warn sin bloquear", () => {
