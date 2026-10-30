@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { copyAssets } from "../core/assets";
+import { codegraphRoot, codegraphRuntime, verifiedCodegraphBinary } from "../core/codegraph-runtime";
+import { statusCodegraph } from "../core/codegraph-index";
 import { backupFile } from "../core/backup";
 import { formatExecutionPolicy, loadConfig, type MalahorConfig, type MalahorExecutionPolicy } from "../core/config";
 import { contextLevelLabel, levelForProject } from "../core/context";
@@ -82,6 +84,7 @@ function renderReport(
     checks.push(fromPluginHealth(check));
   }
   checks.push(checkHookPolicy(paths, project.canonicalKey));
+  checks.push(checkCodegraph(paths, host));
   checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution, host, paths));
   process.stdout.write(`\nmalahor-ai doctor${options.selfHeal ? " --self-heal" : ""}\n=================\n`);
   process.stdout.write(`Mode: ${config.mode}\n`);
@@ -124,11 +127,27 @@ function renderReport(
   }
 
   if (warnings.length > 0) {
-    process.stdout.write(`\nStatus: ready with ${warnings.length} warning(s). Opcionales; ver lineas WARN.\n`);
+    process.stdout.write(`\nStatus: ready with ${warnings.length} warning(s). Ver lineas WARN: puede haber capacidades esenciales degradadas.\n`);
     return;
   }
 
   process.stdout.write("\nStatus: ready\n");
+}
+
+function checkCodegraph(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult {
+  const guide = "`malahor-ai codegraph guide` (degradado: memoria y lectura puntual; nunca bloquea la sesion)";
+  if (host.kind !== "v2") return { name: "CodeGraph", ok: false, message: `MCP gestionado solo disponible en V2; ${guide}`, critical: false };
+  try {
+    // The package installation root is not necessarily the active code project.
+    const target = codegraphRoot(paths);
+    if (!verifiedCodegraphBinary(paths)) return { name: "CodeGraph", ok: false, message: `Binario verificado ausente; ${guide}`, critical: false };
+    if (!codegraphRuntime(paths, target.project, target.root)) return { name: "CodeGraph", ok: false, message: `Indice externo o puente MCP no gestionado para ${target.root}; ${guide}`, critical: false };
+    const status = statusCodegraph(paths, target.project, target.root);
+    if (!status.startsWith("{")) return { name: "CodeGraph", ok: false, message: `${status}; ${guide}`, critical: false };
+    return { name: "CodeGraph", ok: true, message: `symgraph con indice externo gestionado para ${target.root}; MCP solo lectura`, critical: false };
+  } catch (error) {
+    return { name: "CodeGraph", ok: false, message: `${(error as Error).message}; ${guide}`, critical: false };
+  }
 }
 
 // Self-heal agent-safe: repara lo declarable desde el paquete sin pedir consola.

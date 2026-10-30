@@ -39,6 +39,7 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 | `malahor-ai git` | Flujo git asistido: precommit, prepush y mensajes de commit seguros |
 | `malahor-ai hooks` | Guardrails cross-harness para git, secretos, memoria, instalacion y calidad |
 | `malahor-ai context` | Nivel de contexto por proyecto y deteccion de stack |
+| `malahor-ai codegraph` | Contexto estructural con symgraph e indice gestionado fuera del repo (`status`, `setup`, `index`, `guide`) |
 | `malahor-ai memory` | Administra la memoria Mnemo |
 | `malahor-ai obsidian` | Configura el puente Obsidian MCP |
 | `malahor-ai update` | Refresca instalacion, assets y formato de politica |
@@ -49,6 +50,7 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 - **Memoria**: decisiones, bugs, patrones, arquitectura y resumen de sesion en scopes jerarquicos `proyecto/asignacion/HU/area`, guardados por el backend activo fuera de los repos. La recuperacion hereda padres y `global`; `mem_brief` entiende solicitudes naturales y busca recuerdos relacionados en otros scopes.
 - **Administracion segura de memoria**: el agente puede inspeccionar, respaldar, mover/reclasificar, borrar y restaurar memoria via MCP con preview + confirmacion (`mem_inspect_project`, `mem_backup`, `mem_move_preview`/`mem_move`, `mem_delete_project_preview`/`mem_delete_project`, `mem_restore_preview`/`mem_restore`).
 - **Contexto por proyecto**: clave canonica, root activo, memoria y documentacion opcional, con estado guardado fuera del repo. Los valores persistidos por versiones anteriores siguen siendo legibles hasta su migracion asistida.
+- **Contexto estructural**: symgraph 2026.10.18 (Rust/tree-sitter) sustituye al proveedor CodeGraph que solo admite indices locales. Malahor fija SHA-256 de la release y del puente MCP, indexa en `MALAHOR_HOME/codegraph/indexes/` y solo registra herramientas de lectura para indices gestionados. `symgraph-reindex` no se expone: reindexa exclusivamente mediante el CLI con nuevo consentimiento. `install --yes` no instala ni indexa automaticamente; `doctor` avisa y degrada sin bloquear.
 - **Obsidian (opcional)**: documentacion humana via Obsidian MCP; nunca por filesystem directo. Soporta OpenCode en WSL con Obsidian en Windows y Windows nativo.
 - **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, aplicada al final de la instalacion. `guiar` y `acompanar` usan una lista blanca de comandos (no un bloqueo total): el agente conserva siempre la ruta de diagnostico y autorreparacion, y `install`/`update` solo piden confirmacion al usuario.
 - **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta y valida todo antes de tocar permisos.
@@ -96,6 +98,14 @@ malahor-ai context detect
 # Recuperar o guardar una capsula corta de contexto
 malahor-ai context recover
 malahor-ai context save "objetivo, estado, decisiones y proximo paso"
+
+# Previsualizar antes de consentir descarga e indexado (solo proyecto registrado)
+malahor-ai codegraph guide
+malahor-ai codegraph status
+malahor-ai codegraph setup --dry-run
+malahor-ai codegraph setup --confirm INSTALL_SYMGRAPH
+malahor-ai codegraph index --dry-run
+malahor-ai codegraph index --project demo --confirm INDEX_SYMGRAPH:demo # sustituye demo por la clave canonica
 
 # Revisar la memoria del proyecto
 malahor-ai memory list

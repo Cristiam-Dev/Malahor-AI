@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { runConfig } from "./commands/config";
+import { runCodegraph } from "./commands/codegraph";
 import { runContext } from "./commands/context";
 import { runDoctor } from "./commands/doctor";
 import { runGitCommand } from "./commands/git";
@@ -39,6 +40,14 @@ async function main(argv: string[]): Promise<void> {
           yes: parsed.flags.has("yes"),
           bootstrap: parsed.flags.has("bootstrap"),
           policyAfter: parsed.options["policy-after"],
+        });
+        return;
+      case "codegraph":
+        await runCodegraph({
+          action: parsed.args[0] ?? "guide",
+          project: parsed.options.project,
+          confirm: parsed.options.confirm,
+          dryRun: parsed.flags.has("dry-run"),
         });
         return;
       case "doctor":
@@ -167,6 +176,7 @@ function printHelp(): void {
 
 Commands:
   config        Revisar y consolidar la configuracion de OpenCode
+  codegraph     Gestionar contexto estructural (symgraph, indice externo)
   install       Instalar Malahor para OpenCode
   doctor        Diagnosticar y reparar la instalacion
   git           Ejecutar el flujo git asistido
@@ -207,6 +217,12 @@ Obsidian commands:
   obsidian guide [--mode wsl-windows|windows-local]
   obsidian setup [--dry-run] [--yes] [--mode wsl-windows|windows-local]
   obsidian verify [--mode wsl-windows|windows-local]
+
+CodeGraph commands:
+  codegraph status [--project <key>]
+  codegraph guide
+  codegraph setup [--project <key>] [--dry-run | --confirm INSTALL_SYMGRAPH]
+  codegraph index [--project <key>] [--dry-run | --confirm INDEX_SYMGRAPH:<key>]
 
 Config commands:
   config status [--json]

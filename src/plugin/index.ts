@@ -8,7 +8,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
+import { registeredProjectRoots } from "../cli/core/context";
 import { resolveProject } from "../cli/core/project";
+import { codegraphRoot, codegraphRuntime } from "../cli/core/codegraph-runtime";
 import { loadHookPolicy } from "../cli/core/hooks/policy-loader";
 import {
   checkpointBeforeCompaction,
@@ -120,7 +122,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
 
   const mcp = transformDomain(context.mcp);
   if (mcp) {
-    const registration = await registerMcpTransform(mcp, cwd, process.env, cleanups);
+    const registration = await registerMcpTransform(mcp, cwd, process.env, cleanups, locationCanonical(context));
     capabilities["mcp.transform"] = registration.ok;
     if (registration.warnings.length > 0) degraded.push(...registration.warnings);
   } else {
@@ -411,6 +413,12 @@ function locationDirectory(context: Record<string, unknown>): string | undefined
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 
+function locationCanonical(context: Record<string, unknown>): string | undefined {
+  const location = isRecord(context.location) ? context.location : undefined;
+  const project = location && isRecord(location.project) ? location.project : undefined;
+  return typeof project?.canonical === "string" ? project.canonical : undefined;
+}
+
 function transformDomain(value: unknown): McpTransformDomain | undefined {
   if (!isRecord(value) || typeof value.transform !== "function") return undefined;
   return value as unknown as McpTransformDomain;
@@ -442,6 +450,7 @@ async function registerMcpTransform(
   cwd: string,
   env: NodeJS.ProcessEnv,
   cleanups: Cleanup[],
+  canonical?: string,
 ): Promise<{ ok: boolean; warnings: string[] }> {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings: string[] = [];
@@ -469,16 +478,40 @@ async function registerMcpTransform(
       const existingObsidian = editor.get("obsidian");
       if (!existingObsidian) {
         warnings.push("mcp.obsidian-definition-missing");
-        return;
-      }
-      if (existingObsidian.type !== "remote") {
+      } else if (existingObsidian.type !== "remote") {
         warnings.push("mcp.obsidian-legacy-local");
-        return;
+      } else {
+        // La definición remota aprobada se conserva sin copiar headers ni secretos
+        // a otro store; la resolución dinámica del host pertenece a T-5.11.8.
+        editor.set("obsidian", { ...existingObsidian, disabled: false, codemode: false });
       }
 
-      // La definición remota aprobada se conserva sin copiar headers ni secretos
-      // a otro store; la resolución dinámica del host pertenece a T-5.11.8.
-      editor.set("obsidian", { ...existingObsidian, disabled: false, codemode: false });
+      const existingCodegraph = editor.get("codegraph");
+      let target: ReturnType<typeof codegraphRoot> | undefined;
+      try {
+        const registered = canonical ? registeredProjectRoots(paths.projectsFile)
+          .find((entry) => fs.realpathSync(entry.root) === fs.realpathSync(canonical)) : undefined;
+        if (!canonical || registered) target = codegraphRoot(paths, registered?.canonicalKey);
+      } catch { /* No registered root at this location. */ }
+      const runtime = target && codegraphRuntime(paths, target.project, target.root);
+      if (!runtime) {
+        warnings.push("mcp.codegraph-no-managed-index");
+        if (existingCodegraph && isManagedCodegraph(existingCodegraph, paths)) {
+          editor.set("codegraph", { ...existingCodegraph, disabled: true });
+        }
+      } else if (existingCodegraph && !isManagedCodegraph(existingCodegraph, paths)) {
+        warnings.push("mcp.codegraph-foreign-definition");
+      } else {
+        editor.set("codegraph", {
+          type: "local",
+          command: ["node", runtime.proxy, runtime.binary, runtime.root, runtime.database, target!.project, paths.projectsFile, paths.malahorHome],
+          cwd: runtime.root,
+          environment: { NODE_OPTIONS: "", NODE_PATH: "" },
+          disabled: false,
+          codemode: false,
+          protocol: "legacy",
+        });
+      }
     });
     if (isRecord(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => (registration.dispose as () => Promise<void> | void)());
@@ -488,6 +521,11 @@ async function registerMcpTransform(
     warn(`no se pudo registrar ctx.mcp.transform: ${error instanceof Error ? error.message : String(error)}`);
     return { ok: false, warnings: ["mcp.transform-registration"] };
   }
+}
+
+function isManagedCodegraph(config: McpServerConfig, paths: MalahorPaths): boolean {
+  return config.type === "local" && Array.isArray(config.command)
+    && config.command[0] === "node" && config.command[1] === path.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 
 function isMalahorMnemo(config: McpServerConfig, paths: MalahorPaths): boolean {

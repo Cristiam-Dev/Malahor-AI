@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { backupFile } from "../core/backup";
+import { offerCodegraphSetup } from "./codegraph";
+import { codegraphRoot } from "../core/codegraph-runtime";
 import { copyAssets } from "../core/assets";
 import {
   formatExecutionPolicy,
@@ -156,6 +158,15 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   printLine("Validation: passed (politica aplicada al final)");
   printLine("Next: run `malahor-ai doctor`. Si la politica cambio, abre una sesion nueva de OpenCode para recargarla.");
   printLine("Reparacion sin consola: /malahor-bootstrap y /malahor-reparar funcionan aunque el agente este bloqueado.");
+  if (!options.dryRun && !options.yes && !options.bootstrap) {
+    try {
+      await offerCodegraphSetup(paths, project.canonicalKey, codegraphRoot(paths, project.canonicalKey).root);
+    } catch (error) {
+      printLine(`CodeGraph degradado: ${(error as Error).message}. La instalacion principal sigue operativa.`);
+    }
+  } else {
+    printLine("CodeGraph: instalacion/indexado no automaticos; `malahor-ai codegraph guide`.");
+  }
 }
 
 function ensureBuild(packagePaths: MalahorPackagePaths, _paths: MalahorPaths, detection: DetectionResult, options: InstallOptions): void {
