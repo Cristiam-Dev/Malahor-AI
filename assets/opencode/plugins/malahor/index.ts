@@ -1,9 +1,9 @@
 // malahor-managed
 // @ts-nocheck bundle generado desde src/plugin/index.ts; el source se typechequea con tsconfig.json
 // src/plugin/index.ts
-import fs8 from "node:fs";
+import fs11 from "node:fs";
 import os2 from "node:os";
-import path12 from "node:path";
+import path15 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -231,6 +231,35 @@ var CONTEXT_LEVELS = [
   "mnemo+graphify+obsidian"
 ];
 var DEFAULT_CONTEXT_LEVEL = "memory+codegraph";
+function resolveRegisteredProject(paths, aliases = {}, options = {}) {
+  const canonicalKey = options.override?.trim() ? resolveCanonicalProjectKey(options.override, aliases) : resolveProjectHint(paths, aliases, options.projectHint);
+  const absoluteTargets = (options.targetPaths ?? []).map((target) => path3.resolve(paths.cwd, target));
+  const registered = canonicalKey ? rootsForProject(paths.projectsFile, canonicalKey).map((root2) => ({ canonicalKey, root: root2 })) : registeredProjectRoots(paths.projectsFile).filter((entry) => isWithinPath(paths.cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root))).sort((left, right) => right.root.length - left.root.length);
+  const root = options.preferredRoot ?? registered[0]?.root;
+  if (root) {
+    const resolved = resolveProject(root, aliases);
+    return {
+      ...resolved,
+      canonicalKey: canonicalKey ?? registered[0]?.canonicalKey ?? resolved.canonicalKey,
+      root
+    };
+  }
+  const fallback = resolveProject(paths.cwd, aliases);
+  return canonicalKey ? { ...fallback, canonicalKey } : fallback;
+}
+function resolveProjectHint(paths, aliases, hint) {
+  if (!hint?.trim())
+    return;
+  const projects = loadProjectsFile(paths.projectsFile);
+  const normalized = resolveCanonicalProjectKey(hint, aliases);
+  if (projects[normalized])
+    return normalized;
+  const rootSegment = hint.split("/")[0]?.trim();
+  if (!rootSegment || rootSegment === hint)
+    return normalized;
+  const rootKey = resolveCanonicalProjectKey(rootSegment, aliases);
+  return projects[rootKey] ? rootKey : normalized;
+}
 function parseContextLevel(value) {
   if (typeof value !== "string" || !CONTEXT_LEVELS.includes(value)) {
     throw new Error(`Nivel de contexto invalido: ${String(value)}. Consulta \`malahor-ai context help\`; los valores persistidos siguen en compatibilidad transitoria.`);
@@ -314,6 +343,10 @@ function obsidianEnabled(level) {
 }
 function codegraphEnabled(level) {
   return level === "memory+codegraph" || level === "memory+codegraph+obsidian";
+}
+function isWithinPath(value, root) {
+  const relative = path3.relative(path3.resolve(root), path3.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path3.isAbsolute(relative);
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1737,7 +1770,12 @@ function recordValue2(value) {
 }
 
 // src/cli/core/hooks/plugin-adapter.ts
-import path11 from "node:path";
+import path12 from "node:path";
+
+// src/cli/core/hooks/approvals.ts
+import { randomBytes } from "node:crypto";
+import fs7 from "node:fs";
+import path10 from "node:path";
 
 // src/cli/core/hooks/audit.ts
 import fs6 from "node:fs";
@@ -2037,11 +2075,162 @@ function secureChmod(target, mode) {
 
 // src/cli/core/hooks/approvals.ts
 var TRUSTED_CHANNELS = new Set(["cli-tty", "opencode-ui", "host-ui"]);
+function consumeApproval(nonce, context, options = {}) {
+  if (!/^[a-f0-9]{64}$/.test(nonce)) {
+    return { ok: false, reason: "nonce de aprobacion invalido" };
+  }
+  let binding;
+  try {
+    binding = bindingForContext(context);
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "no se pudo vincular la aprobacion" };
+  }
+  const directory = approvalsDirectory(context.malahorHome);
+  const filePath = approvalRecordPath(context.malahorHome, nonce);
+  const claimPath = `${filePath}.claimed`;
+  try {
+    ensurePrivateDirectory(directory);
+    if (fs7.existsSync(claimPath))
+      return { ok: false, reason: "aprobacion ya consumida" };
+    if (!fs7.existsSync(filePath))
+      return { ok: false, reason: "aprobacion no encontrada" };
+    const record = readRecord(filePath);
+    if (record.nonce !== nonce)
+      return { ok: false, reason: "registro de aprobacion invalido" };
+    if (!TRUSTED_CHANNELS.has(record.channel))
+      return { ok: false, reason: "canal de aprobacion no confiable" };
+    if (record.consumedAt)
+      return { ok: false, reason: "aprobacion ya consumida" };
+    const now = options.now ?? new Date;
+    const createdAt = Date.parse(record.createdAt);
+    const expiresAt = Date.parse(record.expiresAt);
+    if (!Number.isFinite(createdAt) || !Number.isFinite(expiresAt) || expiresAt <= createdAt) {
+      return { ok: false, reason: "vigencia de aprobacion invalida" };
+    }
+    const maxTtl = context.security?.approval?.maxTtlSeconds;
+    if (maxTtl !== undefined && (!Number.isInteger(maxTtl) || maxTtl <= 0)) {
+      return { ok: false, reason: "politica de aprobacion invalida" };
+    }
+    if (maxTtl !== undefined && expiresAt - createdAt > maxTtl * 1000) {
+      return { ok: false, reason: "aprobacion excede el TTL maximo de la politica" };
+    }
+    if (expiresAt <= now.getTime())
+      return { ok: false, reason: "aprobacion expirada" };
+    if (!sameBinding(record, binding))
+      return { ok: false, reason: "aprobacion no corresponde a la operacion actual" };
+    let claimFd;
+    try {
+      claimFd = fs7.openSync(claimPath, "wx", 384);
+    } catch (error) {
+      if (error.code === "EEXIST") {
+        return { ok: false, reason: "aprobacion ya consumida" };
+      }
+      throw error;
+    }
+    try {
+      record.consumedAt = now.toISOString();
+      record.consumedBy = options.channel ?? null;
+      writeRecord(filePath, record);
+      return { ok: true, record };
+    } finally {
+      fs7.closeSync(claimFd);
+    }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "ledger de aprobaciones no disponible" };
+  }
+}
+function approvalsDirectory(malahorHome) {
+  return path10.join(malahorHome, "approvals");
+}
+function approvalRecordPath(malahorHome, nonce) {
+  if (!/^[a-f0-9]{64}$/.test(nonce))
+    throw new Error("nonce de aprobacion invalido");
+  return path10.join(approvalsDirectory(malahorHome), `${nonce}.json`);
+}
+function bindingForContext(context) {
+  if (!context.policyMeta) {
+    throw new Error("la aprobacion requiere politica efectiva y hash");
+  }
+  const resources = [...new Set((context.targetPaths ?? []).map((target) => normalizeHookResource(context, target)))].sort();
+  return {
+    operation: context.event,
+    resources,
+    commandHash: context.command?.trim() ? sha256(context.command.trim()) : null,
+    memoryScope: context.memoryScope ?? null,
+    client: context.client ?? null,
+    project: context.project ?? null,
+    policyHash: context.policyMeta.policyHash,
+    contractVersion: context.policyMeta.contractVersion
+  };
+}
+function sameBinding(record, binding) {
+  return record.operation === binding.operation && record.commandHash === binding.commandHash && record.memoryScope === binding.memoryScope && record.client === binding.client && record.project === binding.project && record.policyHash === binding.policyHash && record.contractVersion === binding.contractVersion && record.resources.length === binding.resources.length && record.resources.every((resource, index) => resource === binding.resources[index]);
+}
+function readRecord(filePath) {
+  const stat = fs7.lstatSync(filePath);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error("registro de aprobacion invalido");
+  }
+  if (process.platform !== "win32" && (stat.mode & 63) !== 0) {
+    throw new Error("permisos de aprobacion inseguros");
+  }
+  const raw = fs7.readFileSync(filePath, "utf8");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`registro de aprobacion invalido: ${error instanceof Error ? error.message : "JSON invalido"}`);
+  }
+  if (!validRecord(parsed)) {
+    throw new Error("registro de aprobacion invalido");
+  }
+  return parsed;
+}
+function writeRecord(filePath, record) {
+  const temporary = `${filePath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    fs7.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+    fs7.renameSync(temporary, filePath);
+    secureChmod2(filePath, 384);
+  } finally {
+    try {
+      fs7.unlinkSync(temporary);
+    } catch {}
+  }
+}
+function ensurePrivateDirectory(directory) {
+  if (fs7.existsSync(directory)) {
+    const stat = fs7.lstatSync(directory);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error("directorio de aprobaciones invalido");
+    }
+  } else {
+    fs7.mkdirSync(directory, { recursive: true, mode: 448 });
+  }
+  secureChmod2(directory, 448);
+}
+function validRecord(value) {
+  if (!isRecord3(value))
+    return false;
+  return typeof value.nonce === "string" && /^[a-f0-9]{64}$/.test(value.nonce) && typeof value.operation === "string" && Array.isArray(value.resources) && value.resources.every((item) => typeof item === "string") && (typeof value.commandHash === "string" || value.commandHash === null) && (typeof value.memoryScope === "string" || value.memoryScope === null) && (typeof value.client === "string" || value.client === null) && (typeof value.project === "string" || value.project === null) && typeof value.policyHash === "string" && typeof value.contractVersion === "number" && typeof value.channel === "string" && typeof value.createdAt === "string" && typeof value.expiresAt === "string" && (typeof value.consumedAt === "string" || value.consumedAt === null) && (typeof value.consumedBy === "string" || value.consumedBy === null) && (value.auditWarning === undefined || typeof value.auditWarning === "string");
+}
+function secureChmod2(target, mode) {
+  try {
+    fs7.chmodSync(target, mode);
+  } catch (error) {
+    if (process.platform !== "win32")
+      throw error;
+  }
+}
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 // src/cli/core/hooks/rules.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
-import fs7 from "node:fs";
-import path10 from "node:path";
+import fs8 from "node:fs";
+import path11 from "node:path";
 var builtInHookRules = [
   { id: "policy-integrity", run: policyIntegrityGuard },
   { id: "resource-contract", run: resourceContractGuard },
@@ -2096,7 +2285,7 @@ function repoBoundaryGuard(context) {
   const targets = filesystemTargetPaths(context);
   if (!writesMalahorData || targets.length === 0)
     return [];
-  const unsafe = targets.map((targetPath) => path10.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
+  const unsafe = targets.map((targetPath) => path11.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
   if (unsafe.length === 0)
     return [];
   return [{
@@ -2327,13 +2516,13 @@ function fileBoundaryGuard(context) {
   if (context.event !== "file.read.before" && context.event !== "file.write.before")
     return [];
   const controls = context.security?.files;
-  const paths = filesystemTargetPaths(context).map((target) => path10.resolve(context.cwd, target));
+  const paths = filesystemTargetPaths(context).map((target) => path11.resolve(context.cwd, target));
   if (paths.length === 0)
     return [];
   const violations = [];
   const write = context.event === "file.write.before";
   const roots = (write ? controls?.allowedWriteRoots : controls?.allowedReadRoots) ?? [];
-  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path10.resolve(context.cwd, root));
+  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path11.resolve(context.cwd, root));
   const enforceRoots = controls?.enforceRoots === true;
   for (const target of paths) {
     const canonical = resolveTargetPath(target, controls?.resolveSymlinks !== false);
@@ -2355,7 +2544,7 @@ function fileBoundaryGuard(context) {
         fix: "Limita la operacion al proyecto/raiz aprobada o genera aprobacion vinculada."
       });
     }
-    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path10.basename(canonical)));
+    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path11.basename(canonical)));
     if (denied) {
       violations.push({
         id: "MAL-HOOK-FILE-DENYLIST",
@@ -2527,6 +2716,10 @@ var KNOWN_OPENCODE_TOOLS = new Set([
   "list",
   "question",
   "skill",
+  "shell",
+  "subagent",
+  "malahor_plan",
+  "malahor_run",
   "invalid"
 ]);
 function commandMatches(pattern, value) {
@@ -2565,25 +2758,25 @@ function isIndirectExecution(command) {
 }
 function resolveTargetPath(target, followSymlinks) {
   try {
-    if (fs7.existsSync(target)) {
-      return followSymlinks ? fs7.realpathSync(target) : path10.resolve(target);
+    if (fs8.existsSync(target)) {
+      return followSymlinks ? fs8.realpathSync(target) : path11.resolve(target);
     }
-    let parent = path10.dirname(target);
-    while (!fs7.existsSync(parent)) {
-      const next = path10.dirname(parent);
+    let parent = path11.dirname(target);
+    while (!fs8.existsSync(parent)) {
+      const next = path11.dirname(parent);
       if (next === parent)
         return null;
       parent = next;
     }
-    const canonicalParent = followSymlinks ? fs7.realpathSync(parent) : path10.resolve(parent);
-    return path10.join(canonicalParent, path10.relative(parent, target));
+    const canonicalParent = followSymlinks ? fs8.realpathSync(parent) : path11.resolve(parent);
+    return path11.join(canonicalParent, path11.relative(parent, target));
   } catch {
     return null;
   }
 }
 function isSecretPath(target) {
   const normalized = target.replaceAll("\\", "/");
-  const base = path10.basename(normalized);
+  const base = path11.basename(normalized);
   if (base === ".env.example")
     return false;
   return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
@@ -2603,7 +2796,7 @@ function parseHttpUrl(value) {
 function programmingQualityGuard(context) {
   const violations = [];
   const files = filesystemTargetPaths(context);
-  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path10.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path11.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -2624,7 +2817,7 @@ function programmingQualityGuard(context) {
   return violations;
 }
 function readableTargetPaths(context) {
-  return filesystemTargetPaths(context).map((targetPath) => path10.resolve(context.cwd, targetPath)).filter((targetPath) => fs7.existsSync(targetPath) && fs7.statSync(targetPath).isFile() && fs7.statSync(targetPath).size <= 512 * 1024);
+  return filesystemTargetPaths(context).map((targetPath) => path11.resolve(context.cwd, targetPath)).filter((targetPath) => fs8.existsSync(targetPath) && fs8.statSync(targetPath).isFile() && fs8.statSync(targetPath).size <= 512 * 1024);
 }
 function scanStagedSecrets(cwd, includeWorktree = false) {
   const commands = [
@@ -2646,8 +2839,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
       return null;
     }
     for (const relative of output.split("\x00").filter(Boolean)) {
-      const file = path10.resolve(cwd, relative);
-      if (!fs7.existsSync(file))
+      const file = path11.resolve(cwd, relative);
+      if (!fs8.existsSync(file))
         continue;
       try {
         leaks.push(...scanFileForSecrets(file));
@@ -2660,8 +2853,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
 }
 var PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function scanFileForSecrets(filePath) {
-  const basename = path10.basename(filePath);
-  const content = fs7.readFileSync(filePath, "utf8");
+  const basename = path11.basename(filePath);
+  const content = fs8.readFileSync(filePath, "utf8");
   const patterns = [
     [PRIVATE_KEY_PATTERN, "private-key"],
     [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
@@ -2688,7 +2881,7 @@ function strictness(profile, fallback) {
 }
 function fileSize(filePath) {
   try {
-    return fs7.statSync(filePath).size;
+    return fs8.statSync(filePath).size;
   } catch {
     return 0;
   }
@@ -2718,12 +2911,12 @@ function controlAffectsEvent(gap, event) {
   return true;
 }
 function isWithin2(targetPath, rootPath) {
-  const relative = path10.relative(path10.resolve(rootPath), path10.resolve(targetPath));
-  return relative === "" || !relative.startsWith("..") && !path10.isAbsolute(relative);
+  const relative = path11.relative(path11.resolve(rootPath), path11.resolve(targetPath));
+  return relative === "" || !relative.startsWith("..") && !path11.isAbsolute(relative);
 }
 function isInside(targetPath, rootPath) {
-  const relative = path10.relative(path10.resolve(rootPath), path10.resolve(targetPath));
-  return Boolean(relative) && !relative.startsWith("..") && !path10.isAbsolute(relative);
+  const relative = path11.relative(path11.resolve(rootPath), path11.resolve(targetPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path11.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/engine.ts
@@ -2759,6 +2952,39 @@ function evaluateHookRules(context, rules = builtInHookRules) {
     }
   });
 }
+function assertHooksAllowed(context) {
+  let result = runHooks(context);
+  if (result.decision === "ask") {
+    if (!context.approval) {
+      result = auditHookResult(context, deniedResult(result, "MAL-HOOK-APPROVAL-MISSING", "ASK pendiente sin aprobacion humana verificable."));
+      throw new Error(formatHookResult(result));
+    }
+    const consumed = consumeApproval(context.approval, context);
+    if (!consumed.ok) {
+      result = auditHookResult(context, deniedResult(result, "MAL-HOOK-APPROVAL-INVALID", consumed.reason ?? "aprobacion invalida"));
+      throw new Error(formatHookResult(result));
+    }
+    result = {
+      ...result,
+      decision: "allow",
+      approvalRef: context.approval,
+      violations: [
+        ...result.violations,
+        {
+          id: "MAL-HOOK-APPROVAL-OK",
+          decision: "allow",
+          message: "Aprobacion humana verificada y consumida para esta operacion.",
+          fix: "No reutilices la aprobacion; si cambia la operacion, genera una nueva."
+        }
+      ]
+    };
+  }
+  result = auditHookResult(context, result);
+  if (result.decision === "deny") {
+    throw new Error(formatHookResult(result));
+  }
+  return result;
+}
 function auditHookResult(context, result) {
   const audit = writeAudit(context, result);
   if (audit.required && !audit.ok) {
@@ -2792,6 +3018,21 @@ function deniedResult(result, id, message) {
       }
     ]
   };
+}
+function formatHookResult(result) {
+  const lines = [`Hooks: ${result.decision.toUpperCase()} ${result.event} (${result.profile})`];
+  for (const violation of result.violations) {
+    lines.push(`- ${violation.decision.toUpperCase()} ${violation.id}: ${violation.message}`);
+    lines.push(`  Fix: ${violation.fix}`);
+  }
+  if (result.violations.length === 0) {
+    lines.push("- OK: sin hallazgos.");
+  }
+  if (result.decision === "ask") {
+    lines.push("- ASK pendiente: no autoriza ejecutar; requiere aprobacion humana verificable.");
+  }
+  return lines.join(`
+`);
 }
 function strongestDecision(violations) {
   return violations.reduce((current, violation) => DECISION_WEIGHT[violation.decision] > DECISION_WEIGHT[current] ? violation.decision : current, "allow");
@@ -2965,9 +3206,9 @@ function evaluate(context) {
   return auditHookResult(context, runHooks(context));
 }
 async function resolveEvaluationScope(input, options, operationCwd) {
-  const fallback = path11.resolve(options.cwd);
+  const fallback = path12.resolve(options.cwd);
   if (operationCwd) {
-    return { options: { ...options, cwd: path11.resolve(fallback, operationCwd) } };
+    return { options: { ...options, cwd: path12.resolve(fallback, operationCwd) } };
   }
   if (!options.resolveSessionDirectory) {
     return { options: { ...options, cwd: fallback } };
@@ -2987,7 +3228,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
         error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
       };
     }
-    return { options: { ...options, cwd: path11.resolve(directory) } };
+    return { options: { ...options, cwd: path12.resolve(directory) } };
   } catch (error) {
     return {
       options: { ...options, cwd: fallback },
@@ -2996,7 +3237,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
   }
 }
 function buildContext(event, options, details) {
-  const cwd = path11.resolve(options.cwd);
+  const cwd = path12.resolve(options.cwd);
   const env = options.env ?? process.env;
   try {
     const paths = pluginPaths(cwd, env);
@@ -3041,7 +3282,7 @@ function policyFailure(event, options, detail) {
     }]
   };
   try {
-    const cwd = path11.resolve(options.cwd);
+    const cwd = path12.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
     const project = resolveProject(cwd);
     const context = {
@@ -3065,16 +3306,16 @@ function pluginPaths(cwd, env) {
 }
 function resolveOperationProject(cwd, resourceKind, targetPaths, paths) {
   const candidates = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
-  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path11.resolve(cwd, target)) : [];
-  const candidate = candidates.find((entry) => isWithinPath(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root)));
+  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path12.resolve(cwd, target)) : [];
+  const candidate = candidates.find((entry) => isWithinPath2(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath2(target, entry.root)));
   if (!candidate)
     return resolveProject(cwd);
   const resolved = resolveProject(candidate.root);
   return { ...resolved, canonicalKey: candidate.canonicalKey };
 }
-function isWithinPath(value, root) {
-  const relative = path11.relative(path11.resolve(root), path11.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path11.isAbsolute(relative);
+function isWithinPath2(value, root) {
+  const relative = path12.relative(path12.resolve(root), path12.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path12.isAbsolute(relative);
 }
 function permissionDetails(action, resources, metadata) {
   const normalized = action.toLowerCase();
@@ -3282,10 +3523,14 @@ Proyecto y contexto
 
 Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
+- Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
+- Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. Si cambia el plan o vence, preséntalo de nuevo.
+- El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
+- Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni la documentación en Obsidian.
 - Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
 - No edites opencode.json/opencode.jsonc manualmente ni pidas al usuario hacerlo; usa las rutas de diagnóstico y reparación de Malahor.
-- Si instalación, permisos o política cambian, informa que hace falta una sesión nueva para recargar el host.
+- Un cambio de modo no requiere una sesion nueva. Si cambian assets o capacidades del host, sigue el diagnostico de Malahor y usa /reload solo cuando este lo indique.
 
 Contexto técnico y skills
 - Usa el contexto técnico configurado del proyecto y lecturas dirigidas; no actives herramientas opcionales por comodidad ni escribas grafos dentro del repo.
@@ -3345,10 +3590,2211 @@ function textContainsMarker(value) {
   return isTextPart3(value) && value.text.includes(MALAHOR_PROTOCOL_MARKER);
 }
 function isTextPart3(value) {
-  return isRecord3(value) && value.type === "text" && typeof value.text === "string";
+  return isRecord4(value) && value.type === "text" && typeof value.text === "string";
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/plugin/planning.ts
+import path14 from "node:path";
+
+// src/cli/core/config.ts
+import { createHash as createHash3 } from "node:crypto";
+import fs9 from "node:fs";
+function loadConfig(env = process.env, cwd = process.cwd()) {
+  const defaultPaths = resolvePaths(env, cwd);
+  const fileConfig = readConfigFile(defaultPaths.configFile);
+  const executionConfig = readOptionalObject(fileConfig.execution, "execution");
+  const projectsConfig = readOptionalObject(fileConfig.projects, "projects");
+  const paths = resolvePaths({ ...resolvePathEnv(env, fileConfig), MALAHOR_CONFIG: defaultPaths.configFile }, cwd);
+  const legacyMode = env.MALAHOR_MODE ?? fileConfig.mode;
+  if (legacyMode !== undefined)
+    resolveMode(legacyMode);
+  const execution = resolveExecutionPolicy(env, executionConfig, legacyMode);
+  return {
+    mode: modeForIntervention(execution.intervention),
+    paths,
+    execution,
+    projects: {
+      aliases: readProjectAliases(projectsConfig?.aliases)
+    }
+  };
+}
+function resolveMode(value = process.env.MALAHOR_MODE) {
+  if (value === undefined || value === null || value === "") {
+    return "assistant";
+  }
+  if (value === "advisor" || value === "assistant" || value === "executor") {
+    return value;
+  }
+  throw new Error(`Modo Malahor invalido: ${String(value)}. Usa "advisor", "assistant" o "executor".`);
+}
+function modeForIntervention(intervention) {
+  switch (intervention) {
+    case "acompanar":
+      return "advisor";
+    case "guiar":
+      return "assistant";
+    case "ejecutar":
+      return "executor";
+  }
+}
+function readConfigFile(filePath) {
+  if (!fs9.existsSync(filePath)) {
+    return {};
+  }
+  const raw = fs9.readFileSync(filePath, "utf8").trim();
+  if (!raw)
+    return {};
+  try {
+    const parsed = JSON.parse(stripJsonComments(raw));
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch (error) {
+    throw new Error(`No se pudo leer ${filePath}: ${error.message}`);
+  }
+  throw new Error(`La configuracion ${filePath} no contiene un objeto JSON valido.`);
+}
+function resolvePathEnv(env, config) {
+  const pathConfig = readOptionalObject(config.paths, "paths");
+  return {
+    ...env,
+    MALAHOR_HOME: env.MALAHOR_HOME ?? readOptionalString(pathConfig?.malahorHome, "paths.malahorHome"),
+    MALAHOR_OPENCODE_DIR: env.MALAHOR_OPENCODE_DIR ?? readOptionalString(pathConfig?.opencodeDir, "paths.opencodeDir")
+  };
+}
+function resolveExecutionPolicy(env, config, legacyMode) {
+  const legacyIntervention = legacyMode === undefined || legacyMode === null || legacyMode === "" ? undefined : { advisor: "acompanar", assistant: "guiar", executor: "ejecutar" }[resolveMode(legacyMode)];
+  const intervention = readIntervention(env.MALAHOR_EXECUTION_INTERVENTION ?? config?.intervention ?? legacyIntervention, "execution.intervention");
+  const verification = readOptionalBoolean(env.MALAHOR_EXECUTION_VERIFICATION ?? config?.verification, "execution.verification");
+  const revision = readExecutionRevision(config?.revision, intervention);
+  return {
+    intervention,
+    verification: intervention === "acompanar" ? false : verification ?? true,
+    revision
+  };
+}
+function readExecutionRevision(value, intervention) {
+  if (value === undefined || value === null || value === "") {
+    return createHash3("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
+  }
+  if (typeof value === "string" && /^[a-f0-9]{32}$/.test(value))
+    return value;
+  throw new Error("La configuracion execution.revision debe ser un identificador hexadecimal de 32 caracteres.");
+}
+function readIntervention(value, key) {
+  if (value === undefined || value === null || value === "") {
+    return "guiar";
+  }
+  if (value === "ejecutar" || value === "guiar" || value === "acompanar") {
+    return value;
+  }
+  throw new Error(`La configuracion ${key} debe ser "ejecutar", "guiar" o "acompanar".`);
+}
+function readProjectAliases(value) {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  const aliases = readOptionalObject(value, "projects.aliases") ?? {};
+  const result = {};
+  for (const [canonical, rawAliases] of Object.entries(aliases)) {
+    const parsedAliases = readStringList(rawAliases, `projects.aliases.${canonical}`);
+    if (canonical.trim() && parsedAliases.length > 0) {
+      result[canonical.trim()] = parsedAliases;
+    }
+  }
+  return result;
+}
+function readOptionalObject(value, key) {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  throw new Error(`La configuracion ${key} debe ser un objeto.`);
+}
+function readOptionalString(value, key) {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  throw new Error(`La configuracion ${key} debe ser un string.`);
+}
+function readStringList(value, key) {
+  if (!Array.isArray(value)) {
+    throw new Error(`La configuracion ${key} debe ser una lista de strings.`);
+  }
+  return value.map((item, index) => readOptionalString(item, `${key}.${index}`)).filter((item) => Boolean(item));
+}
+function readOptionalBoolean(value, key) {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  throw new Error(`La configuracion ${key} debe ser boolean.`);
+}
+
+// src/cli/core/mode.ts
+import { createHash as createHash4, randomBytes as randomBytes2 } from "node:crypto";
+import fs10 from "node:fs";
+import path13 from "node:path";
+
+// node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
+function createScanner(text, ignoreTrivia = false) {
+  const len = text.length;
+  let pos = 0, value = "", tokenOffset = 0, token = 16, lineNumber = 0, lineStartOffset = 0, tokenLineStartOffset = 0, prevTokenLineStartOffset = 0, scanError = 0;
+  function scanHexDigits(count, exact) {
+    let digits = 0;
+    let value2 = 0;
+    while (digits < count || !exact) {
+      let ch = text.charCodeAt(pos);
+      if (ch >= 48 && ch <= 57) {
+        value2 = value2 * 16 + ch - 48;
+      } else if (ch >= 65 && ch <= 70) {
+        value2 = value2 * 16 + ch - 65 + 10;
+      } else if (ch >= 97 && ch <= 102) {
+        value2 = value2 * 16 + ch - 97 + 10;
+      } else {
+        break;
+      }
+      pos++;
+      digits++;
+    }
+    if (digits < count) {
+      value2 = -1;
+    }
+    return value2;
+  }
+  function setPosition(newPosition) {
+    pos = newPosition;
+    value = "";
+    tokenOffset = 0;
+    token = 16;
+    scanError = 0;
+  }
+  function scanNumber() {
+    let start = pos;
+    if (text.charCodeAt(pos) === 48) {
+      pos++;
+    } else {
+      pos++;
+      while (pos < text.length && isDigit(text.charCodeAt(pos))) {
+        pos++;
+      }
+    }
+    if (pos < text.length && text.charCodeAt(pos) === 46) {
+      pos++;
+      if (pos < text.length && isDigit(text.charCodeAt(pos))) {
+        pos++;
+        while (pos < text.length && isDigit(text.charCodeAt(pos))) {
+          pos++;
+        }
+      } else {
+        scanError = 3;
+        return text.substring(start, pos);
+      }
+    }
+    let end = pos;
+    if (pos < text.length && (text.charCodeAt(pos) === 69 || text.charCodeAt(pos) === 101)) {
+      pos++;
+      if (pos < text.length && text.charCodeAt(pos) === 43 || text.charCodeAt(pos) === 45) {
+        pos++;
+      }
+      if (pos < text.length && isDigit(text.charCodeAt(pos))) {
+        pos++;
+        while (pos < text.length && isDigit(text.charCodeAt(pos))) {
+          pos++;
+        }
+        end = pos;
+      } else {
+        scanError = 3;
+      }
+    }
+    return text.substring(start, end);
+  }
+  function scanString() {
+    let result = "", start = pos;
+    while (true) {
+      if (pos >= len) {
+        result += text.substring(start, pos);
+        scanError = 2;
+        break;
+      }
+      const ch = text.charCodeAt(pos);
+      if (ch === 34) {
+        result += text.substring(start, pos);
+        pos++;
+        break;
+      }
+      if (ch === 92) {
+        result += text.substring(start, pos);
+        pos++;
+        if (pos >= len) {
+          scanError = 2;
+          break;
+        }
+        const ch2 = text.charCodeAt(pos++);
+        switch (ch2) {
+          case 34:
+            result += '"';
+            break;
+          case 92:
+            result += "\\";
+            break;
+          case 47:
+            result += "/";
+            break;
+          case 98:
+            result += "\b";
+            break;
+          case 102:
+            result += "\f";
+            break;
+          case 110:
+            result += `
+`;
+            break;
+          case 114:
+            result += "\r";
+            break;
+          case 116:
+            result += "\t";
+            break;
+          case 117:
+            const ch3 = scanHexDigits(4, true);
+            if (ch3 >= 0) {
+              result += String.fromCharCode(ch3);
+            } else {
+              scanError = 4;
+            }
+            break;
+          default:
+            scanError = 5;
+        }
+        start = pos;
+        continue;
+      }
+      if (ch >= 0 && ch <= 31) {
+        if (isLineBreak(ch)) {
+          result += text.substring(start, pos);
+          scanError = 2;
+          break;
+        } else {
+          scanError = 6;
+        }
+      }
+      pos++;
+    }
+    return result;
+  }
+  function scanNext() {
+    value = "";
+    scanError = 0;
+    tokenOffset = pos;
+    lineStartOffset = lineNumber;
+    prevTokenLineStartOffset = tokenLineStartOffset;
+    if (pos >= len) {
+      tokenOffset = len;
+      return token = 17;
+    }
+    let code = text.charCodeAt(pos);
+    if (isWhiteSpace(code)) {
+      do {
+        pos++;
+        value += String.fromCharCode(code);
+        code = text.charCodeAt(pos);
+      } while (isWhiteSpace(code));
+      return token = 15;
+    }
+    if (isLineBreak(code)) {
+      pos++;
+      value += String.fromCharCode(code);
+      if (code === 13 && text.charCodeAt(pos) === 10) {
+        pos++;
+        value += `
+`;
+      }
+      lineNumber++;
+      tokenLineStartOffset = pos;
+      return token = 14;
+    }
+    switch (code) {
+      case 123:
+        pos++;
+        return token = 1;
+      case 125:
+        pos++;
+        return token = 2;
+      case 91:
+        pos++;
+        return token = 3;
+      case 93:
+        pos++;
+        return token = 4;
+      case 58:
+        pos++;
+        return token = 6;
+      case 44:
+        pos++;
+        return token = 5;
+      case 34:
+        pos++;
+        value = scanString();
+        return token = 10;
+      case 47:
+        const start = pos - 1;
+        if (text.charCodeAt(pos + 1) === 47) {
+          pos += 2;
+          while (pos < len) {
+            if (isLineBreak(text.charCodeAt(pos))) {
+              break;
+            }
+            pos++;
+          }
+          value = text.substring(start, pos);
+          return token = 12;
+        }
+        if (text.charCodeAt(pos + 1) === 42) {
+          pos += 2;
+          const safeLength = len - 1;
+          let commentClosed = false;
+          while (pos < safeLength) {
+            const ch = text.charCodeAt(pos);
+            if (ch === 42 && text.charCodeAt(pos + 1) === 47) {
+              pos += 2;
+              commentClosed = true;
+              break;
+            }
+            pos++;
+            if (isLineBreak(ch)) {
+              if (ch === 13 && text.charCodeAt(pos) === 10) {
+                pos++;
+              }
+              lineNumber++;
+              tokenLineStartOffset = pos;
+            }
+          }
+          if (!commentClosed) {
+            pos++;
+            scanError = 1;
+          }
+          value = text.substring(start, pos);
+          return token = 13;
+        }
+        value += String.fromCharCode(code);
+        pos++;
+        return token = 16;
+      case 45:
+        value += String.fromCharCode(code);
+        pos++;
+        if (pos === len || !isDigit(text.charCodeAt(pos))) {
+          return token = 16;
+        }
+      case 48:
+      case 49:
+      case 50:
+      case 51:
+      case 52:
+      case 53:
+      case 54:
+      case 55:
+      case 56:
+      case 57:
+        value += scanNumber();
+        return token = 11;
+      default:
+        while (pos < len && isUnknownContentCharacter(code)) {
+          pos++;
+          code = text.charCodeAt(pos);
+        }
+        if (tokenOffset !== pos) {
+          value = text.substring(tokenOffset, pos);
+          switch (value) {
+            case "true":
+              return token = 8;
+            case "false":
+              return token = 9;
+            case "null":
+              return token = 7;
+          }
+          return token = 16;
+        }
+        value += String.fromCharCode(code);
+        pos++;
+        return token = 16;
+    }
+  }
+  function isUnknownContentCharacter(code) {
+    if (isWhiteSpace(code) || isLineBreak(code)) {
+      return false;
+    }
+    switch (code) {
+      case 125:
+      case 93:
+      case 123:
+      case 91:
+      case 34:
+      case 58:
+      case 44:
+      case 47:
+        return false;
+    }
+    return true;
+  }
+  function scanNextNonTrivia() {
+    let result;
+    do {
+      result = scanNext();
+    } while (result >= 12 && result <= 15);
+    return result;
+  }
+  return {
+    setPosition,
+    getPosition: () => pos,
+    scan: ignoreTrivia ? scanNextNonTrivia : scanNext,
+    getToken: () => token,
+    getTokenValue: () => value,
+    getTokenOffset: () => tokenOffset,
+    getTokenLength: () => pos - tokenOffset,
+    getTokenStartLine: () => lineStartOffset,
+    getTokenStartCharacter: () => tokenOffset - prevTokenLineStartOffset,
+    getTokenError: () => scanError
+  };
+}
+function isWhiteSpace(ch) {
+  return ch === 32 || ch === 9;
+}
+function isLineBreak(ch) {
+  return ch === 10 || ch === 13;
+}
+function isDigit(ch) {
+  return ch >= 48 && ch <= 57;
+}
+var CharacterCodes;
+(function(CharacterCodes2) {
+  CharacterCodes2[CharacterCodes2["lineFeed"] = 10] = "lineFeed";
+  CharacterCodes2[CharacterCodes2["carriageReturn"] = 13] = "carriageReturn";
+  CharacterCodes2[CharacterCodes2["space"] = 32] = "space";
+  CharacterCodes2[CharacterCodes2["_0"] = 48] = "_0";
+  CharacterCodes2[CharacterCodes2["_1"] = 49] = "_1";
+  CharacterCodes2[CharacterCodes2["_2"] = 50] = "_2";
+  CharacterCodes2[CharacterCodes2["_3"] = 51] = "_3";
+  CharacterCodes2[CharacterCodes2["_4"] = 52] = "_4";
+  CharacterCodes2[CharacterCodes2["_5"] = 53] = "_5";
+  CharacterCodes2[CharacterCodes2["_6"] = 54] = "_6";
+  CharacterCodes2[CharacterCodes2["_7"] = 55] = "_7";
+  CharacterCodes2[CharacterCodes2["_8"] = 56] = "_8";
+  CharacterCodes2[CharacterCodes2["_9"] = 57] = "_9";
+  CharacterCodes2[CharacterCodes2["a"] = 97] = "a";
+  CharacterCodes2[CharacterCodes2["b"] = 98] = "b";
+  CharacterCodes2[CharacterCodes2["c"] = 99] = "c";
+  CharacterCodes2[CharacterCodes2["d"] = 100] = "d";
+  CharacterCodes2[CharacterCodes2["e"] = 101] = "e";
+  CharacterCodes2[CharacterCodes2["f"] = 102] = "f";
+  CharacterCodes2[CharacterCodes2["g"] = 103] = "g";
+  CharacterCodes2[CharacterCodes2["h"] = 104] = "h";
+  CharacterCodes2[CharacterCodes2["i"] = 105] = "i";
+  CharacterCodes2[CharacterCodes2["j"] = 106] = "j";
+  CharacterCodes2[CharacterCodes2["k"] = 107] = "k";
+  CharacterCodes2[CharacterCodes2["l"] = 108] = "l";
+  CharacterCodes2[CharacterCodes2["m"] = 109] = "m";
+  CharacterCodes2[CharacterCodes2["n"] = 110] = "n";
+  CharacterCodes2[CharacterCodes2["o"] = 111] = "o";
+  CharacterCodes2[CharacterCodes2["p"] = 112] = "p";
+  CharacterCodes2[CharacterCodes2["q"] = 113] = "q";
+  CharacterCodes2[CharacterCodes2["r"] = 114] = "r";
+  CharacterCodes2[CharacterCodes2["s"] = 115] = "s";
+  CharacterCodes2[CharacterCodes2["t"] = 116] = "t";
+  CharacterCodes2[CharacterCodes2["u"] = 117] = "u";
+  CharacterCodes2[CharacterCodes2["v"] = 118] = "v";
+  CharacterCodes2[CharacterCodes2["w"] = 119] = "w";
+  CharacterCodes2[CharacterCodes2["x"] = 120] = "x";
+  CharacterCodes2[CharacterCodes2["y"] = 121] = "y";
+  CharacterCodes2[CharacterCodes2["z"] = 122] = "z";
+  CharacterCodes2[CharacterCodes2["A"] = 65] = "A";
+  CharacterCodes2[CharacterCodes2["B"] = 66] = "B";
+  CharacterCodes2[CharacterCodes2["C"] = 67] = "C";
+  CharacterCodes2[CharacterCodes2["D"] = 68] = "D";
+  CharacterCodes2[CharacterCodes2["E"] = 69] = "E";
+  CharacterCodes2[CharacterCodes2["F"] = 70] = "F";
+  CharacterCodes2[CharacterCodes2["G"] = 71] = "G";
+  CharacterCodes2[CharacterCodes2["H"] = 72] = "H";
+  CharacterCodes2[CharacterCodes2["I"] = 73] = "I";
+  CharacterCodes2[CharacterCodes2["J"] = 74] = "J";
+  CharacterCodes2[CharacterCodes2["K"] = 75] = "K";
+  CharacterCodes2[CharacterCodes2["L"] = 76] = "L";
+  CharacterCodes2[CharacterCodes2["M"] = 77] = "M";
+  CharacterCodes2[CharacterCodes2["N"] = 78] = "N";
+  CharacterCodes2[CharacterCodes2["O"] = 79] = "O";
+  CharacterCodes2[CharacterCodes2["P"] = 80] = "P";
+  CharacterCodes2[CharacterCodes2["Q"] = 81] = "Q";
+  CharacterCodes2[CharacterCodes2["R"] = 82] = "R";
+  CharacterCodes2[CharacterCodes2["S"] = 83] = "S";
+  CharacterCodes2[CharacterCodes2["T"] = 84] = "T";
+  CharacterCodes2[CharacterCodes2["U"] = 85] = "U";
+  CharacterCodes2[CharacterCodes2["V"] = 86] = "V";
+  CharacterCodes2[CharacterCodes2["W"] = 87] = "W";
+  CharacterCodes2[CharacterCodes2["X"] = 88] = "X";
+  CharacterCodes2[CharacterCodes2["Y"] = 89] = "Y";
+  CharacterCodes2[CharacterCodes2["Z"] = 90] = "Z";
+  CharacterCodes2[CharacterCodes2["asterisk"] = 42] = "asterisk";
+  CharacterCodes2[CharacterCodes2["backslash"] = 92] = "backslash";
+  CharacterCodes2[CharacterCodes2["closeBrace"] = 125] = "closeBrace";
+  CharacterCodes2[CharacterCodes2["closeBracket"] = 93] = "closeBracket";
+  CharacterCodes2[CharacterCodes2["colon"] = 58] = "colon";
+  CharacterCodes2[CharacterCodes2["comma"] = 44] = "comma";
+  CharacterCodes2[CharacterCodes2["dot"] = 46] = "dot";
+  CharacterCodes2[CharacterCodes2["doubleQuote"] = 34] = "doubleQuote";
+  CharacterCodes2[CharacterCodes2["minus"] = 45] = "minus";
+  CharacterCodes2[CharacterCodes2["openBrace"] = 123] = "openBrace";
+  CharacterCodes2[CharacterCodes2["openBracket"] = 91] = "openBracket";
+  CharacterCodes2[CharacterCodes2["plus"] = 43] = "plus";
+  CharacterCodes2[CharacterCodes2["slash"] = 47] = "slash";
+  CharacterCodes2[CharacterCodes2["formFeed"] = 12] = "formFeed";
+  CharacterCodes2[CharacterCodes2["tab"] = 9] = "tab";
+})(CharacterCodes || (CharacterCodes = {}));
+
+// node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/string-intern.js
+var cachedSpaces = new Array(20).fill(0).map((_, index) => {
+  return " ".repeat(index);
+});
+var maxCachedValues = 200;
+var cachedBreakLinesWithSpaces = {
+  " ": {
+    "\n": new Array(maxCachedValues).fill(0).map((_, index) => {
+      return `
+` + " ".repeat(index);
+    }),
+    "\r": new Array(maxCachedValues).fill(0).map((_, index) => {
+      return "\r" + " ".repeat(index);
+    }),
+    "\r\n": new Array(maxCachedValues).fill(0).map((_, index) => {
+      return `\r
+` + " ".repeat(index);
+    })
+  },
+  "\t": {
+    "\n": new Array(maxCachedValues).fill(0).map((_, index) => {
+      return `
+` + "\t".repeat(index);
+    }),
+    "\r": new Array(maxCachedValues).fill(0).map((_, index) => {
+      return "\r" + "\t".repeat(index);
+    }),
+    "\r\n": new Array(maxCachedValues).fill(0).map((_, index) => {
+      return `\r
+` + "\t".repeat(index);
+    })
+  }
+};
+var supportedEols = [`
+`, "\r", `\r
+`];
+
+// node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/format.js
+function format(documentText, range, options) {
+  let initialIndentLevel;
+  let formatText;
+  let formatTextStart;
+  let rangeStart;
+  let rangeEnd;
+  if (range) {
+    rangeStart = range.offset;
+    rangeEnd = rangeStart + range.length;
+    formatTextStart = rangeStart;
+    while (formatTextStart > 0 && !isEOL(documentText, formatTextStart - 1)) {
+      formatTextStart--;
+    }
+    let endOffset = rangeEnd;
+    while (endOffset < documentText.length && !isEOL(documentText, endOffset)) {
+      endOffset++;
+    }
+    formatText = documentText.substring(formatTextStart, endOffset);
+    initialIndentLevel = computeIndentLevel(formatText, options);
+  } else {
+    formatText = documentText;
+    initialIndentLevel = 0;
+    formatTextStart = 0;
+    rangeStart = 0;
+    rangeEnd = documentText.length;
+  }
+  const eol = getEOL(options, documentText);
+  const eolFastPathSupported = supportedEols.includes(eol);
+  let numberLineBreaks = 0;
+  let indentLevel = 0;
+  let indentValue;
+  if (options.insertSpaces) {
+    indentValue = cachedSpaces[options.tabSize || 4] ?? repeat(cachedSpaces[1], options.tabSize || 4);
+  } else {
+    indentValue = "\t";
+  }
+  const indentType = indentValue === "\t" ? "\t" : " ";
+  let scanner = createScanner(formatText, false);
+  let hasError = false;
+  function newLinesAndIndent() {
+    if (numberLineBreaks > 1) {
+      return repeat(eol, numberLineBreaks) + repeat(indentValue, initialIndentLevel + indentLevel);
+    }
+    const amountOfSpaces = indentValue.length * (initialIndentLevel + indentLevel);
+    if (!eolFastPathSupported || amountOfSpaces > cachedBreakLinesWithSpaces[indentType][eol].length) {
+      return eol + repeat(indentValue, initialIndentLevel + indentLevel);
+    }
+    if (amountOfSpaces <= 0) {
+      return eol;
+    }
+    return cachedBreakLinesWithSpaces[indentType][eol][amountOfSpaces];
+  }
+  function scanNext() {
+    let token = scanner.scan();
+    numberLineBreaks = 0;
+    while (token === 15 || token === 14) {
+      if (token === 14 && options.keepLines) {
+        numberLineBreaks += 1;
+      } else if (token === 14) {
+        numberLineBreaks = 1;
+      }
+      token = scanner.scan();
+    }
+    hasError = token === 16 || scanner.getTokenError() !== 0;
+    return token;
+  }
+  const editOperations = [];
+  function addEdit(text, startOffset, endOffset) {
+    if (!hasError && (!range || startOffset < rangeEnd && endOffset > rangeStart) && documentText.substring(startOffset, endOffset) !== text) {
+      editOperations.push({ offset: startOffset, length: endOffset - startOffset, content: text });
+    }
+  }
+  let firstToken = scanNext();
+  if (options.keepLines && numberLineBreaks > 0) {
+    addEdit(repeat(eol, numberLineBreaks), 0, 0);
+  }
+  if (firstToken !== 17) {
+    let firstTokenStart = scanner.getTokenOffset() + formatTextStart;
+    let initialIndent = indentValue.length * initialIndentLevel < 20 && options.insertSpaces ? cachedSpaces[indentValue.length * initialIndentLevel] : repeat(indentValue, initialIndentLevel);
+    addEdit(initialIndent, formatTextStart, firstTokenStart);
+  }
+  while (firstToken !== 17) {
+    let firstTokenEnd = scanner.getTokenOffset() + scanner.getTokenLength() + formatTextStart;
+    let secondToken = scanNext();
+    let replaceContent = "";
+    let needsLineBreak = false;
+    while (numberLineBreaks === 0 && (secondToken === 12 || secondToken === 13)) {
+      let commentTokenStart = scanner.getTokenOffset() + formatTextStart;
+      addEdit(cachedSpaces[1], firstTokenEnd, commentTokenStart);
+      firstTokenEnd = scanner.getTokenOffset() + scanner.getTokenLength() + formatTextStart;
+      needsLineBreak = secondToken === 12;
+      replaceContent = needsLineBreak ? newLinesAndIndent() : "";
+      secondToken = scanNext();
+    }
+    if (secondToken === 2) {
+      if (firstToken !== 1) {
+        indentLevel--;
+      }
+      if (options.keepLines && numberLineBreaks > 0 || !options.keepLines && firstToken !== 1) {
+        replaceContent = newLinesAndIndent();
+      } else if (options.keepLines) {
+        replaceContent = cachedSpaces[1];
+      }
+    } else if (secondToken === 4) {
+      if (firstToken !== 3) {
+        indentLevel--;
+      }
+      if (options.keepLines && numberLineBreaks > 0 || !options.keepLines && firstToken !== 3) {
+        replaceContent = newLinesAndIndent();
+      } else if (options.keepLines) {
+        replaceContent = cachedSpaces[1];
+      }
+    } else {
+      switch (firstToken) {
+        case 3:
+        case 1:
+          indentLevel++;
+          if (options.keepLines && numberLineBreaks > 0 || !options.keepLines) {
+            replaceContent = newLinesAndIndent();
+          } else {
+            replaceContent = cachedSpaces[1];
+          }
+          break;
+        case 5:
+          if (options.keepLines && numberLineBreaks > 0 || !options.keepLines) {
+            replaceContent = newLinesAndIndent();
+          } else {
+            replaceContent = cachedSpaces[1];
+          }
+          break;
+        case 12:
+          replaceContent = newLinesAndIndent();
+          break;
+        case 13:
+          if (numberLineBreaks > 0) {
+            replaceContent = newLinesAndIndent();
+          } else if (!needsLineBreak) {
+            replaceContent = cachedSpaces[1];
+          }
+          break;
+        case 6:
+          if (options.keepLines && numberLineBreaks > 0) {
+            replaceContent = newLinesAndIndent();
+          } else if (!needsLineBreak) {
+            replaceContent = cachedSpaces[1];
+          }
+          break;
+        case 10:
+          if (options.keepLines && numberLineBreaks > 0) {
+            replaceContent = newLinesAndIndent();
+          } else if (secondToken === 6 && !needsLineBreak) {
+            replaceContent = "";
+          }
+          break;
+        case 7:
+        case 8:
+        case 9:
+        case 11:
+        case 2:
+        case 4:
+          if (options.keepLines && numberLineBreaks > 0) {
+            replaceContent = newLinesAndIndent();
+          } else {
+            if ((secondToken === 12 || secondToken === 13) && !needsLineBreak) {
+              replaceContent = cachedSpaces[1];
+            } else if (secondToken !== 5 && secondToken !== 17) {
+              hasError = true;
+            }
+          }
+          break;
+        case 16:
+          hasError = true;
+          break;
+      }
+      if (numberLineBreaks > 0 && (secondToken === 12 || secondToken === 13)) {
+        replaceContent = newLinesAndIndent();
+      }
+    }
+    if (secondToken === 17) {
+      if (options.keepLines && numberLineBreaks > 0) {
+        replaceContent = newLinesAndIndent();
+      } else {
+        replaceContent = options.insertFinalNewline ? eol : "";
+      }
+    }
+    const secondTokenStart = scanner.getTokenOffset() + formatTextStart;
+    addEdit(replaceContent, firstTokenEnd, secondTokenStart);
+    firstToken = secondToken;
+  }
+  return editOperations;
+}
+function repeat(s, count) {
+  let result = "";
+  for (let i = 0;i < count; i++) {
+    result += s;
+  }
+  return result;
+}
+function computeIndentLevel(content, options) {
+  let i = 0;
+  let nChars = 0;
+  const tabSize = options.tabSize || 4;
+  while (i < content.length) {
+    let ch = content.charAt(i);
+    if (ch === cachedSpaces[1]) {
+      nChars++;
+    } else if (ch === "\t") {
+      nChars += tabSize;
+    } else {
+      break;
+    }
+    i++;
+  }
+  return Math.floor(nChars / tabSize);
+}
+function getEOL(options, text) {
+  for (let i = 0;i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (ch === "\r") {
+      if (i + 1 < text.length && text.charAt(i + 1) === `
+`) {
+        return `\r
+`;
+      }
+      return "\r";
+    } else if (ch === `
+`) {
+      return `
+`;
+    }
+  }
+  return options && options.eol || `
+`;
+}
+function isEOL(text, offset) {
+  return `\r
+`.indexOf(text.charAt(offset)) !== -1;
+}
+
+// node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/parser.js
+var ParseOptions;
+(function(ParseOptions2) {
+  ParseOptions2.DEFAULT = {
+    allowTrailingComma: false
+  };
+})(ParseOptions || (ParseOptions = {}));
+function parse(text, errors = [], options = ParseOptions.DEFAULT) {
+  let currentProperty = null;
+  let currentParent = [];
+  const previousParents = [];
+  function onValue(value) {
+    if (Array.isArray(currentParent)) {
+      currentParent.push(value);
+    } else if (currentProperty !== null) {
+      currentParent[currentProperty] = value;
+    }
+  }
+  const visitor = {
+    onObjectBegin: () => {
+      const object = {};
+      onValue(object);
+      previousParents.push(currentParent);
+      currentParent = object;
+      currentProperty = null;
+    },
+    onObjectProperty: (name) => {
+      currentProperty = name;
+    },
+    onObjectEnd: () => {
+      currentParent = previousParents.pop();
+    },
+    onArrayBegin: () => {
+      const array = [];
+      onValue(array);
+      previousParents.push(currentParent);
+      currentParent = array;
+      currentProperty = null;
+    },
+    onArrayEnd: () => {
+      currentParent = previousParents.pop();
+    },
+    onLiteralValue: onValue,
+    onError: (error, offset, length) => {
+      errors.push({ error, offset, length });
+    }
+  };
+  visit(text, visitor, options);
+  return currentParent[0];
+}
+function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
+  let currentParent = { type: "array", offset: -1, length: -1, children: [], parent: undefined };
+  function ensurePropertyComplete(endOffset) {
+    if (currentParent.type === "property") {
+      currentParent.length = endOffset - currentParent.offset;
+      currentParent = currentParent.parent;
+    }
+  }
+  function onValue(valueNode) {
+    currentParent.children.push(valueNode);
+    return valueNode;
+  }
+  const visitor = {
+    onObjectBegin: (offset) => {
+      currentParent = onValue({ type: "object", offset, length: -1, parent: currentParent, children: [] });
+    },
+    onObjectProperty: (name, offset, length) => {
+      currentParent = onValue({ type: "property", offset, length: -1, parent: currentParent, children: [] });
+      currentParent.children.push({ type: "string", value: name, offset, length, parent: currentParent });
+    },
+    onObjectEnd: (offset, length) => {
+      ensurePropertyComplete(offset + length);
+      currentParent.length = offset + length - currentParent.offset;
+      currentParent = currentParent.parent;
+      ensurePropertyComplete(offset + length);
+    },
+    onArrayBegin: (offset, length) => {
+      currentParent = onValue({ type: "array", offset, length: -1, parent: currentParent, children: [] });
+    },
+    onArrayEnd: (offset, length) => {
+      currentParent.length = offset + length - currentParent.offset;
+      currentParent = currentParent.parent;
+      ensurePropertyComplete(offset + length);
+    },
+    onLiteralValue: (value, offset, length) => {
+      onValue({ type: getNodeType(value), offset, length, parent: currentParent, value });
+      ensurePropertyComplete(offset + length);
+    },
+    onSeparator: (sep, offset, length) => {
+      if (currentParent.type === "property") {
+        if (sep === ":") {
+          currentParent.colonOffset = offset;
+        } else if (sep === ",") {
+          ensurePropertyComplete(offset);
+        }
+      }
+    },
+    onError: (error, offset, length) => {
+      errors.push({ error, offset, length });
+    }
+  };
+  visit(text, visitor, options);
+  const result = currentParent.children[0];
+  if (result) {
+    delete result.parent;
+  }
+  return result;
+}
+function findNodeAtLocation(root, path13) {
+  if (!root) {
+    return;
+  }
+  let node = root;
+  for (let segment of path13) {
+    if (typeof segment === "string") {
+      if (node.type !== "object" || !Array.isArray(node.children)) {
+        return;
+      }
+      let found = false;
+      for (const propertyNode of node.children) {
+        if (Array.isArray(propertyNode.children) && propertyNode.children[0].value === segment && propertyNode.children.length === 2) {
+          node = propertyNode.children[1];
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        return;
+      }
+    } else {
+      const index = segment;
+      if (node.type !== "array" || index < 0 || !Array.isArray(node.children) || index >= node.children.length) {
+        return;
+      }
+      node = node.children[index];
+    }
+  }
+  return node;
+}
+function visit(text, visitor, options = ParseOptions.DEFAULT) {
+  const _scanner = createScanner(text, false);
+  const _jsonPath = [];
+  let suppressedCallbacks = 0;
+  function toNoArgVisit(visitFunction) {
+    return visitFunction ? () => suppressedCallbacks === 0 && visitFunction(_scanner.getTokenOffset(), _scanner.getTokenLength(), _scanner.getTokenStartLine(), _scanner.getTokenStartCharacter()) : () => true;
+  }
+  function toOneArgVisit(visitFunction) {
+    return visitFunction ? (arg) => suppressedCallbacks === 0 && visitFunction(arg, _scanner.getTokenOffset(), _scanner.getTokenLength(), _scanner.getTokenStartLine(), _scanner.getTokenStartCharacter()) : () => true;
+  }
+  function toOneArgVisitWithPath(visitFunction) {
+    return visitFunction ? (arg) => suppressedCallbacks === 0 && visitFunction(arg, _scanner.getTokenOffset(), _scanner.getTokenLength(), _scanner.getTokenStartLine(), _scanner.getTokenStartCharacter(), () => _jsonPath.slice()) : () => true;
+  }
+  function toBeginVisit(visitFunction) {
+    return visitFunction ? () => {
+      if (suppressedCallbacks > 0) {
+        suppressedCallbacks++;
+      } else {
+        let cbReturn = visitFunction(_scanner.getTokenOffset(), _scanner.getTokenLength(), _scanner.getTokenStartLine(), _scanner.getTokenStartCharacter(), () => _jsonPath.slice());
+        if (cbReturn === false) {
+          suppressedCallbacks = 1;
+        }
+      }
+    } : () => true;
+  }
+  function toEndVisit(visitFunction) {
+    return visitFunction ? () => {
+      if (suppressedCallbacks > 0) {
+        suppressedCallbacks--;
+      }
+      if (suppressedCallbacks === 0) {
+        visitFunction(_scanner.getTokenOffset(), _scanner.getTokenLength(), _scanner.getTokenStartLine(), _scanner.getTokenStartCharacter());
+      }
+    } : () => true;
+  }
+  const onObjectBegin = toBeginVisit(visitor.onObjectBegin), onObjectProperty = toOneArgVisitWithPath(visitor.onObjectProperty), onObjectEnd = toEndVisit(visitor.onObjectEnd), onArrayBegin = toBeginVisit(visitor.onArrayBegin), onArrayEnd = toEndVisit(visitor.onArrayEnd), onLiteralValue = toOneArgVisitWithPath(visitor.onLiteralValue), onSeparator = toOneArgVisit(visitor.onSeparator), onComment = toNoArgVisit(visitor.onComment), onError = toOneArgVisit(visitor.onError);
+  const disallowComments = options && options.disallowComments;
+  const allowTrailingComma = options && options.allowTrailingComma;
+  function scanNext() {
+    while (true) {
+      const token = _scanner.scan();
+      switch (_scanner.getTokenError()) {
+        case 4:
+          handleError(14);
+          break;
+        case 5:
+          handleError(15);
+          break;
+        case 3:
+          handleError(13);
+          break;
+        case 1:
+          if (!disallowComments) {
+            handleError(11);
+          }
+          break;
+        case 2:
+          handleError(12);
+          break;
+        case 6:
+          handleError(16);
+          break;
+      }
+      switch (token) {
+        case 12:
+        case 13:
+          if (disallowComments) {
+            handleError(10);
+          } else {
+            onComment();
+          }
+          break;
+        case 16:
+          handleError(1);
+          break;
+        case 15:
+        case 14:
+          break;
+        default:
+          return token;
+      }
+    }
+  }
+  function handleError(error, skipUntilAfter = [], skipUntil = []) {
+    onError(error);
+    if (skipUntilAfter.length + skipUntil.length > 0) {
+      let token = _scanner.getToken();
+      while (token !== 17) {
+        if (skipUntilAfter.indexOf(token) !== -1) {
+          scanNext();
+          break;
+        } else if (skipUntil.indexOf(token) !== -1) {
+          break;
+        }
+        token = scanNext();
+      }
+    }
+  }
+  function parseString(isValue) {
+    const value = _scanner.getTokenValue();
+    if (isValue) {
+      onLiteralValue(value);
+    } else {
+      onObjectProperty(value);
+      _jsonPath.push(value);
+    }
+    scanNext();
+    return true;
+  }
+  function parseLiteral() {
+    switch (_scanner.getToken()) {
+      case 11:
+        const tokenValue = _scanner.getTokenValue();
+        let value = Number(tokenValue);
+        if (isNaN(value)) {
+          handleError(2);
+          value = 0;
+        }
+        onLiteralValue(value);
+        break;
+      case 7:
+        onLiteralValue(null);
+        break;
+      case 8:
+        onLiteralValue(true);
+        break;
+      case 9:
+        onLiteralValue(false);
+        break;
+      default:
+        return false;
+    }
+    scanNext();
+    return true;
+  }
+  function parseProperty() {
+    if (_scanner.getToken() !== 10) {
+      handleError(3, [], [2, 5]);
+      return false;
+    }
+    parseString(false);
+    if (_scanner.getToken() === 6) {
+      onSeparator(":");
+      scanNext();
+      if (!parseValue()) {
+        handleError(4, [], [2, 5]);
+      }
+    } else {
+      handleError(5, [], [2, 5]);
+    }
+    _jsonPath.pop();
+    return true;
+  }
+  function parseObject() {
+    onObjectBegin();
+    scanNext();
+    let needsComma = false;
+    while (_scanner.getToken() !== 2 && _scanner.getToken() !== 17) {
+      if (_scanner.getToken() === 5) {
+        if (!needsComma) {
+          handleError(4, [], []);
+        }
+        onSeparator(",");
+        scanNext();
+        if (_scanner.getToken() === 2 && allowTrailingComma) {
+          break;
+        }
+      } else if (needsComma) {
+        handleError(6, [], []);
+      }
+      if (!parseProperty()) {
+        handleError(4, [], [2, 5]);
+      }
+      needsComma = true;
+    }
+    onObjectEnd();
+    if (_scanner.getToken() !== 2) {
+      handleError(7, [2], []);
+    } else {
+      scanNext();
+    }
+    return true;
+  }
+  function parseArray() {
+    onArrayBegin();
+    scanNext();
+    let isFirstElement = true;
+    let needsComma = false;
+    while (_scanner.getToken() !== 4 && _scanner.getToken() !== 17) {
+      if (_scanner.getToken() === 5) {
+        if (!needsComma) {
+          handleError(4, [], []);
+        }
+        onSeparator(",");
+        scanNext();
+        if (_scanner.getToken() === 4 && allowTrailingComma) {
+          break;
+        }
+      } else if (needsComma) {
+        handleError(6, [], []);
+      }
+      if (isFirstElement) {
+        _jsonPath.push(0);
+        isFirstElement = false;
+      } else {
+        _jsonPath[_jsonPath.length - 1]++;
+      }
+      if (!parseValue()) {
+        handleError(4, [], [4, 5]);
+      }
+      needsComma = true;
+    }
+    onArrayEnd();
+    if (!isFirstElement) {
+      _jsonPath.pop();
+    }
+    if (_scanner.getToken() !== 4) {
+      handleError(8, [4], []);
+    } else {
+      scanNext();
+    }
+    return true;
+  }
+  function parseValue() {
+    switch (_scanner.getToken()) {
+      case 3:
+        return parseArray();
+      case 1:
+        return parseObject();
+      case 10:
+        return parseString(true);
+      default:
+        return parseLiteral();
+    }
+  }
+  scanNext();
+  if (_scanner.getToken() === 17) {
+    if (options.allowEmptyContent) {
+      return true;
+    }
+    handleError(4, [], []);
+    return false;
+  }
+  if (!parseValue()) {
+    handleError(4, [], []);
+    return false;
+  }
+  if (_scanner.getToken() !== 17) {
+    handleError(9, [], []);
+  }
+  return true;
+}
+function getNodeType(value) {
+  switch (typeof value) {
+    case "boolean":
+      return "boolean";
+    case "number":
+      return "number";
+    case "string":
+      return "string";
+    case "object": {
+      if (!value) {
+        return "null";
+      } else if (Array.isArray(value)) {
+        return "array";
+      }
+      return "object";
+    }
+    default:
+      return "null";
+  }
+}
+
+// node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/edit.js
+function setProperty(text, originalPath, value, options) {
+  const path13 = originalPath.slice();
+  const errors = [];
+  const root = parseTree(text, errors);
+  let parent = undefined;
+  let lastSegment = undefined;
+  while (path13.length > 0) {
+    lastSegment = path13.pop();
+    parent = findNodeAtLocation(root, path13);
+    if (parent === undefined && value !== undefined) {
+      if (typeof lastSegment === "string") {
+        value = { [lastSegment]: value };
+      } else {
+        value = [value];
+      }
+    } else {
+      break;
+    }
+  }
+  if (!parent) {
+    if (value === undefined) {
+      throw new Error("Can not delete in empty document");
+    }
+    return withFormatting(text, { offset: root ? root.offset : 0, length: root ? root.length : 0, content: JSON.stringify(value) }, options);
+  } else if (parent.type === "object" && typeof lastSegment === "string" && Array.isArray(parent.children)) {
+    const existing = findNodeAtLocation(parent, [lastSegment]);
+    if (existing !== undefined) {
+      if (value === undefined) {
+        if (!existing.parent) {
+          throw new Error("Malformed AST");
+        }
+        const propertyIndex = parent.children.indexOf(existing.parent);
+        let removeBegin;
+        let removeEnd = existing.parent.offset + existing.parent.length;
+        if (propertyIndex > 0) {
+          let previous = parent.children[propertyIndex - 1];
+          removeBegin = previous.offset + previous.length;
+        } else {
+          removeBegin = parent.offset + 1;
+          if (parent.children.length > 1) {
+            let next = parent.children[1];
+            removeEnd = next.offset;
+          }
+        }
+        return withFormatting(text, { offset: removeBegin, length: removeEnd - removeBegin, content: "" }, options);
+      } else {
+        return withFormatting(text, { offset: existing.offset, length: existing.length, content: JSON.stringify(value) }, options);
+      }
+    } else {
+      if (value === undefined) {
+        return [];
+      }
+      const newProperty = `${JSON.stringify(lastSegment)}: ${JSON.stringify(value)}`;
+      const index = options.getInsertionIndex ? options.getInsertionIndex(parent.children.map((p) => p.children[0].value)) : parent.children.length;
+      let edit;
+      if (index > 0) {
+        let previous = parent.children[index - 1];
+        edit = { offset: previous.offset + previous.length, length: 0, content: "," + newProperty };
+      } else if (parent.children.length === 0) {
+        edit = { offset: parent.offset + 1, length: 0, content: newProperty };
+      } else {
+        edit = { offset: parent.offset + 1, length: 0, content: newProperty + "," };
+      }
+      return withFormatting(text, edit, options);
+    }
+  } else if (parent.type === "array" && typeof lastSegment === "number" && Array.isArray(parent.children)) {
+    const insertIndex = lastSegment;
+    if (insertIndex === -1) {
+      const newProperty = `${JSON.stringify(value)}`;
+      let edit;
+      if (parent.children.length === 0) {
+        edit = { offset: parent.offset + 1, length: 0, content: newProperty };
+      } else {
+        const previous = parent.children[parent.children.length - 1];
+        edit = { offset: previous.offset + previous.length, length: 0, content: "," + newProperty };
+      }
+      return withFormatting(text, edit, options);
+    } else if (value === undefined && parent.children.length >= 0) {
+      const removalIndex = lastSegment;
+      const toRemove = parent.children[removalIndex];
+      let edit;
+      if (parent.children.length === 1) {
+        edit = { offset: parent.offset + 1, length: parent.length - 2, content: "" };
+      } else if (parent.children.length - 1 === removalIndex) {
+        let previous = parent.children[removalIndex - 1];
+        let offset = previous.offset + previous.length;
+        let parentEndOffset = parent.offset + parent.length;
+        edit = { offset, length: parentEndOffset - 2 - offset, content: "" };
+      } else {
+        edit = { offset: toRemove.offset, length: parent.children[removalIndex + 1].offset - toRemove.offset, content: "" };
+      }
+      return withFormatting(text, edit, options);
+    } else if (value !== undefined) {
+      let edit;
+      const newProperty = `${JSON.stringify(value)}`;
+      if (!options.isArrayInsertion && parent.children.length > lastSegment) {
+        const toModify = parent.children[lastSegment];
+        edit = { offset: toModify.offset, length: toModify.length, content: newProperty };
+      } else if (parent.children.length === 0 || lastSegment === 0) {
+        edit = { offset: parent.offset + 1, length: 0, content: parent.children.length === 0 ? newProperty : newProperty + "," };
+      } else {
+        const index = lastSegment > parent.children.length ? parent.children.length : lastSegment;
+        const previous = parent.children[index - 1];
+        edit = { offset: previous.offset + previous.length, length: 0, content: "," + newProperty };
+      }
+      return withFormatting(text, edit, options);
+    } else {
+      throw new Error(`Can not ${value === undefined ? "remove" : options.isArrayInsertion ? "insert" : "modify"} Array index ${insertIndex} as length is not sufficient`);
+    }
+  } else {
+    throw new Error(`Can not add ${typeof lastSegment !== "number" ? "index" : "property"} to parent of type ${parent.type}`);
+  }
+}
+function withFormatting(text, edit, options) {
+  if (!options.formattingOptions) {
+    return [edit];
+  }
+  let newText = applyEdit(text, edit);
+  let begin = edit.offset;
+  let end = edit.offset + edit.content.length;
+  if (edit.length === 0 || edit.content.length === 0) {
+    while (begin > 0 && !isEOL(newText, begin - 1)) {
+      begin--;
+    }
+    while (end < newText.length && !isEOL(newText, end)) {
+      end++;
+    }
+  }
+  const edits = format(newText, { offset: begin, length: end - begin }, { ...options.formattingOptions, keepLines: false });
+  for (let i = edits.length - 1;i >= 0; i--) {
+    const edit2 = edits[i];
+    newText = applyEdit(newText, edit2);
+    begin = Math.min(begin, edit2.offset);
+    end = Math.max(end, edit2.offset + edit2.length);
+    end += edit2.content.length - edit2.length;
+  }
+  const editLength = text.length - (newText.length - end) - begin;
+  return [{ offset: begin, length: editLength, content: newText.substring(begin, end) }];
+}
+function applyEdit(text, edit) {
+  return text.substring(0, edit.offset) + edit.content + text.substring(edit.offset + edit.length);
+}
+
+// node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/main.js
+var ScanError;
+(function(ScanError2) {
+  ScanError2[ScanError2["None"] = 0] = "None";
+  ScanError2[ScanError2["UnexpectedEndOfComment"] = 1] = "UnexpectedEndOfComment";
+  ScanError2[ScanError2["UnexpectedEndOfString"] = 2] = "UnexpectedEndOfString";
+  ScanError2[ScanError2["UnexpectedEndOfNumber"] = 3] = "UnexpectedEndOfNumber";
+  ScanError2[ScanError2["InvalidUnicode"] = 4] = "InvalidUnicode";
+  ScanError2[ScanError2["InvalidEscapeCharacter"] = 5] = "InvalidEscapeCharacter";
+  ScanError2[ScanError2["InvalidCharacter"] = 6] = "InvalidCharacter";
+})(ScanError || (ScanError = {}));
+var SyntaxKind;
+(function(SyntaxKind2) {
+  SyntaxKind2[SyntaxKind2["OpenBraceToken"] = 1] = "OpenBraceToken";
+  SyntaxKind2[SyntaxKind2["CloseBraceToken"] = 2] = "CloseBraceToken";
+  SyntaxKind2[SyntaxKind2["OpenBracketToken"] = 3] = "OpenBracketToken";
+  SyntaxKind2[SyntaxKind2["CloseBracketToken"] = 4] = "CloseBracketToken";
+  SyntaxKind2[SyntaxKind2["CommaToken"] = 5] = "CommaToken";
+  SyntaxKind2[SyntaxKind2["ColonToken"] = 6] = "ColonToken";
+  SyntaxKind2[SyntaxKind2["NullKeyword"] = 7] = "NullKeyword";
+  SyntaxKind2[SyntaxKind2["TrueKeyword"] = 8] = "TrueKeyword";
+  SyntaxKind2[SyntaxKind2["FalseKeyword"] = 9] = "FalseKeyword";
+  SyntaxKind2[SyntaxKind2["StringLiteral"] = 10] = "StringLiteral";
+  SyntaxKind2[SyntaxKind2["NumericLiteral"] = 11] = "NumericLiteral";
+  SyntaxKind2[SyntaxKind2["LineCommentTrivia"] = 12] = "LineCommentTrivia";
+  SyntaxKind2[SyntaxKind2["BlockCommentTrivia"] = 13] = "BlockCommentTrivia";
+  SyntaxKind2[SyntaxKind2["LineBreakTrivia"] = 14] = "LineBreakTrivia";
+  SyntaxKind2[SyntaxKind2["Trivia"] = 15] = "Trivia";
+  SyntaxKind2[SyntaxKind2["Unknown"] = 16] = "Unknown";
+  SyntaxKind2[SyntaxKind2["EOF"] = 17] = "EOF";
+})(SyntaxKind || (SyntaxKind = {}));
+var parse2 = parse;
+var ParseErrorCode;
+(function(ParseErrorCode2) {
+  ParseErrorCode2[ParseErrorCode2["InvalidSymbol"] = 1] = "InvalidSymbol";
+  ParseErrorCode2[ParseErrorCode2["InvalidNumberFormat"] = 2] = "InvalidNumberFormat";
+  ParseErrorCode2[ParseErrorCode2["PropertyNameExpected"] = 3] = "PropertyNameExpected";
+  ParseErrorCode2[ParseErrorCode2["ValueExpected"] = 4] = "ValueExpected";
+  ParseErrorCode2[ParseErrorCode2["ColonExpected"] = 5] = "ColonExpected";
+  ParseErrorCode2[ParseErrorCode2["CommaExpected"] = 6] = "CommaExpected";
+  ParseErrorCode2[ParseErrorCode2["CloseBraceExpected"] = 7] = "CloseBraceExpected";
+  ParseErrorCode2[ParseErrorCode2["CloseBracketExpected"] = 8] = "CloseBracketExpected";
+  ParseErrorCode2[ParseErrorCode2["EndOfFileExpected"] = 9] = "EndOfFileExpected";
+  ParseErrorCode2[ParseErrorCode2["InvalidCommentToken"] = 10] = "InvalidCommentToken";
+  ParseErrorCode2[ParseErrorCode2["UnexpectedEndOfComment"] = 11] = "UnexpectedEndOfComment";
+  ParseErrorCode2[ParseErrorCode2["UnexpectedEndOfString"] = 12] = "UnexpectedEndOfString";
+  ParseErrorCode2[ParseErrorCode2["UnexpectedEndOfNumber"] = 13] = "UnexpectedEndOfNumber";
+  ParseErrorCode2[ParseErrorCode2["InvalidUnicode"] = 14] = "InvalidUnicode";
+  ParseErrorCode2[ParseErrorCode2["InvalidEscapeCharacter"] = 15] = "InvalidEscapeCharacter";
+  ParseErrorCode2[ParseErrorCode2["InvalidCharacter"] = 16] = "InvalidCharacter";
+})(ParseErrorCode || (ParseErrorCode = {}));
+function modify(text, path13, value, options) {
+  return setProperty(text, path13, value, options);
+}
+function applyEdits(text, edits) {
+  let sortedEdits = edits.slice(0).sort((a, b) => {
+    const diff = a.offset - b.offset;
+    if (diff === 0) {
+      return a.length - b.length;
+    }
+    return diff;
+  });
+  let lastModifiedOffset = text.length;
+  for (let i = sortedEdits.length - 1;i >= 0; i--) {
+    let e = sortedEdits[i];
+    if (e.offset + e.length <= lastModifiedOffset) {
+      text = applyEdit(text, e);
+    } else {
+      throw new Error("Overlapping edit");
+    }
+    lastModifiedOffset = e.offset;
+  }
+  return text;
+}
+
+// src/cli/core/backup.ts
+function timestamp() {
+  return new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+}
+
+// src/cli/core/mode.ts
+var MODE_CHANGE_ACTION = "malahor_mode_change";
+function modeName(intervention) {
+  switch (intervention) {
+    case "acompanar":
+      return "asesor";
+    case "guiar":
+      return "asistente";
+    case "ejecutar":
+      return "ejecutor";
+  }
+}
+function parseModeName(value) {
+  switch (value) {
+    case "asesor":
+      return "acompanar";
+    case "asistente":
+      return "guiar";
+    case "ejecutor":
+      return "ejecutar";
+    default:
+      throw new Error("Modo invalido. Usa asesor, asistente o ejecutor.");
+  }
+}
+function previewModeChange(target, env = process.env, cwd = process.cwd()) {
+  const config = loadConfig(env, cwd);
+  if (env.MALAHOR_EXECUTION_INTERVENTION !== undefined) {
+    throw new Error("MALAHOR_EXECUTION_INTERVENTION sobreescribe el archivo: retira el override antes de cambiar el modo persistido.");
+  }
+  if (env.MALAHOR_MODE !== undefined && !hasConfiguredIntervention(config.paths.configFile)) {
+    throw new Error("MALAHOR_MODE sobreescribe el fallback del archivo: retira el override antes de cambiar el modo persistido.");
+  }
+  const raw = readConfig(config.paths.configFile);
+  const current = modeName(config.execution.intervention);
+  const changes = target === config.execution.intervention ? [] : [
+    `execution.intervention: ${config.execution.intervention} -> ${target}`,
+    `modo efectivo: ${current} -> ${modeName(target)}`,
+    "Se renueva execution.revision para invalidar todos los planes anteriores.",
+    "El campo mode legado, otras claves y la verificacion persistida no se modifican."
+  ];
+  return {
+    configFile: config.paths.configFile,
+    current,
+    target: modeName(target),
+    changes,
+    version: hash(JSON.stringify(["malahor.mode.v2", config.paths.configFile, hash(raw), target, config.execution.revision]))
+  };
+}
+function applyModeChange(target, expectedVersion, beforeWrite, env = process.env, cwd = process.cwd()) {
+  const plan = previewModeChange(target, env, cwd);
+  if (!/^[a-f0-9]{64}$/.test(expectedVersion) || expectedVersion !== plan.version) {
+    throw new Error("La configuracion cambio desde la confirmacion: repite el comando.");
+  }
+  if (plan.changes.length === 0)
+    return { mode: plan.target, backup: null, configFile: plan.configFile };
+  const config = loadConfig(env, cwd);
+  beforeWrite(plan.configFile, config.paths.backupsDir);
+  fs10.mkdirSync(path13.dirname(plan.configFile), { recursive: true, mode: 448 });
+  assertSafePath(plan.configFile);
+  assertSafePath(config.paths.backupsDir);
+  const lock = `${plan.configFile}.mode.lock`;
+  let lockFd;
+  try {
+    lockFd = fs10.openSync(lock, "wx", 384);
+  } catch (error) {
+    throw new Error(`Cambio de modo bloqueado (lock activo o directorio inexistente): ${error.message}`);
+  }
+  let temporary;
+  try {
+    const fresh = previewModeChange(target, env, cwd);
+    if (fresh.version !== expectedVersion)
+      throw new Error("La configuracion cambio: repite el comando.");
+    const raw = readConfig(plan.configFile);
+    const revision = randomBytes2(16).toString("hex");
+    const after = editExecution(raw, target, revision);
+    const backup = fs10.existsSync(plan.configFile) ? path13.join(config.paths.backupsDir, `${path13.basename(plan.configFile)}.${timestamp()}.${randomBytes2(6).toString("hex")}.bak`) : null;
+    if (backup) {
+      fs10.mkdirSync(config.paths.backupsDir, { recursive: true, mode: 448 });
+      assertSafePath(config.paths.backupsDir);
+      fs10.copyFileSync(plan.configFile, backup, fs10.constants.COPYFILE_EXCL);
+      fs10.chmodSync(backup, 384);
+    }
+    temporary = `${plan.configFile}.${randomBytes2(8).toString("hex")}.tmp`;
+    fs10.writeFileSync(temporary, after, { flag: "wx", mode: 384 });
+    if (readConfig(plan.configFile) !== raw)
+      throw new Error("La configuracion cambio durante el respaldo: no se aplica.");
+    fs10.renameSync(temporary, plan.configFile);
+    temporary = undefined;
+    return { mode: modeName(target), backup, configFile: plan.configFile };
+  } finally {
+    if (temporary)
+      fs10.rmSync(temporary, { force: true });
+    fs10.closeSync(lockFd);
+    fs10.unlinkSync(lock);
+  }
+}
+function readConfig(file) {
+  assertSafePath(file);
+  try {
+    if (!fs10.lstatSync(file).isFile())
+      throw new Error("La configuracion de Malahor debe ser archivo regular, no symlink.");
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return "";
+    throw error;
+  }
+  return fs10.readFileSync(file, "utf8");
+}
+function hasConfiguredIntervention(file) {
+  const raw = readConfig(file);
+  if (!raw)
+    return false;
+  const errors = [];
+  const parsed = parse2(raw, errors);
+  if (errors.length > 0)
+    throw new Error("Configuracion JSONC invalida; no se modifica.");
+  return parsed?.execution?.intervention !== undefined;
+}
+function assertSafePath(file) {
+  for (let current = path13.resolve(file);; current = path13.dirname(current)) {
+    try {
+      if (fs10.lstatSync(current).isSymbolicLink())
+        throw new Error(`Ruta con symlink no permitida: ${current}`);
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    }
+    if (path13.dirname(current) === current)
+      break;
+  }
+}
+function editExecution(raw, target, revision) {
+  const source = raw || `{}
+`;
+  const errors = [];
+  const parsed = parse2(source, errors);
+  if (errors.length > 0 || !parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Configuracion JSONC invalida; no se modifica.");
+  }
+  const current = parsed;
+  if (current.execution !== undefined && (!current.execution || typeof current.execution !== "object" || Array.isArray(current.execution))) {
+    throw new Error("execution debe ser objeto; no se modifica.");
+  }
+  let after = source;
+  for (const [key, value] of [["intervention", target], ["revision", revision]]) {
+    after = applyEdits(after, modify(after, ["execution", key], value, {
+      formattingOptions: { insertSpaces: true, tabSize: 2, eol: source.includes(`\r
+`) ? `\r
+` : `
+` }
+    }));
+  }
+  return after.endsWith(`
+`) ? after : `${after}
+`;
+}
+function hash(input) {
+  return createHash4("sha256").update(input).digest("hex");
+}
+
+// src/cli/core/planning.ts
+import { createHash as createHash5, createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+var PLAN_TTL_MS = 30 * 60000;
+var ACTIONS = new Set(["edit", "shell", "subagent"]);
+var receiptKey = randomBytes3(32);
+var transitions = new Map;
+async function presentPlan(scope, input, adapter) {
+  return serialize(scope.sessionID, async () => {
+    const state = proposePlan(scope, input);
+    await adapter.save(state);
+    if (scope.mode !== "assistant")
+      return state;
+    await adapter.confirm("review", state);
+    const current = await adapter.load(scope.sessionID);
+    if (!validState(current) || current.revision !== state.revision || current.digest !== state.digest) {
+      throw new Error("El plan cambio durante la revision: vuelve a presentarlo.");
+    }
+    await adapter.save(reviewPlan(current, state.digest));
+    return state;
+  });
+}
+async function requestPlanExecution(scope, digest, adapter) {
+  return serialize(scope.sessionID, async () => {
+    const state = await adapter.load(scope.sessionID);
+    if (!validState(state) || state.digest !== digest || state.sessionID !== scope.sessionID || state.project !== scope.project || state.mode !== scope.mode || state.policyRevision !== scope.policyRevision || state.expiresAt <= Date.now() || state.plan.actions.length === 0 || state.authorizedAt !== undefined) {
+      throw new Error("No hay un plan ejecutable vigente.");
+    }
+    if (state.mode === "advisor" || state.mode === "assistant" && state.reviewedAt === undefined) {
+      throw new Error("Primero revisa el plan.");
+    }
+    await adapter.confirm("run", state);
+    const current = await adapter.load(scope.sessionID);
+    if (!validState(current) || current.revision !== state.revision || current.digest !== state.digest) {
+      throw new Error("El plan cambio durante la orden: vuelve a presentarlo.");
+    }
+    const authorized = authorizePlan(current, state.digest);
+    await adapter.save(authorized);
+    return authorized;
+  });
+}
+async function serialize(sessionID, operation) {
+  const previous = transitions.get(sessionID) ?? Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const current = previous.then(() => gate);
+  transitions.set(sessionID, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (transitions.get(sessionID) === current)
+      transitions.delete(sessionID);
+  }
+}
+function proposePlan(scope, input, now = Date.now()) {
+  if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
+    throw new Error("Sesion/proyecto/politica de plan no evaluable.");
+  }
+  if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
+    throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
+  }
+  if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || input.steps.length > 30 || input.actions.length > 80) {
+    throw new Error("Pasos/acciones de plan invalidos o demasiado extensos.");
+  }
+  if (scope.mode === "advisor" && (input.steps.length !== 0 || input.actions.length !== 0)) {
+    throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
+  }
+  if (scope.mode !== "advisor" && input.steps.length === 0)
+    throw new Error("El plan requiere pasos visibles.");
+  if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000)) {
+    throw new Error("Paso de plan invalido.");
+  }
+  if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action) || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {
+    throw new Error("La accion debe ser edit, shell o subagent con recurso exacto.");
+  }
+  if (JSON.stringify(input).length > 12000)
+    throw new Error("El plan es demasiado grande para una revision visible.");
+  const actions = [...new Map(input.actions.map((item) => [`${item.action}\x00${item.resource}`, { ...item }])).values()].sort((a, b) => `${a.action}\x00${a.resource}`.localeCompare(`${b.action}\x00${b.resource}`));
+  const plan = { summary: input.summary.trim(), steps: [...input.steps], actions };
+  const revision = randomBytes3(16).toString("hex");
+  const digest = createHash5("sha256").update(JSON.stringify({ scope, plan, revision })).digest("hex");
+  return {
+    version: 1,
+    ...scope,
+    plan,
+    digest,
+    revision,
+    createdAt: now,
+    expiresAt: now + PLAN_TTL_MS
+  };
+}
+function reviewPlan(state, digest, now = Date.now()) {
+  assertCurrent(state, digest, now);
+  if (state.mode !== "assistant" || state.reviewedAt !== undefined)
+    throw new Error("Revision de plan no aplicable.");
+  return { ...state, reviewedAt: now, reviewProof: receipt(state, "review", now) };
+}
+function authorizePlan(state, digest, now = Date.now()) {
+  assertCurrent(state, digest, now);
+  if (state.mode === "advisor" || state.mode === "assistant" && state.reviewedAt === undefined) {
+    throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
+  }
+  if (state.authorizedAt !== undefined)
+    throw new Error("El plan ya tiene una autorizacion vigente.");
+  return { ...state, authorizedAt: now, authorizationProof: receipt(state, "run", now) };
+}
+function planAllows(state, scope, operation, now = Date.now()) {
+  if (!validState(state) || state.mode === "advisor" || scope.mode === "advisor" || state.mode !== scope.mode || state.sessionID !== scope.sessionID || state.project !== scope.project || state.policyRevision !== scope.policyRevision || state.createdAt > now || state.expiresAt <= now || state.authorizedAt === undefined || state.authorizedAt > now)
+    return false;
+  return state.plan.actions.some(({ action, resource }) => action === operation.action && resource === operation.resource);
+}
+function validState(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state))
+    return false;
+  const value = state;
+  if (value.version !== 1 || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt) || value.expiresAt <= value.createdAt || value.expiresAt - value.createdAt > PLAN_TTL_MS || value.reviewedAt !== undefined && (typeof value.reviewedAt !== "number" || !Number.isFinite(value.reviewedAt)) || value.authorizedAt !== undefined && (typeof value.authorizedAt !== "number" || !Number.isFinite(value.authorizedAt)) || typeof value.reviewedAt === "number" && (value.reviewedAt < value.createdAt || value.reviewedAt >= value.expiresAt) || typeof value.authorizedAt === "number" && (value.authorizedAt < value.createdAt || value.authorizedAt >= value.expiresAt) || value.mode === "advisor" && (value.reviewedAt !== undefined || value.authorizedAt !== undefined) || value.mode === "executor" && value.reviewedAt !== undefined || value.mode === "assistant" && value.authorizedAt !== undefined && (typeof value.reviewedAt !== "number" || value.authorizedAt < value.reviewedAt) || value.reviewedAt === undefined && value.reviewProof !== undefined || value.authorizedAt === undefined && value.authorizationProof !== undefined || !value.plan || typeof value.plan !== "object" || Array.isArray(value.plan))
+    return false;
+  const plan = value.plan;
+  if (typeof plan.summary !== "string" || !Array.isArray(plan.steps) || !Array.isArray(plan.actions) || !plan.steps.every((step) => typeof step === "string") || !plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.action === "string" && typeof entry.resource === "string"))
+    return false;
+  const expected = createHash5("sha256").update(JSON.stringify({ scope: {
+    sessionID: value.sessionID,
+    project: value.project,
+    mode: value.mode,
+    policyRevision: value.policyRevision
+  }, plan, revision: value.revision })).digest("hex");
+  if (expected !== value.digest)
+    return false;
+  const planState = value;
+  return (value.reviewedAt === undefined || verifyReceipt(planState, "review", value.reviewedAt, value.reviewProof)) && (value.authorizedAt === undefined || verifyReceipt(planState, "run", value.authorizedAt, value.authorizationProof));
+}
+function renderPlan(state) {
+  return [
+    `Plan Malahor (${state.mode}) · ${state.digest.slice(0, 12)}`,
+    state.plan.summary,
+    ...state.plan.steps.map((step, index) => `${index + 1}. ${step}`),
+    ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`),
+    `Caduca: ${new Date(state.expiresAt).toISOString()}`
+  ].join(`
+`);
+}
+function assertCurrent(state, digest, now) {
+  if (!validState(state) || state.digest !== digest || !Number.isFinite(now) || state.expiresAt <= now) {
+    throw new Error("Plan cambiado, expirado o no evaluable: vuelve a presentarlo.");
+  }
+}
+function receipt(state, kind, at) {
+  return createHmac("sha256", receiptKey).update(JSON.stringify({
+    kind,
+    sessionID: state.sessionID,
+    project: state.project,
+    mode: state.mode,
+    policyRevision: state.policyRevision,
+    digest: state.digest,
+    revision: state.revision,
+    at,
+    reviewProof: kind === "run" ? state.reviewProof ?? null : null
+  })).digest("hex");
+}
+function verifyReceipt(state, kind, at, proof) {
+  if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof))
+    return false;
+  return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(receipt(state, kind, at), "hex"));
+}
+
+// src/plugin/planning.ts
+var REVIEW_ACTION = "malahor_plan_review";
+var RUN_ACTION = "malahor_plan_run";
+var READ_ONLY_TOOLS = new Set([
+  "read",
+  "glob",
+  "grep",
+  "webfetch",
+  "websearch",
+  "list",
+  "question",
+  "skill",
+  "todowrite",
+  "todoread",
+  "invalid",
+  "malahor_plan",
+  "malahor_run"
+]);
+var PROTECTED = new Set(["edit", "shell", "subagent"]);
+var CODE_READ_TOOLS = new Set(["read", "glob", "grep"]);
+async function evaluatePlanningPermission(input, options, storage) {
+  const action = text(input.action);
+  const normalized = permissionAction(action);
+  if (input.effect === "deny")
+    return;
+  const resolved = await resolvePlanningScope(input.sessionID, options);
+  if (action === MODE_CHANGE_ACTION) {
+    const resources2 = Array.isArray(input.resources) ? input.resources : [];
+    if (!resolved || resources2.length !== 3 || resources2.some((item) => typeof item !== "string")) {
+      deny(input, "Cambio de modo sin sesion/proyecto o preview estructurado.");
+      return;
+    }
+    try {
+      const [configFile, current, target] = resources2;
+      const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
+      const preview = previewModeChange(parseModeName(target), env, resolved.directory);
+      if (preview.configFile !== configFile || preview.current !== current || preview.target !== target || preview.changes.length === 0) {
+        deny(input, "El preview de cambio de modo ya no coincide con la configuracion.");
+        return;
+      }
+      input.effect = "ask";
+      input.message = `Cambiar modo Malahor: ${preview.current} -> ${preview.target}. Se creara respaldo, se invalidaran planes anteriores y aplicara desde el siguiente turno de esta sesion.`;
+    } catch {
+      deny(input, "Cambio de modo invalido o desactualizado.");
+    }
+    return;
+  }
+  if (action === REVIEW_ACTION || action === RUN_ACTION) {
+    const state2 = resolved && await readPlan(storage, resolved.scope.sessionID);
+    const digest = Array.isArray(input.resources) ? input.resources[0] : undefined;
+    if (!state2 || digest !== state2.digest || state2.project !== resolved?.scope.project || state2.mode !== resolved.scope.mode || state2.policyRevision !== resolved.scope.policyRevision || state2.expiresAt <= Date.now() || action === REVIEW_ACTION && (state2.mode !== "assistant" || state2.reviewedAt !== undefined) || action === RUN_ACTION && (state2.mode === "advisor" || state2.plan.actions.length === 0 || state2.mode === "assistant" && state2.reviewedAt === undefined)) {
+      deny(input, "Plan no vigente o confirmacion fuera de orden.");
+      return;
+    }
+    input.effect = "ask";
+    input.message = action === REVIEW_ACTION ? `Revisa el plan; esta primera confirmacion NO autoriza ejecutar:
+${renderPlan(state2)}` : state2.mode === "executor" ? `Aprobacion previa del plan para ejecutar SOLO sus acciones:
+${renderPlan(state2)}` : `Segunda confirmacion: ejecuta SOLO las acciones del plan revisado:
+${renderPlan(state2)}`;
+    return;
+  }
+  if (CODE_READ_TOOLS.has(action) && resolved?.scope.mode === "advisor") {
+    deny(input, "Asesor: no consulta archivos de codigo ni verifica la implementacion.");
+    return;
+  }
+  if (!PROTECTED.has(normalized)) {
+    if (action && !READ_ONLY_TOOLS.has(action) && !routineTool(action) && action !== "*" && action !== "external_directory")
+      deny(input, `Tool no clasificada para planeacion: ${action}`);
+    return;
+  }
+  if (!resolved || !storage) {
+    deny(input, "No hay proyecto/sesion o almacenamiento de planeacion mediable.");
+    return;
+  }
+  if (resolved.scope.mode === "advisor") {
+    deny(input, "El asesor no ejecuta acciones de programacion ni con una solicitud explicita.");
+    return;
+  }
+  if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage))
+    return;
+  const state = await readPlan(storage, resolved.scope.sessionID);
+  const resources = Array.isArray(input.resources) ? input.resources : [];
+  if (resources.length === 0 || resources.some((item) => typeof item !== "string" || !planAllows(state, resolved.scope, normalizeAction(normalized, item, resolved.directory)))) {
+    deny(input, "Accion no incluida en un plan vigente y confirmado.");
+  }
+}
+async function evaluatePlanningTool(input, options, storage) {
+  const tool = text(input.tool);
+  if (routineTool(tool))
+    return;
+  const resolved = await resolvePlanningScope(input.sessionID, options);
+  if (!resolved || !storage)
+    throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
+  if (CODE_READ_TOOLS.has(tool) && resolved.scope.mode === "advisor") {
+    throw new Error("Malahor: asesor no consulta archivos de codigo.");
+  }
+  if (READ_ONLY_TOOLS.has(tool))
+    return;
+  if (resolved.scope.mode === "advisor") {
+    throw new Error("Malahor: el asesor no ejecuta acciones de programacion.");
+  }
+  if (["edit", "write", "patch", "shell", "bash"].includes(tool) && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage))
+    return;
+  const actions = toolActions(tool, input.input, resolved.directory);
+  const state = await readPlan(storage, resolved.scope.sessionID);
+  if (!actions || actions.length === 0 || actions.some((operation) => !planAllows(state, resolved.scope, operation))) {
+    throw new Error(`Malahor: ${tool || "tool"} fuera de un plan vigente y confirmado.`);
+  }
+}
+async function registerPlanningTools(tools, approvals, storage, options) {
+  return tools.transform((editor) => {
+    editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
+    editor.add({
+      name: "plan",
+      description: "Presenta el plan. En asistente solicita la primera confirmacion; en ejecutor muestra el plan para aprobacion posterior. Asesor solo permite concepto.",
+      input: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+          steps: { type: "array", items: { type: "string" } },
+          actions: { type: "array", items: {
+            type: "object",
+            properties: { action: { type: "string" }, resource: { type: "string" } },
+            required: ["action", "resource"],
+            additionalProperties: false
+          } }
+        },
+        required: ["summary", "steps", "actions"],
+        additionalProperties: false
+      },
+      options: { namespace: "malahor", codemode: false },
+      execute: async (value, call) => {
+        const resolved = await requireScope(call, options);
+        if (call.agent !== "malahor")
+          throw new Error("Solo el primario puede presentar el plan.");
+        const raw = value;
+        if (detectSecretKinds(raw).length > 0)
+          throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
+        const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
+        const state = await presentPlan(resolved.scope, { ...raw, actions }, planningAdapter(storage, approvals, call));
+        return { content: `${renderPlan(state)}
+Digest completo: ${state.digest}` };
+      }
+    });
+    editor.add({
+      name: "run",
+      description: "Solicita la segunda confirmacion del asistente o aprobacion previa del plan del ejecutor. No ejecuta herramientas por si misma.",
+      input: { type: "object", properties: { digest: { type: "string" } }, required: ["digest"], additionalProperties: false },
+      options: { namespace: "malahor", codemode: false },
+      execute: async (value, call) => {
+        const resolved = await requireScope(call, options);
+        if (call.agent !== "malahor")
+          throw new Error("Solo el primario puede solicitar ejecucion.");
+        const digest = text(value.digest);
+        const state = await requestPlanExecution(resolved.scope, digest, planningAdapter(storage, approvals, call));
+        return { content: `Plan ${state.digest.slice(0, 12)} autorizado hasta ${new Date(state.expiresAt).toISOString()}. Solo operaciones declaradas; guardrails vigentes.` };
+      }
+    });
+  });
+}
+function planningAdapter(storage, port, call) {
+  return {
+    load: (sessionID) => storage.get(planKey(sessionID)),
+    save: (state) => storage.set(planKey(state.sessionID), state),
+    confirm: (kind, state) => ask(port, call, kind === "review" ? REVIEW_ACTION : RUN_ACTION, state.digest)
+  };
+}
+async function delegatedSpecialist(sessionID, scope, options, storage) {
+  if (!storage || typeof sessionID !== "string" || !options.resolveParentSession)
+    return false;
+  try {
+    const parent = await options.resolveParentSession(sessionID);
+    if (!parent || !["malahor-diagnostico", "malahor-testing"].includes(parent.agent))
+      return false;
+    const state = await readPlan(storage, parent.parentID);
+    return planAllows(state, { ...scope, sessionID: parent.parentID }, { action: "subagent", resource: parent.agent });
+  } catch {
+    return false;
+  }
+}
+function planKey(sessionID) {
+  if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
+    throw new Error("ID de sesion no evaluable.");
+  return `planning/v1/${sessionID}`;
+}
+async function injectPlanningInstructions(input, options, storage) {
+  if (input.agent !== "malahor")
+    return;
+  const resolved = await resolvePlanningScope(input.sessionID, options);
+  const state = resolved && await readPlan(storage, resolved.scope.sessionID);
+  const mode = resolved?.scope.mode;
+  const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps y actions vacios." : [
+    `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
+    mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar." : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+    "El plan enumera rutas/comandos/subagentes exactos. Si cambian, presenta otro plan y vuelve a pedir confirmaciones.",
+    "Las aprobaciones de plan no autorizan commit, push, stage, instalacion local ni evitan guardrails.",
+    state ? `Estado: ${state.authorizedAt !== undefined ? "autorizado" : state.reviewedAt !== undefined ? "revisado" : "presentado"}; revision ${state.digest.slice(0, 12)}; caduca ${new Date(state.expiresAt).toISOString()}.` : "Estado: sin plan vigente."
+  ].join(`
+`);
+  const system = Array.isArray(input.system) ? input.system : [];
+  const marker = "<!-- malahor-planning:v1 -->";
+  const last = system.at(-1);
+  if (isRecord5(last) && last.type === "text" && typeof last.text === "string") {
+    if (!last.text.includes(marker))
+      last.text += `
+
+${marker}
+${instructions}`;
+  } else {
+    system.push({ type: "text", text: `${marker}
+${instructions}` });
+  }
+  input.system = system;
+}
+async function readPlan(storage, sessionID) {
+  if (!storage)
+    return;
+  try {
+    const record = await storage.get(planKey(sessionID));
+    return validState(record) ? record : undefined;
+  } catch {
+    return;
+  }
+}
+async function ask(port, call, action, digest) {
+  await port.assert({
+    sessionID: call.sessionID,
+    agent: call.agent,
+    source: { type: "tool", messageID: call.messageID, id: call.id },
+    action,
+    resources: [digest],
+    save: []
+  });
+}
+async function requireScope(call, options) {
+  const resolved = await resolvePlanningScope(call.sessionID, options);
+  if (!resolved)
+    throw new Error("Proyecto registrado/sesion no evaluable: planeacion bloqueada.");
+  return resolved;
+}
+async function resolvePlanningScope(value, options) {
+  if (typeof value !== "string" || !options.resolveSessionDirectory)
+    return;
+  try {
+    const directory = await options.resolveSessionDirectory(value);
+    if (!directory)
+      return;
+    const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
+    const paths = resolvePaths(env, directory);
+    const root = registeredProjectRoots(paths.projectsFile).sort((a, b) => b.root.length - a.root.length).find((entry) => inside2(directory, entry.root));
+    if (!root)
+      return;
+    const config = loadConfig(env, directory);
+    return { scope: {
+      sessionID: value,
+      project: root.canonicalKey,
+      mode: config.mode,
+      policyRevision: config.execution.revision
+    }, directory };
+  } catch {
+    return;
+  }
+}
+function toolActions(tool, value, directory) {
+  const args = isRecord5(value) ? value : {};
+  if (tool === "shell" || tool === "bash") {
+    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path14.resolve(directory, cwd) !== path14.resolve(directory))))
+      return;
+    return typeof args.command === "string" && args.command.trim() ? [{ action: "shell", resource: args.command }] : undefined;
+  }
+  if (tool === "subagent" || tool === "task") {
+    return typeof args.agent === "string" ? [{ action: "subagent", resource: args.agent }] : undefined;
+  }
+  if (tool === "patch") {
+    if (typeof args.patchText !== "string")
+      return;
+    const matches = [...args.patchText.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)];
+    return matches.length ? matches.map((match) => normalizeAction("edit", match[1], directory)) : undefined;
+  }
+  if (tool === "edit" || tool === "write") {
+    const target = args.path ?? args.filePath;
+    return typeof target === "string" ? [normalizeAction("edit", target, directory)] : undefined;
+  }
+  return;
+}
+function normalizeAction(action, resource, directory) {
+  return { action, resource: action === "edit" ? path14.resolve(directory, resource) : resource };
+}
+function permissionAction(action) {
+  if (["bash", "command"].includes(action))
+    return "shell";
+  if (["write", "patch", "create"].includes(action))
+    return "edit";
+  if (action === "task")
+    return "subagent";
+  return action;
+}
+function routineTool(tool) {
+  return /^(?:mcp_)?(?:mnemo_|obsidian_|codegraph_(?!.*(?:index|write|delete)))/.test(tool);
+}
+function inside2(target, root) {
+  const relative = path14.relative(path14.resolve(root), path14.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
+}
+function text(value) {
+  return typeof value === "string" ? value : "";
+}
+function isRecord5(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function deny(input, message) {
+  input.effect = "deny";
+  input.message = `[malahor.plan] ${message}`;
+}
+
+// src/cli/core/mode-hooks.ts
+function assertModeWriteAllowed(configFile, backupsDir, cwd, env, harness, approval) {
+  const config = loadConfig(env, cwd);
+  const project = resolveRegisteredProject(config.paths, config.projects.aliases);
+  if (!rootsForProject(config.paths.projectsFile, project.canonicalKey).includes(project.root)) {
+    throw new Error("Cambia el modo desde una raiz de proyecto registrada.");
+  }
+  const loaded = loadHookPolicy(config.paths, project.canonicalKey);
+  assertHooksAllowed({
+    event: "file.write.before",
+    harness,
+    profile: loaded.policy.profile,
+    cwd,
+    projectRoot: project.root,
+    malahorHome: config.paths.malahorHome,
+    project: project.canonicalKey,
+    policy: loaded.policy,
+    security: loaded.security,
+    policyMeta: loaded.policyMeta,
+    resourceKind: "filesystem",
+    targetPaths: [configFile, backupsDir],
+    approval
+  });
+}
+
+// src/plugin/mode-command.ts
+async function registerModeCommand(host, options) {
+  return host.command.transform((editor) => editor.add({
+    name: "malahor-modo",
+    description: "Consultar o cambiar el modo de Malahor con confirmacion nativa",
+    execute: async ({ sessionID, prompt }) => {
+      if (!prompt || typeof prompt.text !== "string" || prompt.files?.length || prompt.agents?.length || prompt.skills?.length) {
+        throw new Error("El comando de modo solo acepta argumentos de texto, sin adjuntos.");
+      }
+      const directory = await options.resolveSessionDirectory?.(sessionID);
+      if (!directory)
+        throw new Error("Sesion sin ubicacion verificable; modo no disponible.");
+      const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
+      const config = loadConfig(env, directory);
+      const project = resolveRegisteredProject(config.paths, config.projects.aliases);
+      if (!rootsForProject(config.paths.projectsFile, project.canonicalKey).includes(project.root)) {
+        throw new Error("El comando de modo requiere un proyecto registrado.");
+      }
+      const args = prompt.text.trim().replace(/^\/?malahor-modo(?:\s+|$)/, "").trim().split(/\s+/).filter(Boolean);
+      const action = args[0] ?? "status";
+      let message;
+      if (action === "status" && args.length <= 1) {
+        message = `Modo efectivo: ${modeName(config.execution.intervention)} (${config.execution.intervention}). Archivo: ${config.paths.configFile}`;
+      } else if (action === "preview" && args.length === 2) {
+        const plan = previewModeChange(parseModeName(args[1]), env, directory);
+        message = plan.changes.length ? `Modo actual: ${plan.current}; propuesto: ${plan.target}. ${plan.changes.join(" ")}
+Archivo: ${plan.configFile}
+Para aplicar: /malahor-modo ${plan.target}` : `Modo ${plan.target} ya persistido. Sin cambios.`;
+      } else if (args.length === 1) {
+        const target = parseModeName(action);
+        const plan = previewModeChange(target, env, directory);
+        if (plan.changes.length === 0) {
+          message = `Modo ${plan.target} ya persistido. Sin cambios.`;
+        } else {
+          await host.permission.assert({
+            sessionID,
+            action: MODE_CHANGE_ACTION,
+            resources: [plan.configFile, plan.current, plan.target],
+            save: []
+          });
+          const result = applyModeChange(target, plan.version, (file, backups) => assertModeWriteAllowed(file, backups, directory, env, "opencode"), env, directory);
+          message = `Modo persistido: ${result.mode}. Archivo: ${result.configFile}. Respaldo: ${result.backup ?? "archivo nuevo"}. Activo desde el siguiente turno de esta misma sesion; los planes anteriores quedaron invalidados.`;
+        }
+      } else {
+        throw new Error("Uso: /malahor-modo [status | preview <asesor|asistente|ejecutor> | asesor|asistente|ejecutor]");
+      }
+      await host.session.synthetic({ sessionID, text: message });
+    }
+  }));
 }
 
 // src/plugin/index.ts
@@ -3367,12 +5813,12 @@ var SESSION_HOOKS = [
 ];
 var BLOCKING_SHELL_ASK_IDS = ["MAL-HOOK-PUSH-CLI-EVIDENCE"];
 function detectHost(value) {
-  if (!isRecord4(value))
+  if (!isRecord6(value))
     return "unknown";
-  const isV2 = isRecord4(value.session) && typeof value.session.hook === "function" || isRecord4(value.mcp) && typeof value.mcp.transform === "function" || isRecord4(value.agent) && typeof value.agent.transform === "function";
+  const isV2 = isRecord6(value.session) && typeof value.session.hook === "function" || isRecord6(value.mcp) && typeof value.mcp.transform === "function" || isRecord6(value.agent) && typeof value.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord4(value.client) && isRecord4(value.project) && typeof value.directory === "string";
+  const isV1 = isRecord6(value.client) && isRecord6(value.project) && typeof value.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -3390,7 +5836,7 @@ async function setupV2(context) {
   const criticalGaps = [];
   const domain = (name) => {
     const value = context[name];
-    if (!isRecord4(value) || typeof value.hook !== "function")
+    if (!isRecord6(value) || typeof value.hook !== "function")
       return;
     return value;
   };
@@ -3406,18 +5852,26 @@ async function setupV2(context) {
   }
   const session = domain("session");
   const storage = storageDomain(context.storage);
+  const planStorage = storage && typeof storage.get === "function" ? storage : undefined;
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {
       const value = await session.get?.({ sessionID });
       return sessionLocationDirectory(value);
+    };
+    options.resolveParentSession = async (sessionID) => {
+      const raw = await session.get?.({ sessionID });
+      const value = isRecord6(raw) && isRecord6(raw.data) ? raw.data : raw;
+      return isRecord6(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
     };
   }
   const permission = domain("permission");
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
       const evaluated = await evaluatePermission(input, options);
-      if (evaluated.effect === "deny") {
-        warn(`permission.evaluate deny: ${summary(evaluated.result)}`);
+      if (evaluated.effect !== "deny")
+        await evaluatePlanningPermission(input, options, planStorage);
+      if (input.effect === "deny") {
+        warn(`permission.evaluate deny: ${evaluated.effect === "deny" ? summary(evaluated.result) : String(input.message ?? "plan no autorizado")}`);
       }
     }, cleanups);
   }
@@ -3431,7 +5885,7 @@ async function setupV2(context) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord4(input.env)) {
+      if (isRecord6(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -3453,6 +5907,7 @@ async function setupV2(context) {
       if (shouldBlockPluginResult(result, options)) {
         throw new Error(formatPluginBlock(result));
       }
+      await evaluatePlanningTool(input, options, planStorage);
     }, cleanups);
     capabilities.tool = true;
     capabilities["tool.execute.before"] = registered;
@@ -3470,12 +5925,40 @@ async function setupV2(context) {
     capabilities["memory.freshness"] = freshnessRegistered;
     if (!freshnessRegistered)
       degraded.push("memory.freshness");
+    const planningTools = typeof tool.transform === "function" ? tool : undefined;
+    const approvalPort = isRecord6(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
+    if (planningTools && approvalPort && planStorage && options.resolveSessionDirectory && options.permissionRegistered && registered) {
+      try {
+        const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options);
+        if (registration && typeof registration.dispose === "function")
+          cleanups.push(() => registration.dispose?.());
+        capabilities["planning.v1"] = true;
+      } catch (error) {
+        warn(`herramientas de planeacion no registradas: ${error.message}`);
+      }
+    }
+    if (!capabilities["planning.v1"])
+      criticalGaps.push("planning.v1");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
+    criticalGaps.push("planning.v1");
   }
+  const modeHost = isRecord6(context.command) && typeof context.command.transform === "function" && isRecord6(context.session) && typeof context.session.synthetic === "function" && isRecord6(context.permission) && typeof context.permission.assert === "function" && options.resolveSessionDirectory ? context : undefined;
+  if (modeHost) {
+    try {
+      const registration = await registerModeCommand(modeHost, options);
+      if (registration && typeof registration.dispose === "function")
+        cleanups.push(() => registration.dispose?.());
+      capabilities["mode.command"] = true;
+    } catch (error) {
+      warn(`comando de modo no registrado: ${error.message}`);
+    }
+  }
+  if (!capabilities["mode.command"])
+    degraded.push("mode.command");
   if (session) {
     for (const event2 of SESSION_HOOKS) {
       const registered = await registerHook(session, hookNameForEvent(event2), async (input) => {
@@ -3496,6 +5979,7 @@ async function setupV2(context) {
     }
     const protocolRegistered = await registerHook(session, "context", async (input) => {
       injectMalahorProtocol(input);
+      await injectPlanningInstructions(input, options, planStorage);
     }, cleanups);
     capabilities["protocol.context"] = protocolRegistered;
     if (!protocolRegistered)
@@ -3557,7 +6041,7 @@ async function setupV2(context) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord4(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
+    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord6(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -3588,12 +6072,12 @@ async function setupV2(context) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord4(input.client),
-    project: isRecord4(input.project),
+    client: isRecord6(input.client),
+    project: isRecord6(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord4(input.experimental_workspace)
+    workspace: isRecord6(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -3642,7 +6126,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback, cleanups) {
   try {
     const registration = await domain.hook(name, callback);
-    if (isRecord4(registration) && typeof registration.dispose === "function") {
+    if (isRecord6(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -3671,28 +6155,28 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context) {
-  const location = isRecord4(context.location) ? context.location : undefined;
+  const location = isRecord6(context.location) ? context.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function locationCanonical(context) {
-  const location = isRecord4(context.location) ? context.location : undefined;
-  const project = location && isRecord4(location.project) ? location.project : undefined;
+  const location = isRecord6(context.location) ? context.location : undefined;
+  const project = location && isRecord6(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function transformDomain(value) {
-  if (!isRecord4(value) || typeof value.transform !== "function")
+  if (!isRecord6(value) || typeof value.transform !== "function")
     return;
   return value;
 }
 function storageDomain(value) {
-  if (!isRecord4(value) || typeof value.set !== "function")
+  if (!isRecord6(value) || typeof value.set !== "function")
     return;
   return value;
 }
 function eventDomain(value) {
-  if (!isRecord4(value) || typeof value.subscribe !== "function")
+  if (!isRecord6(value) || typeof value.subscribe !== "function")
     return;
   return value;
 }
@@ -3709,13 +6193,13 @@ function captureSubagentsOptIn(cwd, env) {
 async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
-  if (!fs8.existsSync(paths.mnemoIndex)) {
+  if (!fs11.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs8.existsSync(paths.mnemoIndex)) {
+      if (fs11.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
@@ -3730,7 +6214,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
       }
       let target;
       try {
-        const registered = canonical ? registeredProjectRoots(paths.projectsFile).find((entry) => fs8.realpathSync(entry.root) === fs8.realpathSync(canonical)) : undefined;
+        const registered = canonical ? registeredProjectRoots(paths.projectsFile).find((entry) => fs11.realpathSync(entry.root) === fs11.realpathSync(canonical)) : undefined;
         if (!canonical || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
@@ -3768,7 +6252,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
         });
       }
     });
-    if (isRecord4(registration) && typeof registration.dispose === "function") {
+    if (isRecord6(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -3778,24 +6262,24 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path12.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path15.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path12.resolve(paths.opencodeDir, item) === path12.resolve(paths.mnemoIndex));
+  return command.some((item) => path15.resolve(paths.opencodeDir, item) === path15.resolve(paths.mnemoIndex));
 }
 function sessionLocationDirectory(value) {
-  const response = isRecord4(value) && isRecord4(value.data) ? value.data : value;
-  if (!isRecord4(response))
+  const response = isRecord6(value) && isRecord6(value.data) ? value.data : value;
+  if (!isRecord6(response))
     return;
-  const location = isRecord4(response.location) ? response.location : undefined;
+  const location = isRecord6(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path12.join(directory, "plugin-state.json");
+  const file = path15.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -3807,15 +6291,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs8.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path12.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs8.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs11.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path15.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs11.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs8.chmodSync(temporary, 384);
-    fs8.renameSync(temporary, file);
+    fs11.chmodSync(temporary, 384);
+    fs11.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -3825,8 +6309,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path12.resolve(override);
-  return path12.join(os2.homedir(), ".malahor");
+    return path15.resolve(override);
+  return path15.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))
@@ -3842,7 +6326,7 @@ function warn(message) {
 function unique2(values) {
   return [...new Set(values)];
 }
-function isRecord4(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export {

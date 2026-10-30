@@ -7,6 +7,11 @@ import { resolvePaths, type MalahorPaths } from "../src/cli/core/paths";
 
 let root: string;
 let paths: MalahorPaths;
+const REVISION = "a".repeat(32);
+
+function execution(intervention: "acompanar" | "guiar" | "ejecutar", verification: boolean) {
+  return { intervention, verification, revision: REVISION } as const;
+}
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-injector-policy-"));
@@ -36,7 +41,7 @@ describe("inyeccion de politica de build", () => {
     writeConfig({});
 
     syncOpenCodeConfig(paths, {
-      execution: { intervention: "guiar", verification: true },
+      execution: execution("guiar", true),
       applyPolicy: true,
     }, false);
 
@@ -50,7 +55,7 @@ describe("inyeccion de politica de build", () => {
     writeConfig({ permission: { bash: legacy } });
 
     syncOpenCodeConfig(paths, {
-      execution: { intervention: "acompanar", verification: true },
+      execution: execution("acompanar", true),
       applyPolicy: true,
     }, false);
 
@@ -65,7 +70,7 @@ describe("inyeccion de politica de build", () => {
     writeConfig({ permission: { bash: legacy, edit: "deny", task: "deny", webfetch: "ask" } });
 
     syncOpenCodeConfig(paths, {
-      execution: { intervention: "ejecutar", verification: false },
+      execution: execution("ejecutar", false),
       applyPolicy: true,
     }, false);
 
@@ -80,7 +85,7 @@ describe("inyeccion de politica de build", () => {
     writeConfig({});
 
     syncOpenCodeConfig(paths, {
-      execution: { intervention: "ejecutar", verification: true },
+      execution: execution("ejecutar", true),
       manageMcp: false,
     }, false);
 
@@ -90,7 +95,7 @@ describe("inyeccion de politica de build", () => {
     const legacy = { type: "local", command: ["node", "/tmp/legacy-mnemo.js"], enabled: true };
     fs.writeFileSync(paths.opencodeConfig, `${JSON.stringify({ mcp: { mnemo: legacy } }, null, 2)}\n`, "utf8");
     syncOpenCodeConfig(paths, {
-      execution: { intervention: "ejecutar", verification: true },
+      execution: execution("ejecutar", true),
       manageMcp: false,
     }, false);
 
@@ -107,7 +112,7 @@ describe("inyeccion de politica de build", () => {
     fs.writeFileSync(paths.opencodeConfig, original, "utf8");
 
     syncOpenCodeConfig(paths, {
-      execution: { intervention: "acompanar", verification: false },
+      execution: execution("acompanar", false),
       applyPolicy: true,
       manageMcp: false,
       verifyOnly: true,

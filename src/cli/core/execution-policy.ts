@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline/promises";
+import { randomBytes } from "node:crypto";
 import type { MalahorExecutionPolicy, MalahorIntervention } from "./config";
 
 // Parse publico para flags CLI como --policy-after.
@@ -14,19 +15,29 @@ export async function promptExecutionPolicy(current: MalahorExecutionPolicy, yes
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
   try {
-    process.stdout.write("\nNivel de intervencion en ejecucion:\n");
-    process.stdout.write("  1) ejecutar   Aplica cambios y puede verificar leyendo archivos.\n");
-    process.stdout.write("  2) guiar      Indica pasos concretos, archivos o lineas a tocar.\n");
-    process.stdout.write("  3) acompanar  Solo da la solucion, sin rutas, archivos ni verificacion.\n");
+    process.stdout.write("\nModo de Malahor (una sola politica de intervencion):\n");
+    process.stdout.write("  1) ejecutar   Ejecutor: plan visible y aprobacion previa antes de ejecutar.\n");
+    process.stdout.write("  2) guiar      Asistente: guia por pasos; revision del plan y segunda confirmacion antes de ejecutar.\n");
+    process.stdout.write("  3) acompanar  Asesor: solo concepto, sin pasos ni ejecucion.\n");
 
     const answer = await rl.question(`Selecciona nivel [${current.intervention}]: `);
     const intervention = parseIntervention(answer, current.intervention);
     const verification = intervention === "acompanar" ? false : await promptVerification(rl, current.verification);
 
-    return { intervention, verification };
+    return reviseExecutionPolicy(current, intervention, verification);
   } finally {
     rl.close();
   }
+}
+
+export function reviseExecutionPolicy(
+  current: MalahorExecutionPolicy,
+  intervention: MalahorIntervention,
+  verification: boolean,
+): MalahorExecutionPolicy {
+  const effectiveVerification = intervention === "acompanar" ? false : verification;
+  if (intervention === current.intervention && effectiveVerification === current.verification) return current;
+  return { intervention, verification: effectiveVerification, revision: randomBytes(16).toString("hex") };
 }
 
 function parseIntervention(value: string, fallback: MalahorIntervention): MalahorIntervention {

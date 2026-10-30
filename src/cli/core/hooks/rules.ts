@@ -551,6 +551,10 @@ const KNOWN_OPENCODE_TOOLS = new Set([
   "list",
   "question",
   "skill",
+  "shell",
+  "subagent",
+  "malahor_plan",
+  "malahor_run",
   "invalid",
 ]);
 

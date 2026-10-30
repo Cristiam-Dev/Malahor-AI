@@ -30,6 +30,11 @@ import {
 } from "../cli/core/hooks/plugin-adapter";
 import type { HookEvent, HookResult } from "../cli/core/hooks/types";
 import { injectMalahorProtocol } from "./protocol";
+import {
+  evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, registerPlanningTools,
+  type PlanningStorage, type PlanningTools,
+} from "./planning";
+import { registerModeCommand, type ModeCommandHost } from "./mode-command";
 
 const PLUGIN_ID = "malahor";
 const PLUGIN_VERSION = "0.4.0";
@@ -132,10 +137,17 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
 
   const session = domain("session");
   const storage = storageDomain(context.storage);
+  const planStorage = storage && typeof storage.get === "function" ? storage as unknown as PlanningStorage : undefined;
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {
       const value = await session.get?.({ sessionID });
       return sessionLocationDirectory(value);
+    };
+    options.resolveParentSession = async (sessionID) => {
+      const raw = await session.get?.({ sessionID });
+      const value = isRecord(raw) && isRecord(raw.data) ? raw.data : raw;
+      return isRecord(value) && typeof value.parentID === "string" && typeof value.agent === "string"
+        ? { parentID: value.parentID, agent: value.agent } : undefined;
     };
   }
 
@@ -143,8 +155,9 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
       const evaluated = await evaluatePermission(input, options);
-      if (evaluated.effect === "deny") {
-        warn(`permission.evaluate deny: ${summary(evaluated.result)}`);
+      if (evaluated.effect !== "deny") await evaluatePlanningPermission(input, options, planStorage);
+      if (input.effect === "deny") {
+        warn(`permission.evaluate deny: ${evaluated.effect === "deny" ? summary(evaluated.result) : String(input.message ?? "plan no autorizado")}`);
       }
     }, cleanups);
   }
@@ -164,6 +177,8 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       if (shouldBlockPluginResult(evaluated.result, options, BLOCKING_SHELL_ASK_IDS)) {
         throw new Error(formatPluginBlock(evaluated.result));
       }
+      // OpenCode V2 no atribuye shell.create.before a una sesion. La politica de
+      // plan se valida en tool.execute.before, que si incluye el contexto de sesion.
     }, cleanups);
   }
   if (!shell) criticalGaps.push("shell.hook");
@@ -178,6 +193,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       if (shouldBlockPluginResult(result, options)) {
         throw new Error(formatPluginBlock(result));
       }
+      await evaluatePlanningTool(input, options, planStorage);
     }, cleanups);
     capabilities.tool = true;
     capabilities["tool.execute.before"] = registered;
@@ -195,12 +211,44 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       : false;
     capabilities["memory.freshness"] = freshnessRegistered;
     if (!freshnessRegistered) degraded.push("memory.freshness");
+
+    const planningTools = typeof (tool as Record<string, unknown>).transform === "function"
+      ? tool as unknown as PlanningTools : undefined;
+    const approvalPort = isRecord(context.permission) && typeof context.permission.assert === "function"
+      ? context.permission as unknown as Parameters<typeof registerPlanningTools>[1] : undefined;
+    if (planningTools && approvalPort && planStorage && options.resolveSessionDirectory && options.permissionRegistered && registered) {
+      try {
+        const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options);
+        if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
+        capabilities["planning.v1"] = true;
+      } catch (error) {
+        warn(`herramientas de planeacion no registradas: ${(error as Error).message}`);
+      }
+    }
+    if (!capabilities["planning.v1"]) criticalGaps.push("planning.v1");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
+    criticalGaps.push("planning.v1");
   }
+
+  const modeHost = isRecord(context.command) && typeof context.command.transform === "function"
+    && isRecord(context.session) && typeof context.session.synthetic === "function"
+    && isRecord(context.permission) && typeof context.permission.assert === "function"
+    && options.resolveSessionDirectory
+    ? context as unknown as ModeCommandHost : undefined;
+  if (modeHost) {
+    try {
+      const registration = await registerModeCommand(modeHost, options);
+      if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
+      capabilities["mode.command"] = true;
+    } catch (error) {
+      warn(`comando de modo no registrado: ${(error as Error).message}`);
+    }
+  }
+  if (!capabilities["mode.command"]) degraded.push("mode.command");
 
   if (session) {
     for (const event of SESSION_HOOKS) {
@@ -220,6 +268,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
 
     const protocolRegistered = await registerHook(session, "context", async (input) => {
       injectMalahorProtocol(input);
+      await injectPlanningInstructions(input, options, planStorage);
     }, cleanups);
     capabilities["protocol.context"] = protocolRegistered;
     if (!protocolRegistered) degraded.push("protocol.context");

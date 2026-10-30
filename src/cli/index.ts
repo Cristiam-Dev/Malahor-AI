@@ -7,6 +7,7 @@ import { runGitCommand } from "./commands/git";
 import { runHooksCommand } from "./commands/hooks";
 import { runInstall } from "./commands/install";
 import { runMemory } from "./commands/memory";
+import { runMode } from "./commands/mode";
 import { runObsidian } from "./commands/obsidian";
 import { runUninstall } from "./commands/uninstall";
 import { runUpdate } from "./commands/update";
@@ -33,6 +34,9 @@ async function main(argv: string[]): Promise<void> {
           json: parsed.flags.has("json"),
           v2: parsed.flags.has("v2"),
         });
+        return;
+      case "mode":
+        await runMode({ action: parsed.args[0] ?? "status", args: parsed.args.slice(1), approval: parsed.options.approval, yes: parsed.flags.has("yes") });
         return;
       case "install":
         await runInstall({
@@ -183,6 +187,7 @@ Commands:
   hooks         Evaluar guardrails cross-harness
   context       Resolver proyecto, contexto y stack
   memory        Administrar la memoria
+  mode          Consultar o cambiar asesor/asistente/ejecutor (configuracion de Malahor)
   obsidian      Configurar el puente Obsidian MCP
   uninstall     Remover Malahor de OpenCode
   update        Actualizar instalacion, assets y politica
@@ -199,6 +204,11 @@ Context commands:
   context capsule [--project <key>] [--limit <n>]
   context save [summary...] [--project <key>]
   context register <project> <root> [<root> ...] [--dry-run]
+
+Mode commands:
+  mode status
+  mode preview <asesor|asistente|ejecutor>
+  mode set <asesor|asistente|ejecutor> [--yes] [--approval <evidencia-hook>]
 
 Memory commands:
   memory list
@@ -237,7 +247,7 @@ Flags:
   --self-heal      (doctor) Repara instalacion y migra permisos legacy
 
 Configuration:
-  MALAHOR_MODE                    assistant | executor
+  MALAHOR_MODE                    legacy; solo fallback si intervention no esta configurado
   MALAHOR_CONFIG                  Path to config.jsonc
   MALAHOR_HOME                    Override ~/.malahor
   MALAHOR_OPENCODE_DIR            Override ~/.config/opencode
@@ -245,7 +255,8 @@ Configuration:
   MALAHOR_EXECUTION_VERIFICATION  true | false
 
 Config file keys:
-  execution.intervention      ejecutar | guiar | acompanar
+   execution.intervention      ejecutar=ejecutor | guiar=asistente | acompanar=asesor
+   mode                        legacy; no anula execution.intervention
   execution.verification      boolean read-only verification
   projects.aliases            map canonical project to aliases
 

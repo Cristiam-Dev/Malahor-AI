@@ -3,10 +3,11 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { backupFile } from "../core/backup";
 import { copyAssets } from "../core/assets";
-import { formatExecutionPolicy, loadConfig, saveExecutionPolicy, type MalahorExecutionPolicy } from "../core/config";
+import { formatExecutionPolicy, loadConfig, type MalahorExecutionPolicy } from "../core/config";
+import { saveExecutionPolicy } from "../core/config-write";
 import { registerProjectRoot } from "../core/context";
 import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostKind } from "../core/detector";
-import { parseExecutionLevel } from "../core/execution-policy";
+import { parseExecutionLevel, reviseExecutionPolicy } from "../core/execution-policy";
 import { assertHooksAllowed } from "../core/hooks/engine";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { syncOpenCodeConfig } from "../core/injector";
@@ -146,7 +147,7 @@ export function runUpdate(options: UpdateOptions): void {
   printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
   printLine(`OpenCode build policy: ${host.kind === "v2" ? "runtime plugin (config verify-only)" : (options.dryRun ? "would sync" : "synced")} (${formatExecutionPolicy(execution)})`);
   printLine("Validation: passed (politica aplicada al final)");
-  printLine("Next: run `malahor-ai doctor`. Si la politica cambio, abre una sesion nueva de OpenCode para recargarla.");
+  printLine("Next: run `malahor-ai doctor`. Un cambio de modo aplica desde el siguiente turno de la sesion actual.");
 }
 
 function ensureBuild(packagePaths: MalahorPackagePaths, detection: DetectionResult, options: UpdateOptions): void {
@@ -193,7 +194,7 @@ function validateBeforePolicy(
 function resolveFinalPolicy(stored: MalahorExecutionPolicy, options: UpdateOptions): MalahorExecutionPolicy {
   if (options.policyAfter !== undefined) {
     const intervention = parseExecutionLevel(options.policyAfter, stored.intervention);
-    return { intervention, verification: intervention === "acompanar" ? false : stored.verification };
+    return reviseExecutionPolicy(stored, intervention, stored.verification);
   }
 
   return stored;

@@ -36,6 +36,8 @@ Construyes, delegas e integras. No eres un segundo orquestador ni un constructor
 
 ## Trabajo
 
+- Un único modo `execution.intervention`: `acompanar`=asesor (no ejecuta), `guiar`=asistente (confirma plan y luego ejecución), `ejecutar`=ejecutor (aprueba plan antes de ejecutar). Con el adaptador disponible, `malahor_plan` expone resumen, pasos y efectos exactos; `malahor_run` solicita la aprobación restante. No uses los modos Plan/Build de OpenCode como sustituto.
+- El usuario cambia el modo con `/malahor-modo <asesor|asistente|ejecutor>` y confirmación nativa; `status` y `preview <modo>` son informativos. Nunca lo ejecutes en su nombre. La CLI equivalente es `malahor-ai mode set <modo>`; el cambio aplica desde el siguiente turno de la misma sesión e invalida los planes anteriores.
 - Nivel 0 para cambios triviales; nivel 1 para cambios normales; nivel 2 para arquitectura, migraciones, seguridad o alto riesgo.
 - No ejecutes testing/build completos en cada interacción; hazlo cuando se pida commit o se solicite explícitamente.
 - Commit, stage y push solo con orden explícita. "Continúa", "listo" o "cierra la fase" no autorizan.

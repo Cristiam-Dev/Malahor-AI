@@ -32,13 +32,13 @@ function readState(): Record<string, unknown> {
 
 function v2Context(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    session: { hook: () => undefined },
+    session: { hook: () => undefined, get: async () => undefined, synthetic: async () => undefined },
     mcp: { transform: () => undefined },
     agent: { transform: () => undefined },
     command: { transform: () => undefined },
     skill: { transform: () => undefined },
-    permission: { hook: () => undefined },
-    tool: { hook: () => undefined },
+    permission: { hook: () => undefined, assert: async () => undefined },
+    tool: { hook: () => undefined, transform: () => undefined },
     shell: { hook: () => undefined },
     event: { subscribe: () => (async function* () {})() },
     storage: { get: async () => undefined, set: async () => undefined },
@@ -82,6 +82,8 @@ describe("scaffold del plugin", () => {
       storage: true,
       "permission.evaluate": true,
       "tool.execute.before": true,
+      "planning.v1": true,
+      "mode.command": true,
       "shell.create.before": true,
       "session.prompt.before": true,
       "session.context.before": true,
@@ -99,7 +101,7 @@ describe("scaffold del plugin", () => {
     });
 
     const state = readState();
-    expect(state.criticalGaps).toEqual([]);
+    expect(state.criticalGaps).toContain("planning.v1");
     expect(state.degraded).toContain("mcp");
     expect(state.degraded).toContain("storage");
   });

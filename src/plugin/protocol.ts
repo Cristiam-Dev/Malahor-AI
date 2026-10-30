@@ -20,10 +20,14 @@ Proyecto y contexto
 
 Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
+- Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
+- Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. Si cambia el plan o vence, preséntalo de nuevo.
+- El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
+- Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni la documentación en Obsidian.
 - Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
 - No edites opencode.json/opencode.jsonc manualmente ni pidas al usuario hacerlo; usa las rutas de diagnóstico y reparación de Malahor.
-- Si instalación, permisos o política cambian, informa que hace falta una sesión nueva para recargar el host.
+- Un cambio de modo no requiere una sesion nueva. Si cambian assets o capacidades del host, sigue el diagnostico de Malahor y usa /reload solo cuando este lo indique.
 
 Contexto técnico y skills
 - Usa el contexto técnico configurado del proyecto y lecturas dirigidas; no actives herramientas opcionales por comodidad ni escribas grafos dentro del repo.

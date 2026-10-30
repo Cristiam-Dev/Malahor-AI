@@ -24,6 +24,7 @@ export interface PluginAdapterOptions {
   permissionRegistered?: boolean;
   shellRegistered?: boolean;
   resolveSessionDirectory?: (sessionID: string) => Promise<string | undefined>;
+  resolveParentSession?: (sessionID: string) => Promise<{ parentID: string; agent: string } | undefined>;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -515,7 +516,7 @@ function pathValues(value: unknown): string[] {
 
 const PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 
-function detectSecretKinds(value: unknown): string[] {
+export function detectSecretKinds(value: unknown): string[] {
   const text = collectStrings(value).join("\n");
   if (!text) return [];
 

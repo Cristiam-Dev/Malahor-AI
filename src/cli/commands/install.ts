@@ -8,12 +8,12 @@ import { copyAssets } from "../core/assets";
 import {
   formatExecutionPolicy,
   loadConfig,
-  saveExecutionPolicy,
   type MalahorExecutionPolicy,
 } from "../core/config";
+import { saveExecutionPolicy } from "../core/config-write";
 import { registerProjectRoot } from "../core/context";
 import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostKind } from "../core/detector";
-import { parseExecutionLevel } from "../core/execution-policy";
+import { parseExecutionLevel, reviseExecutionPolicy } from "../core/execution-policy";
 import { assertHooksAllowed } from "../core/hooks/engine";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { syncOpenCodeConfig } from "../core/injector";
@@ -156,7 +156,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   const legacyHint = legacyInstructionsHint(paths.opencodeMd);
   if (legacyHint) printLine(legacyHint);
   printLine("Validation: passed (politica aplicada al final)");
-  printLine("Next: run `malahor-ai doctor`. Si la politica cambio, abre una sesion nueva de OpenCode para recargarla.");
+  printLine("Next: run `malahor-ai doctor`. Un cambio de modo aplica desde el siguiente turno de la sesion actual.");
   printLine("Reparacion sin consola: /malahor-bootstrap y /malahor-reparar funcionan aunque el agente este bloqueado.");
   if (!options.dryRun && !options.yes && !options.bootstrap) {
     try {
@@ -213,7 +213,7 @@ function validateBeforePolicy(
 async function resolveFinalPolicy(stored: MalahorExecutionPolicy, options: InstallOptions): Promise<MalahorExecutionPolicy> {
   if (options.policyAfter !== undefined) {
     const intervention = parseExecutionLevel(options.policyAfter, stored.intervention);
-    return { intervention, verification: intervention === "acompanar" ? false : stored.verification };
+    return reviseExecutionPolicy(stored, intervention, stored.verification);
   }
 
   if (options.yes || options.bootstrap || !process.stdin.isTTY || !process.stdout.isTTY) {

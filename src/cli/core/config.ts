@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -5,12 +6,15 @@ import type { ProjectAliases } from "./project";
 import { type MalahorPaths, resolvePaths } from "./paths";
 import { stripJsonComments } from "./jsonc";
 
-export type MalahorMode = "assistant" | "executor";
+/** Vista derivada de execution.intervention; no es una segunda configuración. */
+export type MalahorMode = "advisor" | "assistant" | "executor";
 export type MalahorIntervention = "ejecutar" | "guiar" | "acompanar";
 
 export interface MalahorExecutionPolicy {
   intervention: MalahorIntervention;
   verification: boolean;
+  /** Cambia con cada cambio de modo e invalida planes emitidos con otra politica. */
+  revision: string;
 }
 
 export interface MalahorConfig {
@@ -35,11 +39,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   const executionConfig = readOptionalObject(fileConfig.execution, "execution");
   const projectsConfig = readOptionalObject(fileConfig.projects, "projects");
   const paths = resolvePaths({ ...resolvePathEnv(env, fileConfig), MALAHOR_CONFIG: defaultPaths.configFile }, cwd);
+  const legacyMode = env.MALAHOR_MODE ?? fileConfig.mode;
+  if (legacyMode !== undefined) resolveMode(legacyMode); // validar legado, nunca usarlo si hay intervention explicita.
+  const execution = resolveExecutionPolicy(env, executionConfig, legacyMode);
 
   return {
-    mode: resolveMode(env.MALAHOR_MODE ?? fileConfig.mode),
+    mode: modeForIntervention(execution.intervention),
     paths,
-    execution: resolveExecutionPolicy(env, executionConfig),
+    execution,
     projects: {
       aliases: readProjectAliases(projectsConfig?.aliases),
     },
@@ -51,34 +58,26 @@ export function resolveMode(value: unknown = process.env.MALAHOR_MODE): MalahorM
     return "assistant";
   }
 
-  if (value === "assistant" || value === "executor") {
+  if (value === "advisor" || value === "assistant" || value === "executor") {
     return value;
   }
 
-  throw new Error(`Modo Malahor invalido: ${String(value)}. Usa "assistant" o "executor".`);
+  throw new Error(`Modo Malahor invalido: ${String(value)}. Usa "advisor", "assistant" o "executor".`);
+}
+
+export function modeForIntervention(intervention: MalahorIntervention): MalahorMode {
+  switch (intervention) {
+    case "acompanar": return "advisor";
+    case "guiar": return "assistant";
+    case "ejecutar": return "executor";
+  }
 }
 
 export function formatExecutionPolicy(value: MalahorExecutionPolicy): string {
-  return `${value.intervention}, verification=${value.verification ? "enabled" : "disabled"}`;
+  return `${value.intervention}, verification=${value.verification ? "enabled" : "disabled"}, revision=${value.revision.slice(0, 8)}`;
 }
 
-export function saveExecutionPolicy(config: MalahorConfig, dryRun: boolean): boolean {
-  const current = readConfigFile(config.paths.configFile);
-  const next: ConfigFile = {
-    ...current,
-    mode: current.mode ?? config.mode,
-    execution: config.execution,
-  };
-
-  if (!dryRun) {
-    fs.mkdirSync(path.dirname(config.paths.configFile), { recursive: true });
-    fs.writeFileSync(config.paths.configFile, `${JSON.stringify(next, null, 2)}\n`, "utf8");
-  }
-
-  return true;
-}
-
-function readConfigFile(filePath: string): ConfigFile {
+export function readConfigFile(filePath: string): ConfigFile {
   if (!fs.existsSync(filePath)) {
     return {};
   }
@@ -108,20 +107,35 @@ function resolvePathEnv(env: NodeJS.ProcessEnv, config: ConfigFile): NodeJS.Proc
   };
 }
 
-function resolveExecutionPolicy(env: NodeJS.ProcessEnv, config: Record<string, unknown> | undefined): MalahorExecutionPolicy {
+function resolveExecutionPolicy(
+  env: NodeJS.ProcessEnv, config: Record<string, unknown> | undefined, legacyMode?: unknown,
+): MalahorExecutionPolicy {
+  const legacyIntervention = legacyMode === undefined || legacyMode === null || legacyMode === ""
+    ? undefined
+    : { advisor: "acompanar", assistant: "guiar", executor: "ejecutar" }[resolveMode(legacyMode)];
   const intervention = readIntervention(
-    env.MALAHOR_EXECUTION_INTERVENTION ?? config?.intervention,
+    env.MALAHOR_EXECUTION_INTERVENTION ?? config?.intervention ?? legacyIntervention,
     "execution.intervention",
   );
   const verification = readOptionalBoolean(
     env.MALAHOR_EXECUTION_VERIFICATION ?? config?.verification,
     "execution.verification",
   );
+  const revision = readExecutionRevision(config?.revision, intervention);
 
   return {
     intervention,
     verification: intervention === "acompanar" ? false : verification ?? true,
+    revision,
   };
+}
+
+function readExecutionRevision(value: unknown, intervention: MalahorIntervention): string {
+  if (value === undefined || value === null || value === "") {
+    return createHash("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
+  }
+  if (typeof value === "string" && /^[a-f0-9]{32}$/.test(value)) return value;
+  throw new Error("La configuracion execution.revision debe ser un identificador hexadecimal de 32 caracteres.");
 }
 
 function readIntervention(value: unknown, key: string): MalahorIntervention {
