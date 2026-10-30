@@ -1,7 +1,7 @@
 {
   "name": "malahor-ai",
   "version": "0.1.1",
-  "description": "CLI local para potenciar agentes de IA con memoria persistente, OpenCode, Graphify, SDD y Obsidian.",
+  "description": "CLI local para potenciar agentes de IA con memoria persistente, OpenCode, SDD y Obsidian.",
   "license": "UNLICENSED",
   "type": "module",
   "keywords": [
@@ -10,7 +10,6 @@
     "cli",
     "opencode",
     "mnemo",
-    "graphify",
     "obsidian",
     "memory",
     "sdd",
@@ -43,7 +42,6 @@
     "dev:sandbox": "bun run build && MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode node dist/index.js install --yes",
     "doctor:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts doctor",
     "context:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts context status",
-    "graph:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts graph --dry-run",
     "uninstall:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts uninstall --yes",
     "update:sandbox": "MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode bun run src/cli/index.ts update --yes",
     "sandbox:reset": "rm -rf .sandbox"

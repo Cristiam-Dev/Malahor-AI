@@ -3,9 +3,8 @@ import path from "node:path";
 import { copyAssets } from "../core/assets";
 import { backupFile } from "../core/backup";
 import { formatExecutionPolicy, loadConfig, type MalahorConfig, type MalahorExecutionPolicy } from "../core/config";
-import { levelForProject } from "../core/context";
+import { contextLevelLabel, levelForProject } from "../core/context";
 import { detectEnvironment, detectOpenCodeHost, supportsMemoryRuntime, type DetectionResult, type OpenCodeHostInfo, type OpenCodeHostKind } from "../core/detector";
-import { graphifyStatus } from "../core/graphify";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { isMalahorBashPolicy, readOpenCodeConfig, syncOpenCodeConfig, type OpenCodeConfig } from "../core/injector";
 import { instructionsState, syncManagedInstructions } from "../core/instructions";
@@ -61,7 +60,6 @@ function renderReport(
   options: DoctorOptions,
 ): void {
   const project = resolveProject(packagePaths?.root ?? paths.cwd, config.projects.aliases);
-  const graphStatus = graphifyStatus(paths);
   const checks: CheckResult[] = [];
 
   checks.push({ name: "Node", ok: supportsMemoryRuntime(detection.nodeVersion), message: `${detection.nodeVersion} (required >=22.18.0)`, critical: true });
@@ -72,7 +70,6 @@ function renderReport(
   checks.push({ name: "Mnemo dir", ok: fs.existsSync(paths.mnemoDir), message: paths.mnemoDir, critical: true });
   checks.push({ name: "Mnemo index", ok: fs.existsSync(paths.mnemoIndex), message: paths.mnemoIndex, critical: true });
   checks.push({ name: "Assets dir", ok: fs.existsSync(paths.assetsDir), message: paths.assetsDir, critical: true });
-  checks.push({ name: "Graphs dir", ok: fs.existsSync(paths.graphsDir), message: paths.graphsDir, critical: true });
   checks.push({ name: "OpenCode config", ok: fs.existsSync(paths.opencodeConfig), message: paths.opencodeConfig, critical: true });
   checks.push(checkInstructions(paths));
   checks.push(checkLegacyInstructions(paths));
@@ -86,15 +83,6 @@ function renderReport(
   }
   checks.push(checkHookPolicy(paths, project.canonicalKey));
   checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution, host, paths));
-  checks.push({
-    name: "Graphify",
-    ok: graphStatus.source !== "missing",
-    message: graphStatus.source === "missing"
-      ? `not installed (python=${graphStatus.python ?? "missing"}; reparable con \`malahor-ai graphify install\`)`
-      : `${graphStatus.source}: ${graphStatus.command}${graphStatus.version ? ` (${graphStatus.version})` : ""}`,
-    critical: false,
-  });
-
   process.stdout.write(`\nmalahor-ai doctor${options.selfHeal ? " --self-heal" : ""}\n=================\n`);
   process.stdout.write(`Mode: ${config.mode}\n`);
   process.stdout.write(`Config file: ${paths.configFile}\n`);
@@ -104,7 +92,7 @@ function renderReport(
   process.stdout.write(`Project: ${project.name}\n`);
   process.stdout.write(`Project root: ${project.root}\n`);
   process.stdout.write(`Canonical key: ${project.canonicalKey}\n`);
-  process.stdout.write(`Project context: ${levelForProject(paths.projectsFile, project.canonicalKey)}\n`);
+  process.stdout.write(`Project context: ${contextLevelLabel(levelForProject(paths.projectsFile, project.canonicalKey))}\n`);
   process.stdout.write(`Project aliases: ${project.aliases.length > 0 ? project.aliases.join(", ") : "none"}\n`);
   process.stdout.write(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}\n\n`);
 
@@ -155,7 +143,7 @@ function selfHeal(
 ): string[] {
   const repairs: string[] = [];
 
-  const missingDirs = [paths.mnemoDir, paths.assetsDir, paths.graphsDir, paths.vaultDir, paths.opencodeDir].filter((dir) => !fs.existsSync(dir));
+  const missingDirs = [paths.mnemoDir, paths.assetsDir, paths.vaultDir, paths.opencodeDir].filter((dir) => !fs.existsSync(dir));
   if (missingDirs.length > 0) {
     if (!dryRun) {
       for (const dir of missingDirs) {

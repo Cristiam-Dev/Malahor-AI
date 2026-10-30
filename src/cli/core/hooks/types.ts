@@ -225,7 +225,7 @@ export const HOOK_EVENTS = [
   "memory.restore.preview",
   "memory.restore.apply",
   "obsidian.write.before",
-  "graphify.generate.before",
+  "codegraph.index.before",
   "install.preflight",
   "install.beforePolicy",
   "update.preflight",

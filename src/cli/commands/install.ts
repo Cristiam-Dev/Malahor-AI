@@ -12,7 +12,6 @@ import {
 import { registerProjectRoot } from "../core/context";
 import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostKind } from "../core/detector";
 import { parseExecutionLevel } from "../core/execution-policy";
-import { findGraphifyCommand, installGraphifyVenv } from "../core/graphify";
 import { assertHooksAllowed } from "../core/hooks/engine";
 import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { syncOpenCodeConfig } from "../core/injector";
@@ -31,7 +30,6 @@ export interface InstallOptions {
   dryRun: boolean;
   yes: boolean;
   bootstrap: boolean;
-  withGraphify: boolean;
   policyAfter: string | undefined;
 }
 
@@ -76,7 +74,6 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   if (!options.dryRun) {
     fs.mkdirSync(paths.mnemoDir, { recursive: true });
     fs.mkdirSync(paths.assetsDir, { recursive: true });
-    fs.mkdirSync(paths.graphsDir, { recursive: true });
     fs.mkdirSync(paths.vaultDir, { recursive: true });
     fs.mkdirSync(paths.opencodeDir, { recursive: true });
   }
@@ -122,7 +119,6 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   printLine(`Mnemo MCP: ${host.kind === "v2" ? "runtime plugin transform" : "configured in legacy config"}`);
   printLine(`OpenCode compaction: ${host.kind === "v2" ? "runtime plugin hook (verify-only config)" : "configured"}`);
 
-  runGraphifyStep(paths, options);
   validateBeforePolicy(paths, packagePaths, options, host.kind === "v2", host.kind === "v2", host.kind);
 
   const execution = await resolveFinalPolicy(config.execution, options);
@@ -177,28 +173,6 @@ function ensureBuild(packagePaths: MalahorPackagePaths, _paths: MalahorPaths, de
   if (options.dryRun) return;
 
   throw new Error("No existe dist/mnemo/index.js. Ejecuta `bun run build` antes de instalar (o usa `install --bootstrap` con bun disponible).");
-}
-
-function runGraphifyStep(paths: MalahorPaths, options: InstallOptions): void {
-  const already = findGraphifyCommand(paths);
-  if (already) {
-    printLine(`Graphify: found (${already === "graphify" || already === "graphifyy" ? "sistema" : "venv aislado"}: ${already})`);
-    return;
-  }
-
-  if (!options.withGraphify && !options.bootstrap) {
-    printLine("Graphify: not found (opcional; `malahor-ai graphify install` o usa --with-graphify).");
-    return;
-  }
-
-  const result = installGraphifyVenv(paths, options.dryRun);
-  if (result.ok) {
-    printLine(`Graphify: ${options.dryRun ? "would install in venv" : "installed in isolated venv"} (${result.command})`);
-  } else {
-    printLine("Graphify: degraded (no bloquea la instalacion)");
-    printLine(`  Motivo: ${result.error}`);
-    printLine("  Reparacion: `malahor-ai graphify install` cuando Python este disponible.");
-  }
 }
 
 function validateBeforePolicy(

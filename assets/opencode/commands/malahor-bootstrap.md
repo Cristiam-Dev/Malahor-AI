@@ -15,5 +15,5 @@ Instrucciones:
 2. Si la capsula muestra instalacion exitosa, corre `malahor-ai doctor` para confirmar y reporta en maximo 10 lineas: que se instalo, resultado del doctor y proximo paso.
 3. Si la politica de intervencion cambio o se aplico por primera vez, avisa al usuario que abra una sesion nueva de OpenCode para recargar permisiones.
 4. Si la capsula muestra `MALAHOR_CLI_MISSING`, instala el CLI tu mismo con tus herramientas (`npm install -g malahor-ai` o `bun add -g malahor-ai`) y vuelve a ejecutar el bootstrap. Si tus permisos tampoco lo permiten, entrega UNA sola linea copia-y-pega al usuario; nunca des instrucciones de terminales intermedios ni ediciones manuales de configuracion.
-5. Si Graphify quedo `degraded`, es opcional: sugiere `malahor-ai graphify install` para otro momento.
+5. No instales proveedores opcionales de contexto de codigo durante este flujo.
 6. No edites `opencode.jsonc` a mano; todas las reparaciones pasan por el CLI.

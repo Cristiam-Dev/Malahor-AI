@@ -5,8 +5,8 @@ Explorar contexto antes de proponer una solucion.
 ## Pasos
 
 1. Cargar memoria Mnemo del proyecto.
-2. Revisar grafo externo si existe.
-3. Generar grafo con `malahor-ai graph` si falta y Graphify esta disponible.
+2. Revisar la capacidad de contexto de codigo configurada, si existe.
+3. Usar busquedas dirigidas cuando no haya una capacidad de contexto de codigo disponible; no instalar proveedores por conveniencia.
 4. Revisar si existe documentacion humana relevante (PRD, diseno, arquitectura, API, seguridad, testing o instrucciones de agente) cuando el nivel de contexto incluye Obsidian.
 5. Leer solo archivos necesarios.
 6. Identificar patrones existentes, puntos de cambio y riesgos.

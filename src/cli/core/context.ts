@@ -4,10 +4,12 @@ import path from "node:path";
 import type { MalahorPaths } from "./paths";
 import { resolveCanonicalProjectKey, resolveProject, type ProjectAliases, type ProjectInfo } from "./project";
 
+// Formato persistido heredado: solo lectura/preservacion hasta la migracion asistida de T-5.4.3.
+// No usar estos valores para activar o instalar proveedores de contexto de codigo.
 export type ContextLevel = "mnemo" | "mnemo+graphify" | "mnemo+graphify+obsidian";
 
 export const CONTEXT_LEVELS: readonly ContextLevel[] = ["mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"];
-export const DEFAULT_CONTEXT_LEVEL: ContextLevel = "mnemo+graphify";
+export const DEFAULT_CONTEXT_LEVEL: ContextLevel = "mnemo";
 
 export interface ProjectContext {
   context: ContextLevel;
@@ -92,13 +94,12 @@ export function resolveRegisteredProject(
     return {
       ...resolved,
       canonicalKey: canonicalKey ?? registered[0]?.canonicalKey ?? resolved.canonicalKey,
-      graphKey: canonicalKey ?? registered[0]?.canonicalKey ?? resolved.graphKey,
       root,
     };
   }
 
   const fallback = resolveProject(paths.cwd, aliases);
-  return canonicalKey ? { ...fallback, canonicalKey, graphKey: canonicalKey } : fallback;
+  return canonicalKey ? { ...fallback, canonicalKey } : fallback;
 }
 
 function resolveProjectHint(paths: MalahorPaths, aliases: ProjectAliases, hint?: string): string | undefined {
@@ -118,7 +119,7 @@ function resolveProjectHint(paths: MalahorPaths, aliases: ProjectAliases, hint?:
 
 export function parseContextLevel(value: unknown): ContextLevel {
   if (typeof value !== "string" || !CONTEXT_LEVELS.includes(value as ContextLevel)) {
-    throw new Error(`Nivel de contexto invalido: ${String(value)}. Usa ${CONTEXT_LEVELS.join(", ")}.`);
+    throw new Error(`Nivel de contexto invalido: ${String(value)}. Consulta \`malahor-ai context help\`; los valores persistidos siguen en compatibilidad transitoria.`);
   }
 
   return value as ContextLevel;
@@ -185,27 +186,6 @@ export function registeredProjectRoots(projectsFile: string): RegisteredProjectR
   ));
 }
 
-export function saveProjectContext(
-  projectsFile: string,
-  canonicalKey: string,
-  context: ContextLevel,
-  dryRun: boolean,
-  root?: string,
-): void {
-  const current = loadProjectsFile(projectsFile);
-  const existing = current[canonicalKey] ?? { context };
-  const nextEntry: ProjectContext = { ...existing, context };
-  if (root) {
-    const normalized = normalizeRoot(root);
-    const roots = [...new Set([...(existing.roots ?? []), normalized])];
-    nextEntry.roots = roots;
-    nextEntry.defaultRoot = normalized;
-  }
-  const next: ProjectsFile = { ...current, [canonicalKey]: nextEntry };
-
-  writeProjectsFile(projectsFile, next, dryRun);
-}
-
 export function registerProjectRoot(projectsFile: string, canonicalKey: string, root: string, dryRun: boolean): void {
   const current = loadProjectsFile(projectsFile);
   const existing = current[canonicalKey] ?? { context: DEFAULT_CONTEXT_LEVEL };
@@ -253,22 +233,14 @@ function readRoot(value: unknown, key: string): string | undefined {
   return normalizeRoot(value);
 }
 
-export function graphifyEnabled(level: ContextLevel): boolean {
-  return level !== "mnemo";
-}
-
 export function obsidianEnabled(level: ContextLevel): boolean {
   return level === "mnemo+graphify+obsidian";
 }
 
-export function withObsidian(level: ContextLevel, enabled: boolean): ContextLevel {
-  if (enabled) return "mnemo+graphify+obsidian";
-  return level === "mnemo+graphify+obsidian" ? "mnemo+graphify" : level;
-}
-
-export function withGraphify(level: ContextLevel, enabled: boolean): ContextLevel {
-  if (enabled) return level === "mnemo" ? "mnemo+graphify" : level;
-  return "mnemo";
+export function contextLevelLabel(level: ContextLevel): string {
+  if (level === "mnemo") return "memory";
+  if (obsidianEnabled(level)) return "memory+code-context+obsidian (provider pending)";
+  return "memory+code-context (provider pending)";
 }
 
 function secureChmod(target: string, mode: number): void {

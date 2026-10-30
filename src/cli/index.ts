@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 import { runConfig } from "./commands/config";
+import { runContext } from "./commands/context";
 import { runDoctor } from "./commands/doctor";
 import { runGitCommand } from "./commands/git";
-import { runGraph } from "./commands/graph";
-import { runContext } from "./commands/context";
-import { runInstall } from "./commands/install";
 import { runHooksCommand } from "./commands/hooks";
+import { runInstall } from "./commands/install";
 import { runMemory } from "./commands/memory";
 import { runObsidian } from "./commands/obsidian";
 import { runUninstall } from "./commands/uninstall";
@@ -39,18 +38,11 @@ async function main(argv: string[]): Promise<void> {
           dryRun: parsed.flags.has("dry-run"),
           yes: parsed.flags.has("yes"),
           bootstrap: parsed.flags.has("bootstrap"),
-          withGraphify: parsed.flags.has("with-graphify"),
           policyAfter: parsed.options["policy-after"],
         });
         return;
       case "doctor":
         runDoctor({ dryRun: parsed.flags.has("dry-run"), selfHeal: parsed.flags.has("self-heal") });
-        return;
-      case "graph":
-        runGraph({ action: parsed.args[0] ?? "generate", dryRun: parsed.flags.has("dry-run") });
-        return;
-      case "graphify":
-        runGraph({ action: parsed.args[0] ?? "status", dryRun: parsed.flags.has("dry-run") });
         return;
       case "git":
         runGitCommand({
@@ -123,7 +115,6 @@ async function main(argv: string[]): Promise<void> {
           dryRun: parsed.flags.has("dry-run"),
           yes: parsed.flags.has("yes"),
           bootstrap: parsed.flags.has("bootstrap"),
-          withGraphify: parsed.flags.has("with-graphify"),
           policyAfter: parsed.options["policy-after"],
         });
         return;
@@ -171,8 +162,79 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function printHelp(): void {
-  process.stdout.write(`malahor-ai\n\nCommands:\n  config        Revisar/consolidar opencode.json + opencode.jsonc (preview, respaldo y rollback)\n  install       Install Malahor for OpenCode (politica diferida: valida antes de bloquear)\n  doctor        Diagnose current installation (--self-heal repara y migra permisos)\n  graph         Generate external code graph\n  graphify      Manage isolated Graphify venv (status|install|verify)\n  git           Assisted git workflow (precommit, prepush, commit-message)\n  context       Configure project context and detect stack\n  memory        Administer Mnemo memory\n  obsidian      Configure Obsidian MCP bridge\n  uninstall     Remove Malahor from OpenCode (incluye los bloqueos de build)\n  update        Refresh Malahor installation (migrar politicas legacy)\n\nGraphify commands:\n  graphify status [--dry-run]\n  graphify install [--dry-run]\n  graphify verify [--dry-run]\n\nGit commands:\n  git precommit [--message <mensaje>] [--profile <perfil>]\n  git prepush [--profile release]\n  git commit-message [resumen...] [--type <tipo>] [--scope <scope>] [--icon <emoji>]\n\nContext commands:\n  context status [--project <key>]\n  context detect [--project <key>]\n  context recover [--project <key>] [--limit <n>]\n  context capsule [--project <key>] [--limit <n>]\n  context save [summary...] [--project <key>]\n  context set mnemo|mnemo+graphify|mnemo+graphify+obsidian [--project <key>] [--dry-run]\n  context obsidian on|off [--project <key>] [--dry-run]\n  context graphify on|off [--project <key>] [--dry-run]\n\nMemory commands:\n  memory list\n  memory tree [prefix]\n  memory search <query...> [--project <scope>] [--subtree] [--type <type>] [--limit <n>]\n  memory inspect <project>\n  memory backup [--dry-run]\n  memory reset <project> [--dry-run | --yes --confirm <project>]\n  memory reset --all [--dry-run | --yes --confirm ALL]\n  memory restore <backup-file> [--dry-run | --yes --confirm RESTORE]\n\nObsidian commands:\n  obsidian status [--mode wsl-windows|windows-local]\n  obsidian guide [--mode wsl-windows|windows-local]\n  obsidian setup [--dry-run] [--yes] [--mode wsl-windows|windows-local]\n  obsidian verify [--mode wsl-windows|windows-local]\n\nConfig commands:\n  config status [--json]\n  config consolidate [--apply --yes --confirm <token>] [--dry-run]\n  config rollback [--apply --yes --confirm <token>] [--dry-run]\n\nFlags:\n  --dry-run        Show actions without writing files\n  --yes            Use defaults without prompts\n  --bootstrap      Agent-safe: auto-build con bun, Graphify opcional, sin prompts\n  --with-graphify  Intenta instalar Graphify en venv aislado (degrada sin romper)\n  --policy-after   ejecutar | guiar | acompanar (aplicada al final, tras validar)\n  --self-heal      (doctor) Repara instalacion y migra permisos legacy\n\nConfiguration:\n  MALAHOR_MODE                    assistant | executor\n  MALAHOR_CONFIG                  Path to config.jsonc\n  MALAHOR_HOME                    Override ~/.malahor\n  MALAHOR_OPENCODE_DIR            Override ~/.config/opencode\n  MALAHOR_EXECUTION_INTERVENTION  ejecutar | guiar | acompanar\n  MALAHOR_EXECUTION_VERIFICATION  true | false\n\nConfig file keys:\n  execution.intervention      ejecutar | guiar | acompanar\n  execution.verification      boolean read-only verification\n  projects.aliases            map canonical project to aliases\n\nSandbox example:\n  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes\n`);
-  process.stdout.write(`\nMemory migration:\n  memory migrate [--dry-run]\n  memory migrate --apply --yes --confirm <token>\n`);
+  process.stdout.write(`malahor-ai
+
+Commands:
+  config        Revisar y consolidar la configuracion de OpenCode
+  install       Instalar Malahor para OpenCode
+  doctor        Diagnosticar y reparar la instalacion
+  git           Ejecutar el flujo git asistido
+  hooks         Evaluar guardrails cross-harness
+  context       Resolver proyecto, contexto y stack
+  memory        Administrar la memoria
+  obsidian      Configurar el puente Obsidian MCP
+  uninstall     Remover Malahor de OpenCode
+  update        Actualizar instalacion, assets y politica
+
+Git commands:
+  git precommit [--message <mensaje>] [--profile <perfil>]
+  git prepush [--profile release]
+  git commit-message [resumen...] [--type <tipo>] [--scope <scope>] [--icon <emoji>]
+
+Context commands:
+  context status [--project <key>]
+  context detect [--project <key>]
+  context recover [--project <key>] [--limit <n>]
+  context capsule [--project <key>] [--limit <n>]
+  context save [summary...] [--project <key>]
+  context register <project> <root> [<root> ...] [--dry-run]
+
+Memory commands:
+  memory list
+  memory tree [prefix]
+  memory search <query...> [--project <scope>] [--subtree] [--type <type>] [--limit <n>]
+  memory inspect <project>
+  memory backup [--dry-run]
+  memory reset <project> [--dry-run | --yes --confirm <project>]
+  memory reset --all [--dry-run | --yes --confirm ALL]
+  memory restore <backup-file> [--dry-run | --yes --confirm RESTORE]
+  memory migrate [--dry-run]
+  memory migrate --apply --yes --confirm <token>
+
+Obsidian commands:
+  obsidian status [--mode wsl-windows|windows-local]
+  obsidian guide [--mode wsl-windows|windows-local]
+  obsidian setup [--dry-run] [--yes] [--mode wsl-windows|windows-local]
+  obsidian verify [--mode wsl-windows|windows-local]
+
+Config commands:
+  config status [--json]
+  config consolidate [--apply --yes --confirm <token>] [--dry-run]
+  config rollback [--apply --yes --confirm <token>] [--dry-run]
+
+Flags:
+  --dry-run        Show actions without writing files
+  --yes            Use defaults without prompts
+  --bootstrap      Agent-safe: auto-build con bun, sin prompts
+  --policy-after   ejecutar | guiar | acompanar (aplicada al final, tras validar)
+  --self-heal      (doctor) Repara instalacion y migra permisos legacy
+
+Configuration:
+  MALAHOR_MODE                    assistant | executor
+  MALAHOR_CONFIG                  Path to config.jsonc
+  MALAHOR_HOME                    Override ~/.malahor
+  MALAHOR_OPENCODE_DIR            Override ~/.config/opencode
+  MALAHOR_EXECUTION_INTERVENTION  ejecutar | guiar | acompanar
+  MALAHOR_EXECUTION_VERIFICATION  true | false
+
+Config file keys:
+  execution.intervention      ejecutar | guiar | acompanar
+  execution.verification      boolean read-only verification
+  projects.aliases            map canonical project to aliases
+
+Sandbox example:
+  MALAHOR_HOME=.sandbox/home/.malahor MALAHOR_OPENCODE_DIR=.sandbox/home/.config/opencode malahor-ai install --yes
+`);
 }
 
 void main(process.argv.slice(2));

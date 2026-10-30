@@ -6,7 +6,6 @@ export type ProjectAliases = Record<string, string[]>;
 export interface ProjectInfo {
   name: string;
   canonicalKey: string;
-  graphKey: string;
   root: string;
   aliases: string[];
 }
@@ -23,7 +22,6 @@ export function resolveProject(cwd = process.cwd(), aliases: ProjectAliases = {}
   return {
     name,
     canonicalKey,
-    graphKey: canonicalKey,
     root,
     aliases: aliasesForProject(canonicalKey, aliases),
   };

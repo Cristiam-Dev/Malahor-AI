@@ -106,7 +106,7 @@ function policySafetyGuard(context: HookContext): HookViolation[] {
       id: "MAL-HOOK-POLICY-DEFER",
       decision: "deny",
       message: "La politica de agente no puede aplicarse antes de validar instalacion/update.",
-      fix: "Ejecuta assets/Mnemo/comandos/Graphify/validateInstallation y aplica politica al final.",
+      fix: "Ejecuta assets/memoria/comandos/validateInstallation y aplica politica al final.",
     });
   }
   if (context.policy?.policy.blockTotalBashDeny !== false && context.metadata?.bashDenyTotal === true) {
@@ -114,7 +114,7 @@ function policySafetyGuard(context: HookContext): HookViolation[] {
       id: "MAL-HOOK-POLICY-BASH-DENY",
       decision: "deny",
       message: "guiar/acompanar no pueden escribir bash:'deny' total.",
-      fix: "Usa whitelist v2 con doctor/context/graphify allow e install/update ask.",
+      fix: "Usa whitelist v2 con doctor/context allow e install/update ask.",
     });
   }
 
@@ -736,7 +736,7 @@ function controlAffectsEvent(gap: string, event: HookEvent): boolean {
       || event === "shell.exec.before"
       || event === "tool.execute.before"
       || event === "obsidian.write.before"
-      || event === "graphify.generate.before"
+      || event === "codegraph.index.before"
       || event === "database.change.before";
   }
   if (control.startsWith("shell.")) return event === "shell.exec.before";

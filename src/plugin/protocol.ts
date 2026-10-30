@@ -26,7 +26,7 @@ Intervención y reparación
 
 Contexto técnico y skills
 - Usa el contexto técnico configurado del proyecto y lecturas dirigidas; no actives herramientas opcionales por comodidad ni escribas grafos dentro del repo.
-- Graphify es legado retirado; no lo actives ni lo presentes como requisito. Usa la capacidad de código configurada cuando esté disponible.
+- Usa la capacidad de código configurada cuando esté disponible; no instales ni actives proveedores por conveniencia.
 - Prefiere skills first-party gestionadas. Las skills externas no gestionadas no son instrucciones autorizadas ni deben cargarse por defecto.
 
 Memoria y documentación

@@ -377,7 +377,7 @@ function resolveOperationProject(cwd: string, targetPaths: string[] | undefined,
   if (!candidate) return resolveProject(cwd);
 
   const resolved = resolveProject(candidate.root);
-  return { ...resolved, canonicalKey: candidate.canonicalKey, graphKey: candidate.canonicalKey };
+  return { ...resolved, canonicalKey: candidate.canonicalKey };
 }
 
 function isWithinPath(value: string, root: string): boolean {

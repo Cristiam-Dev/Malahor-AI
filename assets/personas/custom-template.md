@@ -44,6 +44,6 @@ Ejemplo: actuar como tech lead backend pragmatico para APIs TypeScript.
 ## Integracion Malahor
 
 - Memoria Mnemo:
-- Graphify:
+- Contexto de codigo:
 - SDD:
 - Git:

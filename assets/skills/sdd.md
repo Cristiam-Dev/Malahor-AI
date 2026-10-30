@@ -20,5 +20,5 @@ Usar este flujo para cambios no triviales: features nuevas, refactors amplios, c
 - No saltar `sdd-quality`.
 - Si calidad falla, volver a `sdd-apply` antes de verificar.
 - Guardar decisiones importantes en Mnemo.
-- Usar Graphify antes de leer muchos archivos raw.
+- Usar la capacidad de contexto de codigo configurada o busquedas dirigidas antes de leer muchos archivos raw.
 - No crear artefactos SDD dentro del repo objetivo salvo pedido explicito del usuario.

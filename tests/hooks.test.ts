@@ -40,9 +40,11 @@ describe("malahor hooks", () => {
       "tool.execute.before",
       "session.prompt.before",
       "plugin.permission.before",
+      "codegraph.index.before",
     ]) {
       expect(events.has(event)).toBe(true);
     }
+    expect(events.has("graphify.generate.before")).toBe(false);
   });
 
   test("bloquea comandos git destructivos", () => {

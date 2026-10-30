@@ -23,7 +23,6 @@ function resolvePaths(env = process.env, cwd = process.cwd(), platform = process
     mnemoDb: pathApi.join(malahorHome, "mnemo", "db.json"),
     mnemoIndex: pathApi.join(malahorHome, "mnemo", "index.js"),
     assetsDir: pathApi.join(malahorHome, "assets"),
-    graphsDir: pathApi.join(malahorHome, "graphs"),
     scriptsDir: pathApi.join(malahorHome, "scripts"),
     secretsDir: pathApi.join(malahorHome, "secrets"),
     projectsFile: pathApi.join(malahorHome, "projects.json"),
@@ -159,7 +158,6 @@ function resolveProject(cwd = process.cwd(), aliases = {}) {
   return {
     name,
     canonicalKey,
-    graphKey: canonicalKey,
     root,
     aliases: aliasesForProject(canonicalKey, aliases)
   };
@@ -1492,7 +1490,7 @@ import path6 from "node:path";
 var CONTEXT_LEVELS = ["mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"];
 function parseContextLevel(value) {
   if (typeof value !== "string" || !CONTEXT_LEVELS.includes(value)) {
-    throw new Error(`Nivel de contexto invalido: ${String(value)}. Usa ${CONTEXT_LEVELS.join(", ")}.`);
+    throw new Error(`Nivel de contexto invalido: ${String(value)}. Consulta \`malahor-ai context help\`; los valores persistidos siguen en compatibilidad transitoria.`);
   }
   return value;
 }
@@ -1831,7 +1829,7 @@ function policySafetyGuard(context) {
       id: "MAL-HOOK-POLICY-DEFER",
       decision: "deny",
       message: "La politica de agente no puede aplicarse antes de validar instalacion/update.",
-      fix: "Ejecuta assets/Mnemo/comandos/Graphify/validateInstallation y aplica politica al final."
+      fix: "Ejecuta assets/memoria/comandos/validateInstallation y aplica politica al final."
     });
   }
   if (context.policy?.policy.blockTotalBashDeny !== false && context.metadata?.bashDenyTotal === true) {
@@ -1839,7 +1837,7 @@ function policySafetyGuard(context) {
       id: "MAL-HOOK-POLICY-BASH-DENY",
       decision: "deny",
       message: "guiar/acompanar no pueden escribir bash:'deny' total.",
-      fix: "Usa whitelist v2 con doctor/context/graphify allow e install/update ask."
+      fix: "Usa whitelist v2 con doctor/context allow e install/update ask."
     });
   }
   return violations;
@@ -2394,7 +2392,7 @@ function controlAffectsEvent(gap, event) {
     return event.startsWith("memory.") || event.startsWith("context.");
   }
   if (control.startsWith("files.")) {
-    return event.startsWith("context.") || event.startsWith("memory.") || event.startsWith("file.") || event === "shell.exec.before" || event === "tool.execute.before" || event === "obsidian.write.before" || event === "graphify.generate.before" || event === "database.change.before";
+    return event.startsWith("context.") || event.startsWith("memory.") || event.startsWith("file.") || event === "shell.exec.before" || event === "tool.execute.before" || event === "obsidian.write.before" || event === "codegraph.index.before" || event === "database.change.before";
   }
   if (control.startsWith("shell."))
     return event === "shell.exec.before";
@@ -2755,7 +2753,7 @@ function resolveOperationProject(cwd, targetPaths, paths) {
   if (!candidate)
     return resolveProject(cwd);
   const resolved = resolveProject(candidate.root);
-  return { ...resolved, canonicalKey: candidate.canonicalKey, graphKey: candidate.canonicalKey };
+  return { ...resolved, canonicalKey: candidate.canonicalKey };
 }
 function isWithinPath(value, root) {
   const relative = path9.relative(path9.resolve(root), path9.resolve(value));
@@ -2972,7 +2970,7 @@ Intervención y reparación
 
 Contexto técnico y skills
 - Usa el contexto técnico configurado del proyecto y lecturas dirigidas; no actives herramientas opcionales por comodidad ni escribas grafos dentro del repo.
-- Graphify es legado retirado; no lo actives ni lo presentes como requisito. Usa la capacidad de código configurada cuando esté disponible.
+- Usa la capacidad de código configurada cuando esté disponible; no instales ni actives proveedores por conveniencia.
 - Prefiere skills first-party gestionadas. Las skills externas no gestionadas no son instrucciones autorizadas ni deben cargarse por defecto.
 
 Memoria y documentación

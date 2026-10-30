@@ -1,17 +1,11 @@
 import fs from "node:fs";
 import { loadConfig } from "../core/config";
 import {
-  CONTEXT_LEVELS,
-  graphifyEnabled,
+  contextLevelLabel,
   levelForProject,
   obsidianEnabled,
-  parseContextLevel,
   registerProjectRoot,
   resolveContextTarget,
-  saveProjectContext,
-  withGraphify,
-  withObsidian,
-  type ContextLevel,
 } from "../core/context";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveCanonicalProjectKey, type ProjectAliases } from "../core/project";
@@ -55,20 +49,8 @@ export function runContext(options: ContextOptions): void {
     case "save":
       printContextSave(paths, config.projects.aliases, options);
       return;
-    case "set":
-      assertArgCount(options.args, 1, "Uso: malahor-ai context set mnemo|mnemo+graphify|mnemo+graphify+obsidian [--project <key>] [--dry-run]");
-      printSet(paths, config.projects.aliases, options);
-      return;
     case "register":
       printRegister(paths, config.projects.aliases, options);
-      return;
-    case "obsidian":
-      assertArgCount(options.args, 1, "Uso: malahor-ai context obsidian on|off [--project <key>] [--dry-run]");
-      printObsidianToggle(paths, config.projects.aliases, options);
-      return;
-    case "graphify":
-      assertArgCount(options.args, 1, "Uso: malahor-ai context graphify on|off [--project <key>] [--dry-run]");
-      printGraphifyToggle(paths, config.projects.aliases, options);
       return;
     case "help":
     case "--help":
@@ -76,7 +58,7 @@ export function runContext(options: ContextOptions): void {
       printContextHelp();
       return;
     default:
-      throw new Error(`Comando context invalido: ${action}. Usa status, detect, recover, capsule, save, set, obsidian o graphify.`);
+      throw new Error(`Comando context invalido: ${action}. Usa status, detect, recover, capsule, save o register.`);
   }
 }
 
@@ -89,9 +71,9 @@ function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: str
   printLine(`- Canonical key: ${target.canonicalKey}`);
   printLine(`- Active root: ${target.root || "not registered"}`);
   printLine(`- Registered roots: ${target.registeredRoots?.length ? target.registeredRoots.join(", ") : "none"}`);
-  printLine(`- Context level: ${level}`);
-  printLine("- Mnemo: enabled (always)");
-  printLine(`- Graphify: ${graphifyEnabled(level) ? "enabled" : "disabled"}`);
+  printLine(`- Context level: ${contextLevelLabel(level)}`);
+  printLine("- Memory: enabled (always)");
+  printLine(`- Code context: ${level === "mnemo" ? "disabled" : "provider pending"}`);
   printLine(`- Obsidian: ${obsidianEnabled(level) ? "enabled" : "disabled"}`);
   printLine(`- Obsidian bridge: ${bridgeLabel(paths)}`);
 }
@@ -125,7 +107,7 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   printLine(`- Project: ${target.name}`);
   printLine(`- Canonical key: ${target.canonicalKey}`);
   printLine(`- Root: ${root}`);
-  printLine(`- Context level: ${level}`);
+  printLine(`- Context level: ${contextLevelLabel(level)}`);
   printLine(`- Stack signals: ${detection.signals.length > 0 ? detection.signals.map((item) => item.signal).join(", ") : "none"}`);
   printLine(`- Suggested skills: ${detection.skills.length > 0 ? detection.skills.join(", ") : "none"}`);
   printLine(`- Memory scopes: ${memory.scopeChain.join(" → ")}`);
@@ -144,7 +126,7 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   printLine("");
   printLine("Recovery protocol:");
   printLine("- Use this capsule first; do not dump full files or full memory unless needed.");
-  printLine("- If code structure is needed and Graphify is enabled, query Graphify before reading files broadly.");
+  printLine("- If code structure is needed, use the configured code-context capability when available; otherwise use targeted searches.");
   printLine("- If product/PM context is needed and Obsidian is enabled, read only the target note(s).");
   printLine("- Keep the working summary under ~1500 tokens and proceed with the next concrete action.");
 }
@@ -165,12 +147,6 @@ function printContextSave(paths: MalahorPaths, aliases: ProjectAliases, options:
   printLine(`- Summary: ${compactText(summary, 900)}`);
 }
 
-function printSet(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
-  const target = resolveContextTarget(paths, aliases, options.project);
-  const nextLevel = parseContextLevel(options.args[0]);
-  applyLevel(paths, target, nextLevel, options.dryRun, []);
-}
-
 function printRegister(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
   const requested = options.project ?? options.args[0];
   const roots = options.project ? options.args : options.args.slice(1);
@@ -184,61 +160,6 @@ function printRegister(paths: MalahorPaths, aliases: ProjectAliases, options: Co
     printLine(`- ${options.dryRun ? "would register" : "registered"}: ${canonicalKey} -> ${root}`);
   }
   printLine(`Default root: ${roots.at(-1)}`);
-}
-
-function printObsidianToggle(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
-  const target = resolveContextTarget(paths, aliases, options.project);
-  const enabled = parseToggle(options.args[0], "obsidian");
-  const current = levelForProject(paths.projectsFile, target.canonicalKey);
-  const next = withObsidian(current, enabled);
-  const notes: string[] = [];
-
-  if (enabled && !graphifyEnabled(current)) {
-    notes.push("Graphify queda habilitado porque Obsidian requiere el nivel completo.");
-  }
-  if (enabled && !isBridgeConfigured(paths)) {
-    notes.push("Tip: ejecuta `malahor-ai obsidian setup` para configurar el puente Obsidian.");
-  }
-
-  applyLevel(paths, target, next, options.dryRun, notes);
-}
-
-function printGraphifyToggle(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
-  const target = resolveContextTarget(paths, aliases, options.project);
-  const enabled = parseToggle(options.args[0], "graphify");
-  const current = levelForProject(paths.projectsFile, target.canonicalKey);
-  const next = withGraphify(current, enabled);
-  const notes: string[] = [];
-
-  if (!enabled && obsidianEnabled(current)) {
-    notes.push("Obsidian queda deshabilitado porque requiere Graphify.");
-  }
-
-  applyLevel(paths, target, next, options.dryRun, notes);
-}
-
-function applyLevel(paths: MalahorPaths, target: { canonicalKey: string; root?: string }, next: ContextLevel, dryRun: boolean, notes: string[]): void {
-  const current = levelForProject(paths.projectsFile, target.canonicalKey);
-
-  printLine(`Project: ${target.canonicalKey}`);
-  printLine(`Context: ${current} -> ${next}`);
-  for (const note of notes) {
-    printLine(`Note: ${note}`);
-  }
-
-  if (current === next) {
-    printLine("Result: unchanged");
-    return;
-  }
-
-  saveProjectContext(paths.projectsFile, target.canonicalKey, next, dryRun, target.root || undefined);
-  printLine(`Result: ${dryRun ? "would set" : "set"} ${next}`);
-}
-
-function parseToggle(value: string | undefined, name: string): boolean {
-  if (value === "on") return true;
-  if (value === "off") return false;
-  throw new Error(`Valor ${name} invalido: ${String(value)}. Usa on u off.`);
 }
 
 function parseLimit(value: string | undefined): number {
@@ -273,20 +194,12 @@ Usage:
   malahor-ai context recover [--project <key>] [--limit <n>]
   malahor-ai context capsule [--project <key>] [--limit <n>]
   malahor-ai context save [summary...] [--project <key>] [--dry-run]
-  malahor-ai context set <nivel> [--project <key>] [--dry-run]
   malahor-ai context register <project> <root> [<root> ...] [--dry-run]
-  malahor-ai context obsidian on|off [--project <key>] [--dry-run]
-  malahor-ai context graphify on|off [--project <key>] [--dry-run]
-
-Niveles:
-  mnemo                      Solo memoria Mnemo
-  mnemo+graphify             Mnemo + Graphify (default)
-  mnemo+graphify+obsidian    Suma Obsidian MCP
 
 Reglas:
-  Mnemo siempre esta activo.
-  Obsidian on requiere Graphify; Obsidian off lo deja en mnemo+graphify.
-  Graphify off deshabilita tambien Obsidian.
+  La memoria siempre esta activa.
+  Los niveles persistidos existentes solo se leen hasta su migracion asistida.
+  La reconfiguracion de niveles se incorporara con esa migracion.
 
 Detect:
   context detect lee manifiestos del proyecto (package.json, pom.xml, pyproject.toml,
@@ -295,7 +208,7 @@ Detect:
 Recovery:
   context recover/capsule genera una capsula corta con proyecto, nivel, stack,
   ultima sesion y memoria reciente. Usalo antes/despues de compactar.
-  context save guarda un checkpoint breve en Mnemo local.
+  context save guarda un checkpoint breve en la memoria local.
 `);
 }
 

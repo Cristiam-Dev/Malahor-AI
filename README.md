@@ -1,18 +1,17 @@
 # malahor-ai
 
-CLI local que potencia agentes de IA —OpenCode primero— con memoria persistente, contexto por proyecto, mapa estructural del codigo, skills de especialidad propias, SDD y controles de calidad. Todo vive fuera de tus repos.
+CLI local que potencia agentes de IA —OpenCode primero— con memoria persistente, contexto por proyecto, skills de especialidad propias, SDD y controles de calidad. Todo vive fuera de tus repos.
 
 ## Requisitos
 
 - Node.js 22 o superior
 - OpenCode instalado (primer agente soportado)
 - WSL/Ubuntu como entorno principal; soporte para Linux nativo, macOS y Windows
-- Opcional: Python 3 para el mapa de codigo (`malahor-ai graphify install` crea un venv aislado, sin instalar global)
 - Opcional: Obsidian con el plugin "Local REST API" para documentacion
 
 ## Instalacion
 
-La via recomendada no requiere consola: abre OpenCode y escribe `instala malahor`. El agente ejecuta el bootstrap agent-safe completo (instalacion, validaciones y Graphify opcional) y solo te pedira confirmar si algo toca configuracion.
+La via recomendada no requiere consola: abre OpenCode y escribe `instala malahor`. El agente ejecuta el bootstrap agent-safe completo y solo te pedira confirmar si algo toca configuracion.
 
 Si prefieres terminal, una sola linea cuando el paquete este publicado en npm:
 
@@ -35,10 +34,8 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 
 | Comando | Descripcion |
 |---|---|
-| `malahor-ai install` | Instala Malahor en OpenCode (`--bootstrap`, `--with-graphify`, `--policy-after <nivel>`) |
+| `malahor-ai install` | Instala Malahor en OpenCode (`--bootstrap`, `--policy-after <nivel>`) |
 | `malahor-ai doctor` | Diagnostica la instalacion; `--self-heal` repara y migra permisos legacy |
-| `malahor-ai graph` | Genera mapa de codigo con Graphify, fuera del repo |
-| `malahor-ai graphify` | `status` / `install` / `verify`: venv aislado en `~/.malahor/tools/graphify` |
 | `malahor-ai git` | Flujo git asistido: precommit, prepush y mensajes de commit seguros |
 | `malahor-ai hooks` | Guardrails cross-harness para git, secretos, memoria, instalacion y calidad |
 | `malahor-ai context` | Nivel de contexto por proyecto y deteccion de stack |
@@ -51,11 +48,10 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 
 - **Memoria**: decisiones, bugs, patrones, arquitectura y resumen de sesion en scopes jerarquicos `proyecto/asignacion/HU/area`, guardados por el backend activo fuera de los repos. La recuperacion hereda padres y `global`; `mem_brief` entiende solicitudes naturales y busca recuerdos relacionados en otros scopes.
 - **Administracion segura de memoria**: el agente puede inspeccionar, respaldar, mover/reclasificar, borrar y restaurar memoria via MCP con preview + confirmacion (`mem_inspect_project`, `mem_backup`, `mem_move_preview`/`mem_move`, `mem_delete_project_preview`/`mem_delete_project`, `mem_restore_preview`/`mem_restore`).
-- **Contexto por proyecto**: niveles `mnemo`, `mnemo+graphify` (default) y `mnemo+graphify+obsidian`, guardados en `~/.malahor/projects.json` por clave canonica.
-- **Graphify**: contexto tecnico del codigo, escrito siempre fuera del repo, en `~/.malahor/graphs/<proyecto>`.
+- **Contexto por proyecto**: clave canonica, root activo, memoria y documentacion opcional, con estado guardado fuera del repo. Los valores persistidos por versiones anteriores siguen siendo legibles hasta su migracion asistida.
 - **Obsidian (opcional)**: documentacion humana via Obsidian MCP; nunca por filesystem directo. Soporta OpenCode en WSL con Obsidian en Windows y Windows nativo.
 - **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, aplicada al final de la instalacion. `guiar` y `acompanar` usan una lista blanca de comandos (no un bloqueo total): el agente conserva siempre la ruta de diagnostico y autorreparacion, y `install`/`update` solo piden confirmacion al usuario.
-- **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta, instala Graphify sin romper nada si falla y valida todo antes de tocar permisos.
+- **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta y valida todo antes de tocar permisos.
 - **Hooks cross-harness**: reglas internas de Malahor independientes de OpenCode para bloquear secretos, git destructivo, memoria destructiva sin preview, politica insegura y pushes sin checks. Se invocan por CLI (`malahor-ai hooks check ...`) o MCP (`malahor_hook_check`).
 - **Perfiles de hooks**: `off`, `light`, `standard`, `strict`, `release`, configurables fuera del repo en `~/.malahor/policies/default.jsonc` y `~/.malahor/policies/projects/<proyecto>.jsonc`.
 - **Git asistido**: `malahor-ai git precommit`, `prepush` y `commit-message` ejecutan los guardrails y proponen el comando seguro sin hacer `git add`, `commit` ni `push` por ti.
@@ -88,7 +84,7 @@ automaticamente ni crea relaciones `supersedes`/`conflicts` por esta regla.
 
 ## Principio central
 
-Malahor no deja archivos dentro de tus repos. Configuracion, memoria, grafos, backups y assets viven en `~/.malahor/`.
+Malahor no deja archivos dentro de tus repos. Configuracion, memoria, backups y assets viven en `~/.malahor/`.
 
 ## Ejemplos
 
@@ -100,9 +96,6 @@ malahor-ai context detect
 # Recuperar o guardar una capsula corta de contexto
 malahor-ai context recover
 malahor-ai context save "objetivo, estado, decisiones y proximo paso"
-
-# Activar Obsidian solo para este proyecto
-malahor-ai context obsidian on
 
 # Revisar la memoria del proyecto
 malahor-ai memory list
@@ -157,7 +150,6 @@ malahor-ai memory restore <backup> --yes --confirm RESTORE
 - El agente no puede editar ni ejecutar (instalacion o politica rotas): escribe `repara malahor` o `/malahor-reparar` en OpenCode; funciona aunque el agente este bloqueado porque la capsula corre con permisos del cliente.
 - `doctor` reporta fallos criticos: `malahor-ai doctor --self-heal` y luego `malahor-ai install --bootstrap --yes`.
 - Permisos legacy con bloqueo total (versiones previas a 4.10): `doctor --self-heal` los migra a la lista blanca agent-safe.
-- Graphify no encontrado: `malahor-ai graphify install` (venv aislado). Es opcional; su ausencia no rompe nada.
 - Obsidian no conecta desde WSL: permite los puertos 27123 y 27124 en el Firewall de Windows y verifica el plugin "Local REST API".
 - Cambiaste de politica y no surte efecto: abre una sesion nueva de OpenCode (o cambia de agente con Tab) para recargar `opencode.jsonc`.
 - En Windows, Malahor detecta la carpeta real de OpenCode V2 con `opencode api get /api/config`; si necesitas forzar otra ruta, usa `MALAHOR_OPENCODE_DIR`.

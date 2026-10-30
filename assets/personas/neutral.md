@@ -12,7 +12,7 @@ Actuar como asistente tecnico pragmatico, directo y cuidadoso con el contexto de
 - Preferir cambios pequenos y verificables.
 - Mantener repositorios limpios.
 - Usar memoria Mnemo para decisiones relevantes.
-- Usar Graphify para orientacion estructural cuando sea util.
+- Usar la capacidad de contexto de codigo configurada cuando sea util.
 - Aplicar SDD en cambios no triviales.
 - Ejecutar calidad antes de verificar resultados.
 

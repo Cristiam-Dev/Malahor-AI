@@ -3,12 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  contextLevelLabel,
   loadProjectsFile,
   registerProjectRoot,
   resolveRegisteredProject,
   resolveContextTarget,
   rootsForProject,
-  saveProjectContext,
 } from "../src/cli/core/context";
 import { resolvePaths } from "../src/cli/core/paths";
 
@@ -25,19 +25,30 @@ function fixture(): { root: string; projects: string; paths: ReturnType<typeof r
 }
 
 describe("raíces registradas por proyecto", () => {
-  test("mantiene formato legacy y agrega roots/defaultRoot fuera del repo", () => {
+  test("mantiene el formato persistido heredado sin exponer el proveedor retirado", () => {
     const { projects, paths } = fixture();
     fs.mkdirSync(path.dirname(projects), { recursive: true });
-    fs.writeFileSync(projects, JSON.stringify({ demo: { context: "mnemo" } }), "utf8");
+    fs.writeFileSync(projects, JSON.stringify({ demo: { context: "mnemo+graphify+obsidian" } }), "utf8");
 
     registerProjectRoot(projects, "demo", paths.cwd, false);
-    saveProjectContext(projects, "demo", "mnemo+graphify+obsidian", false, paths.cwd);
 
     const loaded = loadProjectsFile(projects);
     expect(loaded.demo.context).toBe("mnemo+graphify+obsidian");
+    expect(contextLevelLabel(loaded.demo.context)).toBe("memory+code-context+obsidian (provider pending)");
+    expect(contextLevelLabel(loaded.demo.context)).not.toMatch(/graphify/i);
     expect(loaded.demo.roots).toEqual([paths.cwd]);
     expect(loaded.demo.defaultRoot).toBe(paths.cwd);
     expect(rootsForProject(projects, "demo")).toEqual([paths.cwd]);
+  });
+
+  test("los proyectos nuevos no persisten tokens del proveedor retirado", () => {
+    const { projects, paths } = fixture();
+
+    registerProjectRoot(projects, "demo", paths.cwd, false);
+
+    const raw = fs.readFileSync(projects, "utf8");
+    expect(loadProjectsFile(projects).demo.context).toBe("mnemo");
+    expect(raw).not.toMatch(/graphify/i);
   });
 
   test("resuelve la raíz registrada al trabajar desde otra ubicación", () => {
