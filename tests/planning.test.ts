@@ -17,6 +17,11 @@ import {
 
 const SESSION = "ses_planning_fixture";
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
+const PLAN_MESSAGE = "msg_plan_fixture";
+const RUN_MESSAGE = "msg_run_fixture";
+const PRESENTATION_ID_FIELDS = [
+  "presentationMessageID", "presentedMessageID", "presentationInteractionID", "presentationID", "messageID", "interactionID",
+] as const;
 
 let root: string;
 let repo: string;
@@ -105,8 +110,33 @@ function authorized(mode: "assistant" | "executor" = "assistant", now = Date.now
   return authorizePlan(mode === "assistant" ? reviewPlan(plan, plan.digest, now) : plan, plan.digest, now);
 }
 
-function call(sessionID = SESSION, agent = "malahor") {
-  return { sessionID, agent, messageID: "msg_fixture", id: "tool_fixture" };
+function call(sessionID = SESSION, agent = "malahor", messageID = PLAN_MESSAGE) {
+  return { sessionID, agent, messageID, id: `tool_${messageID}` };
+}
+
+function presentationIdentity(state: PlanState): unknown {
+  const record = state as unknown as Record<string, unknown>;
+  const field = PRESENTATION_ID_FIELDS.find((candidate) => candidate in record);
+  if (field) return record[field];
+  const presentation = record.presentation;
+  if (presentation && typeof presentation === "object" && !Array.isArray(presentation)) {
+    const nested = presentation as Record<string, unknown>;
+    return nested.messageID ?? nested.interactionID ?? nested.id;
+  }
+  return presentation;
+}
+
+function tamperPresentationIdentity(state: PlanState): unknown {
+  const record = state as unknown as Record<string, unknown>;
+  const field = PRESENTATION_ID_FIELDS.find((candidate) => candidate in record);
+  if (field) return { ...record, [field]: "msg_tampered" };
+  if (record.presentation && typeof record.presentation === "object" && !Array.isArray(record.presentation)) {
+    const presentation = record.presentation as Record<string, unknown>;
+    const nested = ["messageID", "interactionID", "id"].find((candidate) => candidate in presentation) ?? "messageID";
+    return { ...record, presentation: { ...presentation, [nested]: "msg_tampered" } };
+  }
+  if ("presentation" in record) return { ...record, presentation: "msg_tampered" };
+  return { ...record, presentationMessageID: "msg_tampered" };
 }
 
 async function registeredTools(onApproval?: (request: ApprovalRequest) => Promise<void> | void) {
@@ -250,7 +280,7 @@ describe("nucleo: transiciones y binding del plan", () => {
     const operation = input().actions[0]!;
     const variants: unknown[] = [null, {},
       { ...active, digest: "f".repeat(64) },
-      { ...active, version: 2 },
+      { ...active, version: 1 },
       { ...active, policyRevision: "b".repeat(32) },
       { ...active, expiresAt: active.createdAt + 31 * 60_000 },
       { ...active, plan: { ...active.plan, actions: [{ ...operation, resource: path.join(repo, "other.ts") }] } },
@@ -567,7 +597,28 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     }
   });
 
-  test("asistente solicita revision y orden separadas con hash, sin autorizar en la primera", async () => {
+  test("malahor_plan guarda estado v2 ligado al turno y renderiza el plan completo por secciones", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    const planCall = call(SESSION, "malahor", "msg_executor_presentation");
+    const result = await harness.execute("plan", input(), planCall);
+
+    expect(planKey(SESSION)).toBe(`planning/v2/${SESSION}`);
+    expect([...records.keys()]).toEqual([`planning/v2/${SESSION}`]);
+    const state = records.get(`planning/v2/${SESSION}`) as PlanState;
+    expect(state.version).toBe(2);
+    expect(presentationIdentity(state)).toBe(planCall.messageID);
+    expect(validState(state)).toBe(true);
+    expect(harness.approvals).toHaveLength(0);
+    expect(result.content).toMatch(/^Resumen\b/im);
+    expect(result.content).toMatch(/^Pasos\b/im);
+    expect(result.content).toMatch(/^Acciones y efectos exactos\b/im);
+    expect(result.content).toMatch(/espera.*turno posterior/is);
+    expect(validState({ ...state, version: 1 })).toBe(false);
+    expect(validState(tamperPresentationIdentity(state))).toBe(false);
+  });
+
+  test("asistente revisa el plan pero bloquea la segunda confirmacion en el mismo turno", async () => {
     expect(loadConfig(env, repo).mode).toBe("assistant");
     expect(loadConfig(env, repo).execution.intervention).toBe("guiar");
     const phases: Array<{ action: string; state?: PlanState }> = [];
@@ -576,8 +627,10 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     });
     expect([...harness.definitions.keys()]).toEqual(["plan", "run"]);
     expect(harness.definitions.get("plan")?.options).toMatchObject({ namespace: "malahor", codemode: false });
-    await harness.execute("plan", input());
+    const planCall = call(SESSION, "malahor", "msg_assistant_presentation");
+    await harness.execute("plan", input(), planCall);
     const presented = records.get(planKey(SESSION)) as PlanState;
+    expect(presentationIdentity(presented)).toBe(planCall.messageID);
     expect(presented.reviewedAt).toBeNumber();
     expect(presented.authorizedAt).toBeUndefined();
     expect(phases[0]?.state?.reviewedAt).toBeUndefined();
@@ -587,7 +640,12 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await evaluatePlanningPermission(beforeRun, options, storage);
     expect(beforeRun.effect).toBe("deny");
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, options, storage)).rejects.toThrow();
-    await harness.execute("run", { digest: presented.digest });
+    await expect(harness.execute("run", { digest: presented.digest }, planCall)).rejects.toThrow();
+    expect(harness.approvals.map((request) => request.action)).toEqual(["malahor_plan_review"]);
+    expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeUndefined();
+
+    const runCall = call(SESSION, "malahor", "msg_assistant_go");
+    await harness.execute("run", { digest: presented.digest }, runCall);
     expect(phases[1]?.state?.authorizedAt).toBeUndefined();
     expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeNumber();
     expect(harness.approvals.map((request) => request.action)).toEqual(["malahor_plan_review", "malahor_plan_run"]);
@@ -595,18 +653,31 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await evaluatePlanningPermission(afterRun, options, storage);
     expect(afterRun.effect).toBe("allow");
     await evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, options, storage);
-    for (const request of harness.approvals) {
-      expect(request).toEqual({ sessionID: SESSION, agent: "malahor", source: { type: "tool", messageID: "msg_fixture", id: "tool_fixture" }, action: request.action, resources: [presented.digest], save: [] });
-    }
-    await expect(harness.execute("run", { digest: presented.digest })).rejects.toThrow();
+    expect(harness.approvals[0]).toEqual({ sessionID: SESSION, agent: "malahor", source: { type: "tool", messageID: planCall.messageID, id: planCall.id }, action: "malahor_plan_review", resources: [presented.digest], save: [] });
+    expect(harness.approvals[1]).toEqual({ sessionID: SESSION, agent: "malahor", source: { type: "tool", messageID: runCall.messageID, id: runCall.id }, action: "malahor_plan_run", resources: [presented.digest], save: [] });
+    await expect(harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_assistant_repeat"))).rejects.toThrow();
     if (harness.registration) await harness.registration.dispose?.();
   });
 
-  test("ejecutor solicita una orden; asesor no solicita ninguna ni puede ejecutar", async () => {
+  test("ejecutor rechaza malahor_run en el turno de presentacion antes de consultar el approval port", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    const planCall = call(SESSION, "malahor", "msg_executor_same_turn");
+    await harness.execute("plan", input(), planCall);
+    const executor = records.get(planKey(SESSION)) as PlanState;
+    expect(harness.approvals).toHaveLength(0);
+
+    await expect(harness.execute("run", { digest: executor.digest }, planCall)).rejects.toThrow();
+    expect(harness.approvals).toHaveLength(0);
+    expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeUndefined();
+  });
+
+  test("ejecutor autoriza desde un turno posterior; asesor no solicita aprobacion ni ejecuta", async () => {
     configure("ejecutar");
     expect(loadConfig(env, repo).mode).toBe("executor");
     const harness = await registeredTools();
-    await harness.execute("plan", input());
+    const planCall = call(SESSION, "malahor", "msg_executor_plan");
+    await harness.execute("plan", input(), planCall);
     const executor = records.get(planKey(SESSION)) as PlanState;
     expect(executor.reviewedAt).toBeUndefined();
     expect(harness.approvals).toHaveLength(0);
@@ -614,8 +685,10 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const beforeRun = { sessionID: SESSION, action: "edit", resources: [edit], effect: "allow" };
     await evaluatePlanningPermission(beforeRun, options, storage);
     expect(beforeRun.effect).toBe("deny");
-    await harness.execute("run", { digest: executor.digest });
+    const runCall = call(SESSION, "malahor", "msg_executor_go");
+    await harness.execute("run", { digest: executor.digest }, runCall);
     expect(harness.approvals.map((item) => [item.action, item.resources])).toEqual([["malahor_plan_run", [executor.digest]]]);
+    expect(harness.approvals[0]?.source.messageID).toBe(runCall.messageID);
     const afterRun = { ...beforeRun, effect: "allow" };
     await evaluatePlanningPermission(afterRun, options, storage);
     expect(afterRun.effect).toBe("allow");
@@ -639,15 +712,15 @@ describe("tools registradas y flujo sin APIs host reales", () => {
 
   test("reemplazo de plan revoca autorizacion anterior y rehace confirmaciones", async () => {
     const harness = await registeredTools();
-    await harness.execute("plan", input());
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_replace_plan_1"));
     const old = records.get(planKey(SESSION)) as PlanState;
-    await harness.execute("run", { digest: old.digest });
-    await harness.execute("plan", { ...input(), summary: "Nueva version" });
+    await harness.execute("run", { digest: old.digest }, call(SESSION, "malahor", "msg_replace_run_1"));
+    await harness.execute("plan", { ...input(), summary: "Nueva version" }, call(SESSION, "malahor", "msg_replace_plan_2"));
     const next = records.get(planKey(SESSION)) as PlanState;
     expect(next.digest).not.toBe(old.digest);
     expect(next.authorizedAt).toBeUndefined();
     expect(harness.approvals.map((item) => item.action)).toEqual(["malahor_plan_review", "malahor_plan_run", "malahor_plan_review"]);
-    await expect(harness.execute("run", { digest: old.digest })).rejects.toThrow();
+    await expect(harness.execute("run", { digest: old.digest }, call(SESSION, "malahor", "msg_replace_stale"))).rejects.toThrow();
     const permission = { sessionID: SESSION, action: "edit", resources: [path.join(repo, "file.ts")], effect: "allow" };
     await evaluatePlanningPermission(permission, options, storage);
     expect(permission.effect).toBe("deny");
@@ -664,12 +737,12 @@ describe("tools registradas y flujo sin APIs host reales", () => {
         records.set(planKey(SESSION), replacement);
       }
     });
-    await harness.execute("plan", input());
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_repeat_plan_1"));
     const first = records.get(planKey(SESSION)) as PlanState;
-    await harness.execute("run", { digest: first.digest });
+    await harness.execute("run", { digest: first.digest }, call(SESSION, "malahor", "msg_repeat_run_1"));
     expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeNumber();
 
-    await harness.execute("plan", input());
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_repeat_plan_2"));
     const second = records.get(planKey(SESSION)) as PlanState;
     expect(second.plan).toEqual(first.plan);
     expect(second.digest).not.toBe(first.digest);
@@ -682,9 +755,9 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(previouslyAllowed.effect).toBe("deny");
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, options, storage)).rejects.toThrow();
 
-    await expect(harness.execute("run", { digest: first.digest })).rejects.toThrow();
+    await expect(harness.execute("run", { digest: first.digest }, call(SESSION, "malahor", "msg_repeat_stale"))).rejects.toThrow();
     replaceDuringRun = true;
-    await expect(harness.execute("run", { digest: second.digest })).rejects.toThrow(/cambio/);
+    await expect(harness.execute("run", { digest: second.digest }, call(SESSION, "malahor", "msg_repeat_run_2"))).rejects.toThrow(/cambio/);
     const third = records.get(planKey(SESSION)) as PlanState;
     expect(third.digest).not.toBe(first.digest);
     expect(third.revision).not.toBe(second.revision);
@@ -707,9 +780,9 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     });
     const presented = proposePlan(scope(), input());
     records.set(planKey(SESSION), reviewPlan(presented, presented.digest));
-    const running = harness.execute("run", { digest: presented.digest });
+    const running = harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_concurrent_run"));
     await started;
-    const replacing = harness.execute("plan", input());
+    const replacing = harness.execute("plan", input(), call(SESSION, "malahor", "msg_concurrent_replacement"));
     releaseRun();
     await Promise.all([running, replacing]);
 
@@ -718,7 +791,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(replacement.digest).not.toBe(presented.digest);
     expect(replacement.authorizedAt).toBeUndefined();
     expect(planAllows(replacement, scope(), input().actions[0]!)).toBe(false);
-    await expect(harness.execute("run", { digest: presented.digest })).rejects.toThrow();
+    await expect(harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_concurrent_stale"))).rejects.toThrow();
     const permission = { sessionID: SESSION, action: "edit", resources: [path.join(repo, "file.ts")], effect: "allow" };
     await evaluatePlanningPermission(permission, options, storage);
     expect(permission.effect).toBe("deny");
@@ -738,7 +811,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const presentedForRun = proposePlan(scope(), input());
     const reviewed = reviewPlan(presentedForRun, presentedForRun.digest);
     records.set(planKey(SESSION), reviewed);
-    await expect(denied.execute("run", { digest: presentedForRun.digest })).rejects.toThrow("host denied");
+    await expect(denied.execute("run", { digest: presentedForRun.digest }, call(SESSION, "malahor", "msg_denied_assistant_run"))).rejects.toThrow("host denied");
     expect(records.get(planKey(SESSION))).toEqual(reviewed);
     expect(records.get(planKey(SESSION))).toEqual(stateAtDeny[1]);
     expect(reviewed.authorizedAt).toBeUndefined();
@@ -746,7 +819,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     configure("ejecutar");
     const executor = proposePlan(scope("executor"), input());
     records.set(planKey(SESSION), executor);
-    await expect(denied.execute("run", { digest: executor.digest })).rejects.toThrow("host denied");
+    await expect(denied.execute("run", { digest: executor.digest }, call(SESSION, "malahor", "msg_denied_executor_run"))).rejects.toThrow("host denied");
     expect(records.get(planKey(SESSION))).toEqual(executor);
     expect(records.get(planKey(SESSION))).toEqual(stateAtDeny[2]);
     expect(executor.authorizedAt).toBeUndefined();
@@ -764,7 +837,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
 
     const presented = proposePlan(scope(), input());
     records.set(planKey(SESSION), reviewPlan(presented, presented.digest));
-    await expect(changed.execute("run", { digest: (records.get(planKey(SESSION)) as PlanState).digest })).rejects.toThrow(/cambio/);
+    await expect(changed.execute("run", { digest: (records.get(planKey(SESSION)) as PlanState).digest }, call(SESSION, "malahor", "msg_changed_run"))).rejects.toThrow(/cambio/);
     expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeUndefined();
   });
 
@@ -773,18 +846,18 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const harness = await registeredTools();
     const stale = proposePlan(scope("executor"), input(), Date.now() - 31 * 60_000);
     records.set(planKey(SESSION), stale);
-    await expect(harness.execute("run", { digest: stale.digest })).rejects.toThrow();
+    await expect(harness.execute("run", { digest: stale.digest }, call(SESSION, "malahor", RUN_MESSAGE))).rejects.toThrow();
     expect(harness.approvals).toHaveLength(0);
   });
 
   test("cambiar intervention tras revisar revoca el plan antes de la segunda confirmacion", async () => {
     const harness = await registeredTools();
-    await harness.execute("plan", input());
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_intervention_plan"));
     const state = records.get(planKey(SESSION)) as PlanState;
     expect(harness.approvals.map((item) => item.action)).toEqual(["malahor_plan_review"]);
     for (const intervention of ["acompanar", "ejecutar"] as const) {
       configure(intervention);
-      await expect(harness.execute("run", { digest: state.digest })).rejects.toThrow();
+      await expect(harness.execute("run", { digest: state.digest }, call(SESSION, "malahor", `msg_intervention_${intervention}`))).rejects.toThrow();
       expect(harness.approvals.map((item) => item.action)).toEqual(["malahor_plan_review"]);
       expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeUndefined();
     }
@@ -804,7 +877,15 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const instructions: Record<string, unknown> = { sessionID: SESSION, agent: "malahor", system: [{ type: "text", text: "base" }] };
     await injectPlanningInstructions(instructions, options, storage);
     await injectPlanningInstructions(instructions, options, storage);
-    expect((instructions.system as Array<{ text: string }>)[0]?.text.match(/malahor-planning:v1/g)).toHaveLength(1);
+    const text = (instructions.system as Array<{ text: string }>)[0]?.text ?? "";
+    expect(text.match(/malahor-planning:v2/g) ?? []).toHaveLength(1);
+    expect(text).not.toContain("malahor-planning:v1");
+    expect(text).toMatch(/plan completo/i);
+    expect(text).toMatch(/termina(?:r)? (?:este )?turno/i);
+    expect(text).toMatch(/solicitud posterior/i);
+    expect(text).toMatch(/\bgo\b/i);
+    expect(text).toMatch(/\bimplementa\b/i);
+    expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
     const absent: Record<string, unknown> = { sessionID: SESSION, agent: "malahor", system: [] };
     await injectPlanningInstructions(absent, options);
     expect((absent.system as Array<{ text: string }>)[0]?.text).toContain("no ejecutes");

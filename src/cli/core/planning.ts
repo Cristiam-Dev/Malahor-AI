@@ -14,11 +14,13 @@ export interface PlanInput {
 }
 
 export interface PlanState {
-  version: 1;
+  version: 2;
   sessionID: string;
   project: string;
   mode: MalahorMode;
   policyRevision: string;
+  /** Identidad portable del turno que mostro el plan; OpenCode aporta messageID. */
+  presentationInteractionID: string;
   plan: PlanInput;
   digest: string;
   revision: string;
@@ -46,6 +48,7 @@ export interface PlanningAdapter {
 
 const PLAN_TTL_MS = 30 * 60_000;
 const ACTIONS = new Set(["edit", "shell", "subagent"]);
+const CORE_INTERACTION_ID = "core:direct";
 // Recibos efimeros: una alteracion del storage no fabrica confirmaciones. Al reiniciar se vuelven a pedir.
 // No prueban identidad humana: la UI del host sigue siendo la frontera de interaccion.
 const receiptKey = randomBytes(32);
@@ -53,9 +56,11 @@ const receiptKey = randomBytes(32);
 // evita que una confirmacion anterior resucite un plan reemplazado en la misma sesion.
 const transitions = new Map<string, Promise<void>>();
 
-export async function presentPlan(scope: PlanScope, input: PlanInput, adapter: PlanningAdapter): Promise<PlanState> {
+export async function presentPlan(
+  scope: PlanScope, input: PlanInput, presentationInteractionID: string, adapter: PlanningAdapter,
+): Promise<PlanState> {
   return serialize(scope.sessionID, async () => {
-    const state = proposePlan(scope, input);
+    const state = proposePlan(scope, input, Date.now(), presentationInteractionID);
     await adapter.save(state); // Reemplazar el plan revoca autorizaciones anteriores.
     if (scope.mode !== "assistant") return state;
     await adapter.confirm("review", state);
@@ -68,14 +73,20 @@ export async function presentPlan(scope: PlanScope, input: PlanInput, adapter: P
   });
 }
 
-export async function requestPlanExecution(scope: PlanScope, digest: string, adapter: PlanningAdapter): Promise<PlanState> {
+export async function requestPlanExecution(
+  scope: PlanScope, digest: string, executionInteractionID: string, adapter: PlanningAdapter,
+): Promise<PlanState> {
   return serialize(scope.sessionID, async () => {
+    if (!validInteractionID(executionInteractionID)) throw new Error("Turno de ejecucion no evaluable.");
     const state = await adapter.load(scope.sessionID);
     if (!validState(state) || state.digest !== digest || state.sessionID !== scope.sessionID
       || state.project !== scope.project || state.mode !== scope.mode || state.policyRevision !== scope.policyRevision
       || state.expiresAt <= Date.now()
       || state.plan.actions.length === 0 || state.authorizedAt !== undefined) {
       throw new Error("No hay un plan ejecutable vigente.");
+    }
+    if (state.presentationInteractionID === executionInteractionID) {
+      throw new Error("El plan debe quedar visible y terminar su turno de presentacion. Espera una solicitud posterior del usuario antes de pedir aprobacion.");
     }
     if (state.mode === "advisor" || (state.mode === "assistant" && state.reviewedAt === undefined)) {
       throw new Error("Primero revisa el plan.");
@@ -105,10 +116,13 @@ async function serialize<T>(sessionID: string, operation: () => Promise<T>): Pro
   }
 }
 
-export function proposePlan(scope: PlanScope, input: PlanInput, now = Date.now()): PlanState {
+export function proposePlan(
+  scope: PlanScope, input: PlanInput, now = Date.now(), presentationInteractionID = CORE_INTERACTION_ID,
+): PlanState {
   if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
     throw new Error("Sesion/proyecto/politica de plan no evaluable.");
   }
+  if (!validInteractionID(presentationInteractionID)) throw new Error("Turno de presentacion no evaluable.");
   if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
     throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
   }
@@ -131,9 +145,11 @@ export function proposePlan(scope: PlanScope, input: PlanInput, now = Date.now()
     .sort((a, b) => `${a.action}\0${a.resource}`.localeCompare(`${b.action}\0${b.resource}`));
   const plan = { summary: input.summary.trim(), steps: [...input.steps], actions };
   const revision = randomBytes(16).toString("hex");
-  const digest = createHash("sha256").update(JSON.stringify({ scope, plan, revision })).digest("hex");
+  const digest = createHash("sha256").update(JSON.stringify({
+    scope, plan, revision, presentationInteractionID,
+  })).digest("hex");
   return {
-    version: 1, ...scope, plan, digest, revision,
+    version: 2, ...scope, presentationInteractionID, plan, digest, revision,
     createdAt: now, expiresAt: now + PLAN_TTL_MS,
   };
 }
@@ -164,9 +180,10 @@ export function planAllows(state: unknown, scope: PlanScope, operation: PlannedA
 export function validState(state: unknown): state is PlanState {
   if (!state || typeof state !== "object" || Array.isArray(state)) return false;
   const value = state as Record<string, unknown>;
-  if (value.version !== 1 || typeof value.sessionID !== "string" || typeof value.project !== "string"
+  if (value.version !== 2 || typeof value.sessionID !== "string" || typeof value.project !== "string"
     || !["advisor", "assistant", "executor"].includes(String(value.mode))
     || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision)
+    || !validInteractionID(value.presentationInteractionID)
     || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest)
     || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision)
     || typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt)
@@ -190,7 +207,7 @@ export function validState(state: unknown): state is PlanState {
       && typeof entry.action === "string" && typeof entry.resource === "string")) return false;
   const expected = createHash("sha256").update(JSON.stringify({ scope: {
     sessionID: value.sessionID, project: value.project, mode: value.mode, policyRevision: value.policyRevision,
-  }, plan, revision: value.revision })).digest("hex");
+  }, plan, revision: value.revision, presentationInteractionID: value.presentationInteractionID })).digest("hex");
   if (expected !== value.digest) return false;
   const planState = value as unknown as PlanState;
   return (value.reviewedAt === undefined || verifyReceipt(planState, "review", value.reviewedAt, value.reviewProof))
@@ -200,10 +217,24 @@ export function validState(state: unknown): state is PlanState {
 export function renderPlan(state: PlanState): string {
   return [
     `Plan Malahor (${state.mode}) · ${state.digest.slice(0, 12)}`,
+    "",
+    "Resumen",
     state.plan.summary,
-    ...state.plan.steps.map((step, index) => `${index + 1}. ${step}`),
-    ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`),
+    "",
+    "Pasos",
+    ...(state.plan.steps.length > 0
+      ? state.plan.steps.map((step, index) => `${index + 1}. ${step}`)
+      : ["- Sin pasos ejecutables."]),
+    "",
+    "Acciones y efectos exactos",
+    ...(state.plan.actions.length > 0
+      ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`)
+      : ["- Ninguna acción ejecutable."]),
+    "",
     `Caduca: ${new Date(state.expiresAt).toISOString()}`,
+    state.mode === "advisor"
+      ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto."
+      : "Siguiente: muestra el plan completo y termina este turno. Espera un turno posterior y una solicitud posterior del usuario antes de pedir aprobacion.",
   ].join("\n");
 }
 
@@ -216,7 +247,7 @@ function assertCurrent(state: PlanState, digest: string, now: number): void {
 function receipt(state: PlanState, kind: "review" | "run", at: number): string {
   return createHmac("sha256", receiptKey).update(JSON.stringify({
     kind, sessionID: state.sessionID, project: state.project, mode: state.mode, policyRevision: state.policyRevision,
-    digest: state.digest, revision: state.revision, at,
+    digest: state.digest, revision: state.revision, presentationInteractionID: state.presentationInteractionID, at,
     reviewProof: kind === "run" ? state.reviewProof ?? null : null,
   })).digest("hex");
 }
@@ -224,4 +255,9 @@ function receipt(state: PlanState, kind: "review" | "run", at: number): string {
 function verifyReceipt(state: PlanState, kind: "review" | "run", at: number, proof: unknown): boolean {
   if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof)) return false;
   return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(receipt(state, kind, at), "hex"));
+}
+
+function validInteractionID(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256
+    && !/[\u0000-\u001f\u007f]/.test(value);
 }

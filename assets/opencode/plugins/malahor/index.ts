@@ -3525,6 +3525,7 @@ Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
 - Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
 - Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. Si cambia el plan o vence, preséntalo de nuevo.
+- En asistente y ejecutor, despues de malahor_plan muestra el plan completo y termina el turno. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni la documentación en Obsidian.
@@ -5242,11 +5243,12 @@ function hash(input) {
 import { createHash as createHash5, createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 var PLAN_TTL_MS = 30 * 60000;
 var ACTIONS = new Set(["edit", "shell", "subagent"]);
+var CORE_INTERACTION_ID = "core:direct";
 var receiptKey = randomBytes3(32);
 var transitions = new Map;
-async function presentPlan(scope, input, adapter) {
+async function presentPlan(scope, input, presentationInteractionID, adapter) {
   return serialize(scope.sessionID, async () => {
-    const state = proposePlan(scope, input);
+    const state = proposePlan(scope, input, Date.now(), presentationInteractionID);
     await adapter.save(state);
     if (scope.mode !== "assistant")
       return state;
@@ -5259,11 +5261,16 @@ async function presentPlan(scope, input, adapter) {
     return state;
   });
 }
-async function requestPlanExecution(scope, digest, adapter) {
+async function requestPlanExecution(scope, digest, executionInteractionID, adapter) {
   return serialize(scope.sessionID, async () => {
+    if (!validInteractionID(executionInteractionID))
+      throw new Error("Turno de ejecucion no evaluable.");
     const state = await adapter.load(scope.sessionID);
     if (!validState(state) || state.digest !== digest || state.sessionID !== scope.sessionID || state.project !== scope.project || state.mode !== scope.mode || state.policyRevision !== scope.policyRevision || state.expiresAt <= Date.now() || state.plan.actions.length === 0 || state.authorizedAt !== undefined) {
       throw new Error("No hay un plan ejecutable vigente.");
+    }
+    if (state.presentationInteractionID === executionInteractionID) {
+      throw new Error("El plan debe quedar visible y terminar su turno de presentacion. Espera una solicitud posterior del usuario antes de pedir aprobacion.");
     }
     if (state.mode === "advisor" || state.mode === "assistant" && state.reviewedAt === undefined) {
       throw new Error("Primero revisa el plan.");
@@ -5295,10 +5302,12 @@ async function serialize(sessionID, operation) {
       transitions.delete(sessionID);
   }
 }
-function proposePlan(scope, input, now = Date.now()) {
+function proposePlan(scope, input, now = Date.now(), presentationInteractionID = CORE_INTERACTION_ID) {
   if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
     throw new Error("Sesion/proyecto/politica de plan no evaluable.");
   }
+  if (!validInteractionID(presentationInteractionID))
+    throw new Error("Turno de presentacion no evaluable.");
   if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
     throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
   }
@@ -5321,10 +5330,16 @@ function proposePlan(scope, input, now = Date.now()) {
   const actions = [...new Map(input.actions.map((item) => [`${item.action}\x00${item.resource}`, { ...item }])).values()].sort((a, b) => `${a.action}\x00${a.resource}`.localeCompare(`${b.action}\x00${b.resource}`));
   const plan = { summary: input.summary.trim(), steps: [...input.steps], actions };
   const revision = randomBytes3(16).toString("hex");
-  const digest = createHash5("sha256").update(JSON.stringify({ scope, plan, revision })).digest("hex");
+  const digest = createHash5("sha256").update(JSON.stringify({
+    scope,
+    plan,
+    revision,
+    presentationInteractionID
+  })).digest("hex");
   return {
-    version: 1,
+    version: 2,
     ...scope,
+    presentationInteractionID,
     plan,
     digest,
     revision,
@@ -5356,7 +5371,7 @@ function validState(state) {
   if (!state || typeof state !== "object" || Array.isArray(state))
     return false;
   const value = state;
-  if (value.version !== 1 || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt) || value.expiresAt <= value.createdAt || value.expiresAt - value.createdAt > PLAN_TTL_MS || value.reviewedAt !== undefined && (typeof value.reviewedAt !== "number" || !Number.isFinite(value.reviewedAt)) || value.authorizedAt !== undefined && (typeof value.authorizedAt !== "number" || !Number.isFinite(value.authorizedAt)) || typeof value.reviewedAt === "number" && (value.reviewedAt < value.createdAt || value.reviewedAt >= value.expiresAt) || typeof value.authorizedAt === "number" && (value.authorizedAt < value.createdAt || value.authorizedAt >= value.expiresAt) || value.mode === "advisor" && (value.reviewedAt !== undefined || value.authorizedAt !== undefined) || value.mode === "executor" && value.reviewedAt !== undefined || value.mode === "assistant" && value.authorizedAt !== undefined && (typeof value.reviewedAt !== "number" || value.authorizedAt < value.reviewedAt) || value.reviewedAt === undefined && value.reviewProof !== undefined || value.authorizedAt === undefined && value.authorizationProof !== undefined || !value.plan || typeof value.plan !== "object" || Array.isArray(value.plan))
+  if (value.version !== 2 || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt) || value.expiresAt <= value.createdAt || value.expiresAt - value.createdAt > PLAN_TTL_MS || value.reviewedAt !== undefined && (typeof value.reviewedAt !== "number" || !Number.isFinite(value.reviewedAt)) || value.authorizedAt !== undefined && (typeof value.authorizedAt !== "number" || !Number.isFinite(value.authorizedAt)) || typeof value.reviewedAt === "number" && (value.reviewedAt < value.createdAt || value.reviewedAt >= value.expiresAt) || typeof value.authorizedAt === "number" && (value.authorizedAt < value.createdAt || value.authorizedAt >= value.expiresAt) || value.mode === "advisor" && (value.reviewedAt !== undefined || value.authorizedAt !== undefined) || value.mode === "executor" && value.reviewedAt !== undefined || value.mode === "assistant" && value.authorizedAt !== undefined && (typeof value.reviewedAt !== "number" || value.authorizedAt < value.reviewedAt) || value.reviewedAt === undefined && value.reviewProof !== undefined || value.authorizedAt === undefined && value.authorizationProof !== undefined || !value.plan || typeof value.plan !== "object" || Array.isArray(value.plan))
     return false;
   const plan = value.plan;
   if (typeof plan.summary !== "string" || !Array.isArray(plan.steps) || !Array.isArray(plan.actions) || !plan.steps.every((step) => typeof step === "string") || !plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.action === "string" && typeof entry.resource === "string"))
@@ -5366,7 +5381,7 @@ function validState(state) {
     project: value.project,
     mode: value.mode,
     policyRevision: value.policyRevision
-  }, plan, revision: value.revision })).digest("hex");
+  }, plan, revision: value.revision, presentationInteractionID: value.presentationInteractionID })).digest("hex");
   if (expected !== value.digest)
     return false;
   const planState = value;
@@ -5375,10 +5390,18 @@ function validState(state) {
 function renderPlan(state) {
   return [
     `Plan Malahor (${state.mode}) · ${state.digest.slice(0, 12)}`,
+    "",
+    "Resumen",
     state.plan.summary,
-    ...state.plan.steps.map((step, index) => `${index + 1}. ${step}`),
-    ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`),
-    `Caduca: ${new Date(state.expiresAt).toISOString()}`
+    "",
+    "Pasos",
+    ...state.plan.steps.length > 0 ? state.plan.steps.map((step, index) => `${index + 1}. ${step}`) : ["- Sin pasos ejecutables."],
+    "",
+    "Acciones y efectos exactos",
+    ...state.plan.actions.length > 0 ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`) : ["- Ninguna acción ejecutable."],
+    "",
+    `Caduca: ${new Date(state.expiresAt).toISOString()}`,
+    state.mode === "advisor" ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto." : "Siguiente: muestra el plan completo y termina este turno. Espera un turno posterior y una solicitud posterior del usuario antes de pedir aprobacion."
   ].join(`
 `);
 }
@@ -5396,6 +5419,7 @@ function receipt(state, kind, at) {
     policyRevision: state.policyRevision,
     digest: state.digest,
     revision: state.revision,
+    presentationInteractionID: state.presentationInteractionID,
     at,
     reviewProof: kind === "run" ? state.reviewProof ?? null : null
   })).digest("hex");
@@ -5404,6 +5428,9 @@ function verifyReceipt(state, kind, at, proof) {
   if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof))
     return false;
   return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(receipt(state, kind, at), "hex"));
+}
+function validInteractionID(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 // src/plugin/planning.ts
@@ -5520,7 +5547,7 @@ async function registerPlanningTools(tools, approvals, storage, options) {
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Presenta el plan. En asistente solicita la primera confirmacion; en ejecutor muestra el plan para aprobacion posterior. Asesor solo permite concepto.",
+      description: "Presenta el plan completo y termina el turno. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion. Asesor solo permite concepto.",
       input: {
         type: "object",
         properties: {
@@ -5545,14 +5572,14 @@ async function registerPlanningTools(tools, approvals, storage, options) {
         if (detectSecretKinds(raw).length > 0)
           throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
-        const state = await presentPlan(resolved.scope, { ...raw, actions }, planningAdapter(storage, approvals, call));
+        const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call));
         return { content: `${renderPlan(state)}
 Digest completo: ${state.digest}` };
       }
     });
     editor.add({
       name: "run",
-      description: "Solicita la segunda confirmacion del asistente o aprobacion previa del plan del ejecutor. No ejecuta herramientas por si misma.",
+      description: "En un turno posterior al plan, solicita la segunda confirmacion del asistente o la aprobacion previa del ejecutor. No ejecuta herramientas por si misma.",
       input: { type: "object", properties: { digest: { type: "string" } }, required: ["digest"], additionalProperties: false },
       options: { namespace: "malahor", codemode: false },
       execute: async (value, call) => {
@@ -5560,7 +5587,7 @@ Digest completo: ${state.digest}` };
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede solicitar ejecucion.");
         const digest = text(value.digest);
-        const state = await requestPlanExecution(resolved.scope, digest, planningAdapter(storage, approvals, call));
+        const state = await requestPlanExecution(resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call));
         return { content: `Plan ${state.digest.slice(0, 12)} autorizado hasta ${new Date(state.expiresAt).toISOString()}. Solo operaciones declaradas; guardrails vigentes.` };
       }
     });
@@ -5589,7 +5616,7 @@ async function delegatedSpecialist(sessionID, scope, options, storage) {
 function planKey(sessionID) {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
     throw new Error("ID de sesion no evaluable.");
-  return `planning/v1/${sessionID}`;
+  return `planning/v2/${sessionID}`;
 }
 async function injectPlanningInstructions(input, options, storage) {
   if (input.agent !== "malahor")
@@ -5600,17 +5627,37 @@ async function injectPlanningInstructions(input, options, storage) {
   const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps y actions vacios." : [
     `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
     mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar." : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+    "Despues de malahor_plan, muestra el plan completo y termina este turno; no invoques malahor_run en la misma respuesta.",
+    "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
+    "Un go previo a la presentacion no aprueba un plan todavia no visto.",
     "El plan enumera rutas/comandos/subagentes exactos. Si cambian, presenta otro plan y vuelve a pedir confirmaciones.",
     "Las aprobaciones de plan no autorizan commit, push, stage, instalacion local ni evitan guardrails.",
     state ? `Estado: ${state.authorizedAt !== undefined ? "autorizado" : state.reviewedAt !== undefined ? "revisado" : "presentado"}; revision ${state.digest.slice(0, 12)}; caduca ${new Date(state.expiresAt).toISOString()}.` : "Estado: sin plan vigente."
   ].join(`
 `);
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v1 -->";
+  const marker = "<!-- malahor-planning:v2 -->";
+  const legacyMarker = "<!-- malahor-planning:v1 -->";
+  for (const part of system) {
+    if (!isRecord5(part) || part.type !== "text" || typeof part.text !== "string")
+      continue;
+    if (part.text.includes(marker)) {
+      input.system = system;
+      return;
+    }
+    const legacyIndex = part.text.indexOf(legacyMarker);
+    if (legacyIndex >= 0) {
+      part.text = `${part.text.slice(0, legacyIndex).trimEnd()}
+
+${marker}
+${instructions}`;
+      input.system = system;
+      return;
+    }
+  }
   const last = system.at(-1);
   if (isRecord5(last) && last.type === "text" && typeof last.text === "string") {
-    if (!last.text.includes(marker))
-      last.text += `
+    last.text += `
 
 ${marker}
 ${instructions}`;
@@ -5932,19 +5979,19 @@ async function setupV2(context) {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options);
         if (registration && typeof registration.dispose === "function")
           cleanups.push(() => registration.dispose?.());
-        capabilities["planning.v1"] = true;
+        capabilities["planning.v2"] = true;
       } catch (error) {
         warn(`herramientas de planeacion no registradas: ${error.message}`);
       }
     }
-    if (!capabilities["planning.v1"])
-      criticalGaps.push("planning.v1");
+    if (!capabilities["planning.v2"])
+      criticalGaps.push("planning.v2");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
-    criticalGaps.push("planning.v1");
+    criticalGaps.push("planning.v2");
   }
   const modeHost = isRecord6(context.command) && typeof context.command.transform === "function" && isRecord6(context.session) && typeof context.session.synthetic === "function" && isRecord6(context.permission) && typeof context.permission.assert === "function" && options.resolveSessionDirectory ? context : undefined;
   if (modeHost) {

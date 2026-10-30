@@ -4,22 +4,33 @@ import path from "node:path";
 
 import plugin from "../assets/opencode/plugins/malahor/index";
 
-const originalHome = process.env.MALAHOR_HOME;
+const SANDBOX_ENV = [
+  "HOME", "XDG_CONFIG_HOME", "MALAHOR_HOME", "MALAHOR_CONFIG", "MALAHOR_OPENCODE_DIR", "MALAHOR_OPENCODE_DETECT",
+] as const;
+const originalEnv = Object.fromEntries(SANDBOX_ENV.map((key) => [key, process.env[key]]));
 let home: string;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-plugin-scaffold-"));
+  process.env.HOME = path.join(home, "user");
+  process.env.XDG_CONFIG_HOME = path.join(home, "user", ".config");
   process.env.MALAHOR_HOME = home;
+  process.env.MALAHOR_CONFIG = path.join(home, "config.jsonc");
+  process.env.MALAHOR_OPENCODE_DIR = path.join(home, "opencode");
+  process.env.MALAHOR_OPENCODE_DETECT = "0";
+  fs.mkdirSync(process.env.HOME, { recursive: true });
+  fs.mkdirSync(process.env.MALAHOR_OPENCODE_DIR, { recursive: true });
   fs.mkdirSync(path.join(home, "mnemo"), { recursive: true });
   fs.writeFileSync(path.join(home, "mnemo", "index.js"), "// mnemo\n", "utf8");
 });
 
 afterEach(() => {
-  if (originalHome === undefined) {
-    delete process.env.MALAHOR_HOME;
-  } else {
-    process.env.MALAHOR_HOME = originalHome;
+  for (const key of SANDBOX_ENV) {
+    const value = originalEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
+  fs.rmSync(home, { recursive: true, force: true });
 });
 
 function stateFile(): string {
@@ -82,7 +93,7 @@ describe("scaffold del plugin", () => {
       storage: true,
       "permission.evaluate": true,
       "tool.execute.before": true,
-      "planning.v1": true,
+      "planning.v2": true,
       "mode.command": true,
       "shell.create.before": true,
       "session.prompt.before": true,
@@ -95,13 +106,68 @@ describe("scaffold del plugin", () => {
     }
   });
 
+  test("bundle expone planning.v2 e instruye separar presentacion y aprobacion en turnos", async () => {
+    const repo = path.join(home, "repo");
+    const sessionID = "ses_bundle_planning";
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(home, "projects.json"), JSON.stringify({
+      demo: { context: "memory", roots: [repo], defaultRoot: repo },
+    }));
+    fs.writeFileSync(process.env.MALAHOR_CONFIG!, JSON.stringify({
+      execution: { intervention: "ejecutar", verification: true },
+    }));
+
+    type Hook = (input: Record<string, unknown>) => Promise<void> | void;
+    const hooks = new Map<string, Hook[]>();
+    const hook = (name: string, callback: Hook) => {
+      hooks.set(name, [...(hooks.get(name) ?? []), callback]);
+      return { dispose: () => undefined };
+    };
+    const values = new Map<string, unknown>();
+    const cleanup = await plugin.setup(v2Context({
+      location: { directory: repo },
+      session: {
+        hook,
+        get: async ({ sessionID: requested }: { sessionID: string }) =>
+          requested === sessionID ? { location: { directory: repo } } : undefined,
+        synthetic: async () => undefined,
+      },
+      storage: {
+        get: async (key: string) => values.get(key),
+        set: async (key: string, value: unknown) => { values.set(key, value); },
+      },
+    }));
+    try {
+      const input: Record<string, unknown> = {
+        sessionID, agent: "malahor", system: [{ type: "text", text: "base" }],
+      };
+      for (const callback of hooks.get("context") ?? []) await callback(input);
+
+      const state = readState();
+      const capabilities = state.capabilities as Record<string, unknown>;
+      expect(capabilities["planning.v2"]).toBe(true);
+      expect(capabilities["planning.v1"]).toBeUndefined();
+      const text = (input.system as Array<{ text: string }>).map((item) => item.text).join("\n");
+      expect(text.match(/malahor-planning:v2/g) ?? []).toHaveLength(1);
+      expect(text).not.toContain("malahor-planning:v1");
+      expect(text).toMatch(/plan completo/i);
+      expect(text).toMatch(/termina(?:r)? (?:este )?turno/i);
+      expect(text).toMatch(/solicitud posterior/i);
+      expect(text).toMatch(/\bgo\b/i);
+      expect(text).toMatch(/\bimplementa\b/i);
+      expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
+    } finally {
+      if (typeof cleanup === "function") await cleanup();
+    }
+  });
+
   test("V2 parcial separa degradadas de brechas criticas", async () => {
     await withoutWarnings(async () => {
       await plugin.setup(v2Context({ mcp: undefined, storage: undefined }));
     });
 
     const state = readState();
-    expect(state.criticalGaps).toContain("planning.v1");
+    expect(state.criticalGaps).toContain("planning.v2");
     expect(state.degraded).toContain("mcp");
     expect(state.degraded).toContain("storage");
   });

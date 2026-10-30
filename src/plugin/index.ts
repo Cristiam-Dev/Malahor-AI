@@ -220,18 +220,18 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options);
         if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
-        capabilities["planning.v1"] = true;
+        capabilities["planning.v2"] = true;
       } catch (error) {
         warn(`herramientas de planeacion no registradas: ${(error as Error).message}`);
       }
     }
-    if (!capabilities["planning.v1"]) criticalGaps.push("planning.v1");
+    if (!capabilities["planning.v2"]) criticalGaps.push("planning.v2");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
-    criticalGaps.push("planning.v1");
+    criticalGaps.push("planning.v2");
   }
 
   const modeHost = isRecord(context.command) && typeof context.command.transform === "function"

@@ -159,7 +159,7 @@ export async function registerPlanningTools(
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Presenta el plan. En asistente solicita la primera confirmacion; en ejecutor muestra el plan para aprobacion posterior. Asesor solo permite concepto.",
+      description: "Presenta el plan completo y termina el turno. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion. Asesor solo permite concepto.",
       input: {
         type: "object", properties: {
           summary: { type: "string" },
@@ -177,20 +177,24 @@ export async function registerPlanningTools(
         const raw = value as PlanInput;
         if (detectSecretKinds(raw).length > 0) throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
-        const state = await presentPlan(resolved.scope, { ...raw, actions }, planningAdapter(storage, approvals, call));
+        const state = await presentPlan(
+          resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call),
+        );
         return { content: `${renderPlan(state)}\nDigest completo: ${state.digest}` };
       },
     });
     editor.add({
       name: "run",
-      description: "Solicita la segunda confirmacion del asistente o aprobacion previa del plan del ejecutor. No ejecuta herramientas por si misma.",
+      description: "En un turno posterior al plan, solicita la segunda confirmacion del asistente o la aprobacion previa del ejecutor. No ejecuta herramientas por si misma.",
       input: { type: "object", properties: { digest: { type: "string" } }, required: ["digest"], additionalProperties: false },
       options: { namespace: "malahor", codemode: false },
       execute: async (value: unknown, call: ToolCall) => {
         const resolved = await requireScope(call, options);
         if (call.agent !== "malahor") throw new Error("Solo el primario puede solicitar ejecucion.");
         const digest = text((value as { digest?: unknown }).digest);
-        const state = await requestPlanExecution(resolved.scope, digest, planningAdapter(storage, approvals, call));
+        const state = await requestPlanExecution(
+          resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call),
+        );
         return { content: `Plan ${state.digest.slice(0, 12)} autorizado hasta ${new Date(state.expiresAt).toISOString()}. Solo operaciones declaradas; guardrails vigentes.` };
       },
     });
@@ -220,7 +224,7 @@ async function delegatedSpecialist(
 
 export function planKey(sessionID: string): string {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID)) throw new Error("ID de sesion no evaluable.");
-  return `planning/v1/${sessionID}`;
+  return `planning/v2/${sessionID}`;
 }
 
 export async function injectPlanningInstructions(
@@ -239,16 +243,33 @@ export async function injectPlanningInstructions(
         `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
         mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar."
           : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+        "Despues de malahor_plan, muestra el plan completo y termina este turno; no invoques malahor_run en la misma respuesta.",
+        "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
+        "Un go previo a la presentacion no aprueba un plan todavia no visto.",
         "El plan enumera rutas/comandos/subagentes exactos. Si cambian, presenta otro plan y vuelve a pedir confirmaciones.",
         "Las aprobaciones de plan no autorizan commit, push, stage, instalacion local ni evitan guardrails.",
         state ? `Estado: ${state.authorizedAt !== undefined ? "autorizado" : state.reviewedAt !== undefined ? "revisado" : "presentado"}; revision ${state.digest.slice(0, 12)}; caduca ${new Date(state.expiresAt).toISOString()}.`
           : "Estado: sin plan vigente.",
       ].join("\n");
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v1 -->";
+  const marker = "<!-- malahor-planning:v2 -->";
+  const legacyMarker = "<!-- malahor-planning:v1 -->";
+  for (const part of system) {
+    if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") continue;
+    if (part.text.includes(marker)) {
+      input.system = system;
+      return;
+    }
+    const legacyIndex = part.text.indexOf(legacyMarker);
+    if (legacyIndex >= 0) {
+      part.text = `${part.text.slice(0, legacyIndex).trimEnd()}\n\n${marker}\n${instructions}`;
+      input.system = system;
+      return;
+    }
+  }
   const last = system.at(-1);
   if (isRecord(last) && last.type === "text" && typeof last.text === "string") {
-    if (!last.text.includes(marker)) last.text += `\n\n${marker}\n${instructions}`;
+    last.text += `\n\n${marker}\n${instructions}`;
   } else {
     system.push({ type: "text", text: `${marker}\n${instructions}` });
   }
