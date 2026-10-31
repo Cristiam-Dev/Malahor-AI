@@ -1,6 +1,9 @@
 import fs from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../core/config";
 import { statusCodegraph } from "../core/codegraph-index";
+import { applyContextMigration, previewContextMigration } from "../core/context-migration";
+import { assertContextMigrationWriteAllowed } from "../core/context-migration-hooks";
 import {
   codegraphEnabled,
   contextLevelLabel,
@@ -23,9 +26,12 @@ export interface ContextOptions {
   dryRun: boolean;
   limit: string | undefined;
   project: string | undefined;
+  apply?: boolean;
+  yes?: boolean;
+  approval?: string;
 }
 
-export function runContext(options: ContextOptions): void {
+export function runContext(options: ContextOptions): void | Promise<void> {
   const config = loadConfig();
   const paths = config.paths;
   const action = options.action || "help";
@@ -55,13 +61,16 @@ export function runContext(options: ContextOptions): void {
     case "register":
       printRegister(paths, config.projects.aliases, options);
       return;
+    case "migrate":
+      assertArgCount(options.args, 0, "Uso: malahor-ai context migrate [--apply] [--yes] [--approval <evidencia-hook>]");
+      return printMigration(paths, options);
     case "help":
     case "--help":
     case "-h":
       printContextHelp();
       return;
     default:
-      throw new Error(`Comando context invalido: ${action}. Usa status, detect, recover, capsule, save o register.`);
+      throw new Error(`Comando context invalido: ${action}. Usa status, detect, recover, capsule, save, register o migrate.`);
   }
 }
 
@@ -79,7 +88,7 @@ function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: str
   printLine(`- Code context: ${codeContextStatus(paths, target.canonicalKey, target.root, level)}`);
   printLine(`- Obsidian: ${obsidianEnabled(level) ? "enabled" : "disabled"}`);
   if (obsidianEnabled(level)) printLine(`- Obsidian bridge: ${bridgeLabel(paths)}`);
-  if (legacyContextLevel(level)) printLine("- Migration: nivel legacy preservado; conversion asistida con backup en T-5.6.5, nunca automatica.");
+  if (legacyContextLevel(level)) printLine("- Migration: nivel legacy preservado; usa `malahor-ai context migrate` para previsualizar una conversion con backup.");
 }
 
 function codeContextStatus(paths: MalahorPaths, project: string, root: string, level: ReturnType<typeof levelForProject>): string {
@@ -178,6 +187,72 @@ function printRegister(paths: MalahorPaths, aliases: ProjectAliases, options: Co
   printLine(`Default root: ${roots.at(-1)}`);
 }
 
+async function printMigration(paths: MalahorPaths, options: ContextOptions): Promise<void> {
+  if (options.dryRun && options.apply) throw new Error("context migrate no acepta --dry-run junto con --apply; sin --apply ya es preview.");
+  if (!options.apply && (options.yes || options.approval)) {
+    throw new Error("El preview de context migrate no acepta --yes ni --approval.");
+  }
+
+  const preview = previewContextMigration({
+    projectsFile: paths.projectsFile,
+    backupsDir: paths.backupsDir,
+  });
+  printLine(`Migration: ${preview.state}`);
+  printLine(`- Entries: ${preview.counts.entries}`);
+  printLine(`- Legacy: ${preview.counts.legacy}`);
+  printLine(`- Modern: ${preview.counts.modern}`);
+  printLine(`- Unknown: ${preview.counts.unknown}`);
+  printLine(`- Without context: ${preview.counts.withoutContext}`);
+  printLine("Mappings:");
+  for (const mapping of preview.mappings) {
+    printLine(`- ${mapping.from} -> ${mapping.to}: ${mapping.count}`);
+  }
+  if (preview.changes.length > 0) {
+    printLine("Changes:");
+    for (const change of preview.changes) printLine(`- ${change.project}: ${change.from} -> ${change.to}`);
+  }
+
+  if (!options.apply) {
+    printLine("Preview only: no files changed.");
+    if (preview.state === "ready") printLine("To apply: malahor-ai context migrate --apply --yes");
+    return;
+  }
+  if (preview.state === "noop") {
+    printLine("Result: no legacy entries; no files changed.");
+    return;
+  }
+  if (!options.yes) await confirmMigrationInTerminal();
+
+  const env = process.env;
+  const cwd = process.cwd();
+  const result = applyContextMigration({
+    projectsFile: paths.projectsFile,
+    backupsDir: paths.backupsDir,
+    expectedVersion: preview.version,
+    approval: options.approval,
+    ports: {
+      assertWriteAllowed: (request) => assertContextMigrationWriteAllowed(request, env, cwd),
+      checkpoint: () => undefined,
+    },
+  });
+  printLine(`Result: migrated ${result.counts.migrated} entries`);
+  printLine(`Verified: ${result.verified ? "yes" : "no"}`);
+  printLine(`Backup: ${result.backup ?? "none"}`);
+}
+
+async function confirmMigrationInTerminal(): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Aplicar la migracion sin TTY requiere --yes; los guardrails siguen vigentes.");
+  }
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await prompt.question("¿Migrar los niveles legacy de projects.json? [s/N]: ")).trim().toLowerCase();
+    if (!["s", "si", "sí", "y", "yes"].includes(answer)) throw new Error("Migracion cancelada.");
+  } finally {
+    prompt.close();
+  }
+}
+
 function parseLimit(value: string | undefined): number {
   if (!value) return 8;
   const parsed = Number(value);
@@ -211,13 +286,14 @@ Usage:
   malahor-ai context capsule [--project <key>] [--limit <n>]
   malahor-ai context save [summary...] [--project <key>] [--dry-run]
   malahor-ai context register <project> <root> [<root> ...] [--dry-run]
+  malahor-ai context migrate [--apply] [--yes] [--approval <evidencia-hook>]
 
 Reglas:
   La memoria siempre esta activa.
   Proyectos nuevos: memory+codegraph por defecto (instalacion e indexado requieren consentimiento).
   Niveles: memory, memory+codegraph, memory+codegraph+obsidian.
-  Niveles mnemo* heredados se preservan; NO activan CodeGraph, incluso con indice.
-  Conversion de projects.json con backup y verificacion: T-5.6.5 (no automatica).
+  Niveles mnemo* heredados se preservan y NO activan CodeGraph hasta migrarlos.
+  context migrate previsualiza sin escribir; --apply confirma, respalda y verifica.
 
 Detect:
   context detect lee manifiestos del proyecto (package.json, pom.xml, pyproject.toml,

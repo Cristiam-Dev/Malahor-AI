@@ -9,6 +9,18 @@ import { resolveCanonicalProjectKey, resolveProject, type ProjectAliases, type P
 export type ContextLevel = "memory" | "memory+codegraph" | "memory+codegraph+obsidian"
   | "mnemo" | "mnemo+graphify" | "mnemo+graphify+obsidian";
 
+export type LegacyContextLevel = "mnemo" | "mnemo+graphify" | "mnemo+graphify+obsidian";
+export type ModernContextLevel = "memory" | "memory+codegraph" | "memory+codegraph+obsidian";
+
+export const LEGACY_CONTEXT_MIGRATIONS: readonly Readonly<{
+  from: LegacyContextLevel;
+  to: ModernContextLevel;
+}>[] = [
+  { from: "mnemo", to: "memory" },
+  { from: "mnemo+graphify", to: "memory+codegraph" },
+  { from: "mnemo+graphify+obsidian", to: "memory+codegraph+obsidian" },
+];
+
 export const CONTEXT_LEVELS: readonly ContextLevel[] = [
   "memory", "memory+codegraph", "memory+codegraph+obsidian",
   "mnemo", "mnemo+graphify", "mnemo+graphify+obsidian",
@@ -247,6 +259,10 @@ export function codegraphEnabled(level: ContextLevel): boolean {
 
 export function legacyContextLevel(level: ContextLevel): boolean {
   return level.startsWith("mnemo");
+}
+
+export function migratedContextLevel(value: unknown): ModernContextLevel | undefined {
+  return LEGACY_CONTEXT_MIGRATIONS.find(({ from }) => from === value)?.to;
 }
 
 export function contextLevelLabel(level: ContextLevel): string {

@@ -104,12 +104,15 @@ async function main(argv: string[]): Promise<void> {
         });
         return;
       case "context":
-        runContext({
+        await runContext({
           action: parsed.args[0] ?? "help",
           args: parsed.args.slice(1),
           dryRun: parsed.flags.has("dry-run"),
           limit: parsed.options.limit,
           project: parsed.options.project,
+          apply: parsed.flags.has("apply"),
+          yes: parsed.flags.has("yes"),
+          approval: parsed.options.approval,
         });
         return;
       case "obsidian":
@@ -204,6 +207,7 @@ Context commands:
   context capsule [--project <key>] [--limit <n>]
   context save [summary...] [--project <key>]
   context register <project> <root> [<root> ...] [--dry-run]
+  context migrate [--apply] [--yes] [--approval <evidencia-hook>]
 
 Mode commands:
   mode status

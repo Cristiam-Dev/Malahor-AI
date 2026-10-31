@@ -38,7 +38,7 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 | `malahor-ai doctor` | Diagnostica la instalacion; `--self-heal` repara y migra permisos legacy |
 | `malahor-ai git` | Flujo git asistido: precommit, prepush y mensajes de commit seguros |
 | `malahor-ai hooks` | Guardrails cross-harness para git, secretos, memoria, instalacion y calidad |
-| `malahor-ai context` | Nivel de contexto por proyecto y deteccion de stack |
+| `malahor-ai context` | Nivel por proyecto, deteccion de stack y migracion asistida de niveles legacy |
 | `malahor-ai codegraph` | Contexto estructural con symgraph e indice gestionado fuera del repo (`status`, `setup`, `index`, `guide`) |
 | `malahor-ai memory` | Administra la memoria Mnemo |
 | `malahor-ai obsidian` | Configura el puente Obsidian MCP |
@@ -49,7 +49,7 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 
 - **Memoria**: decisiones, bugs, patrones, arquitectura y resumen de sesion en scopes jerarquicos `proyecto/asignacion/HU/area`, guardados por el backend activo fuera de los repos. La recuperacion hereda padres y `global`; `mem_brief` entiende solicitudes naturales y busca recuerdos relacionados en otros scopes.
 - **Administracion segura de memoria**: el agente puede inspeccionar, respaldar, mover/reclasificar, borrar y restaurar memoria via MCP con preview + confirmacion (`mem_inspect_project`, `mem_backup`, `mem_move_preview`/`mem_move`, `mem_delete_project_preview`/`mem_delete_project`, `mem_restore_preview`/`mem_restore`).
-- **Contexto por proyecto**: `memory`, `memory+codegraph` (predeterminado para proyectos nuevos) o `memory+codegraph+obsidian`. El orden es proyecto canonico → memoria → CodeGraph habilitado y gestionado → Obsidian habilitado → lecturas dirigidas. `context status` distingue codigo disponible, degradado e inactivo. Los niveles persistidos `mnemo*` permanecen legibles y no activan CodeGraph; no se reescribe `projects.json` hasta la migracion asistida con backup de T-5.6.5.
+- **Contexto por proyecto**: `memory`, `memory+codegraph` (predeterminado para proyectos nuevos) o `memory+codegraph+obsidian`. El orden es proyecto canonico → memoria → CodeGraph habilitado y gestionado → Obsidian habilitado → lecturas dirigidas. `context status` distingue codigo disponible, degradado e inactivo. Los niveles persistidos `mnemo*` permanecen legibles y no activan CodeGraph hasta ejecutar explicitamente `context migrate --apply`. `context migrate` es preview de solo lectura; la aplicacion pide TTY o `--yes`, pasa por hooks y lock, crea un backup privado, publica atomicamente, relee el registro y revierte si la verificacion falla. No instala ni indexa CodeGraph y no elimina artefactos Graphify.
 - **Contexto estructural**: symgraph 2026.10.18 (Rust/tree-sitter) sustituye al proveedor CodeGraph que solo admite indices locales. Malahor fija SHA-256 de release, ejecutable y puente MCP, indexa en `MALAHOR_HOME/codegraph/indexes/` y solo registra herramientas de lectura para indices gestionados y nivel nuevo con codigo. `symgraph-reindex` no se expone: reindexa exclusivamente mediante el CLI con nuevo consentimiento. `install --yes` no instala ni indexa automaticamente; `doctor` avisa y degrada sin bloquear. Tras cambiar niveles o assets gestionados, abre una sesion nueva de OpenCode.
 - **Obsidian (opcional)**: documentacion humana via Obsidian MCP; nunca por filesystem directo. Soporta OpenCode en WSL con Obsidian en Windows y Windows nativo.
 - **Politica de intervencion**: `ejecutar`, `guiar` o `acompanar`, aplicada al final de la instalacion. `guiar` y `acompanar` usan una lista blanca de comandos (no un bloqueo total): el agente conserva siempre la ruta de diagnostico y autorreparacion, y `install`/`update` solo piden confirmacion al usuario.
@@ -101,6 +101,10 @@ malahor-ai context detect
 # Recuperar o guardar una capsula corta de contexto
 malahor-ai context recover
 malahor-ai context save "objetivo, estado, decisiones y proximo paso"
+
+# Previsualizar y aplicar la conversion reversible de niveles mnemo* heredados
+malahor-ai context migrate
+malahor-ai context migrate --apply --yes
 
 # Previsualizar antes de consentir descarga e indexado (solo proyecto registrado)
 malahor-ai codegraph guide
