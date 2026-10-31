@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
+import { loadPlanningAuthority, type PlanningAuthority } from "../cli/core/planning-authority";
 import { codegraphEnabled, levelForProject, obsidianEnabled, registeredProjectRoots } from "../cli/core/context";
 import { resolveProject } from "../cli/core/project";
 import { codegraphRoot, codegraphRuntime } from "../cli/core/codegraph-runtime";
@@ -35,6 +36,7 @@ import {
   type PlanningStorage, type PlanningTools,
 } from "./planning";
 import { registerModeCommand, type ModeCommandHost } from "./mode-command";
+import { registerPlanCommand, type PlanCommandHost } from "./plan-command";
 
 const PLUGIN_ID = "malahor";
 const PLUGIN_VERSION = "0.4.0";
@@ -138,6 +140,17 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   const session = domain("session");
   const storage = storageDomain(context.storage);
   const planStorage = storage && typeof storage.get === "function" ? storage as unknown as PlanningStorage : undefined;
+  let planningAuthority: PlanningAuthority | undefined;
+  if (planStorage) {
+    try {
+      planningAuthority = loadPlanningAuthority(resolvePaths(process.env, cwd).secretsDir);
+      capabilities["planning.authority"] = true;
+    } catch (error) {
+      capabilities["planning.authority"] = false;
+      criticalGaps.push("planning.authority");
+      warn(`autoridad de planeacion no disponible: ${(error as Error).message}`);
+    }
+  }
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {
       const value = await session.get?.({ sessionID });
@@ -155,7 +168,9 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
       const evaluated = await evaluatePermission(input, options);
-      if (evaluated.effect !== "deny") await evaluatePlanningPermission(input, options, planStorage);
+      if (evaluated.effect !== "deny") await evaluatePlanningPermission(
+        input, options, planningAuthority ? planStorage : undefined, planningAuthority,
+      );
       if (input.effect === "deny") {
         warn(`permission.evaluate deny: ${evaluated.effect === "deny" ? summary(evaluated.result) : String(input.message ?? "plan no autorizado")}`);
       }
@@ -193,7 +208,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       if (shouldBlockPluginResult(result, options)) {
         throw new Error(formatPluginBlock(result));
       }
-      await evaluatePlanningTool(input, options, planStorage);
+      await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
     }, cleanups);
     capabilities.tool = true;
     capabilities["tool.execute.before"] = registered;
@@ -216,9 +231,10 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       ? tool as unknown as PlanningTools : undefined;
     const approvalPort = isRecord(context.permission) && typeof context.permission.assert === "function"
       ? context.permission as unknown as Parameters<typeof registerPlanningTools>[1] : undefined;
-    if (planningTools && approvalPort && planStorage && options.resolveSessionDirectory && options.permissionRegistered && registered) {
+    if (planningTools && approvalPort && planStorage && planningAuthority
+      && options.resolveSessionDirectory && options.permissionRegistered && registered) {
       try {
-        const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options);
+        const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
         capabilities["planning.v2"] = true;
       } catch (error) {
@@ -250,6 +266,22 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   }
   if (!capabilities["mode.command"]) degraded.push("mode.command");
 
+  const planCommandHost = isRecord(context.command) && typeof context.command.transform === "function"
+    && isRecord(context.session) && typeof context.session.synthetic === "function"
+    && isRecord(context.permission) && typeof context.permission.assert === "function"
+    && options.resolveSessionDirectory
+    ? context as unknown as PlanCommandHost : undefined;
+  if (planCommandHost && planStorage && planningAuthority) {
+    try {
+      const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
+      if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
+      capabilities["plan.command"] = true;
+    } catch (error) {
+      warn(`comando de plan no registrado: ${(error as Error).message}`);
+    }
+  }
+  if (!capabilities["plan.command"]) degraded.push("plan.command");
+
   if (session) {
     for (const event of SESSION_HOOKS) {
       const registered = await registerHook(session, hookNameForEvent(event), async (input) => {
@@ -268,7 +300,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
 
     const protocolRegistered = await registerHook(session, "context", async (input) => {
       injectMalahorProtocol(input);
-      await injectPlanningInstructions(input, options, planStorage);
+      await injectPlanningInstructions(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
     }, cleanups);
     capabilities["protocol.context"] = protocolRegistered;
     if (!protocolRegistered) degraded.push("protocol.context");

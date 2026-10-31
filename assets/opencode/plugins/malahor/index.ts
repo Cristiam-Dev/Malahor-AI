@@ -1,9 +1,9 @@
 // malahor-managed
 // @ts-nocheck bundle generado desde src/plugin/index.ts; el source se typechequea con tsconfig.json
 // src/plugin/index.ts
-import fs11 from "node:fs";
+import fs12 from "node:fs";
 import os2 from "node:os";
-import path15 from "node:path";
+import path16 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -145,19 +145,118 @@ function normalizeForCompare(value) {
   return value.replaceAll("\\", "/").replace(/\/+$/g, "").toLowerCase();
 }
 
-// src/cli/core/context.ts
-import fs3 from "node:fs";
-import path3 from "node:path";
-
-// src/cli/core/project.ts
+// src/cli/core/planning-authority.ts
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs2 from "node:fs";
 import path2 from "node:path";
+var KEY_FILE = "planning.key";
+var KEY_BYTES = 32;
+function createPlanningAuthority(secret) {
+  if (!(secret instanceof Uint8Array) || secret.byteLength !== KEY_BYTES) {
+    throw new Error(`La autoridad de planeacion requiere ${KEY_BYTES} bytes.`);
+  }
+  const key = Buffer.from(secret);
+  const fingerprint = createHash("sha256").update(key).digest("hex");
+  return {
+    fingerprint,
+    sign: (payload) => createHmac("sha256", key).update(payload).digest("hex"),
+    verify: (payload, proof) => {
+      if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof))
+        return false;
+      const expected = createHmac("sha256", key).update(payload).digest();
+      return timingSafeEqual(expected, Buffer.from(proof, "hex"));
+    }
+  };
+}
+function createEphemeralPlanningAuthority() {
+  return createPlanningAuthority(randomBytes(KEY_BYTES));
+}
+function planningKeyPath(secretsDirectory) {
+  return path2.join(path2.resolve(secretsDirectory), KEY_FILE);
+}
+function loadPlanningAuthority(secretsDirectory) {
+  const directory = path2.resolve(secretsDirectory);
+  ensurePrivateDirectory(directory);
+  const file = planningKeyPath(directory);
+  if (!fs2.existsSync(file))
+    createKey(file);
+  return createPlanningAuthority(readKey(file));
+}
+function createKey(file) {
+  const content = `${randomBytes(KEY_BYTES).toString("hex")}
+`;
+  try {
+    const descriptor = fs2.openSync(file, "wx", 384);
+    try {
+      fs2.writeFileSync(descriptor, content, "utf8");
+      fs2.fsyncSync(descriptor);
+    } finally {
+      fs2.closeSync(descriptor);
+    }
+    secureChmod(file, 384);
+  } catch (error) {
+    if (!isAlreadyExists(error))
+      throw error;
+  }
+}
+function readKey(file) {
+  const stat = fs2.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error("La clave de planeacion debe ser un archivo regular privado, sin enlaces.");
+  }
+  assertOwned(stat, "La clave de planeacion pertenece a otro usuario.");
+  assertPrivateMode(stat, 63, "La clave de planeacion requiere permisos privados.");
+  if (stat.size > 256)
+    throw new Error("La clave de planeacion tiene un formato invalido.");
+  const value = fs2.readFileSync(file, "utf8");
+  if (!/^[a-f0-9]{64}\n?$/.test(value))
+    throw new Error("La clave de planeacion tiene un formato invalido.");
+  return Buffer.from(value.trim(), "hex");
+}
+function ensurePrivateDirectory(directory) {
+  if (!fs2.existsSync(directory))
+    fs2.mkdirSync(directory, { recursive: true, mode: 448 });
+  const stat = fs2.lstatSync(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error("El directorio de secretos de planeacion debe ser un directorio real.");
+  }
+  assertOwned(stat, "El directorio de secretos de planeacion pertenece a otro usuario.");
+  assertPrivateMode(stat, 63, "El directorio de secretos de planeacion requiere permisos privados.");
+  secureChmod(directory, 448);
+}
+function assertOwned(stat, message) {
+  if (process.getuid && stat.uid !== process.getuid())
+    throw new Error(message);
+}
+function assertPrivateMode(stat, mask, message) {
+  if (process.platform !== "win32" && (stat.mode & mask) !== 0)
+    throw new Error(message);
+}
+function secureChmod(target, mode) {
+  try {
+    fs2.chmodSync(target, mode);
+  } catch (error) {
+    if (process.platform !== "win32")
+      throw error;
+  }
+}
+function isAlreadyExists(error) {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+// src/cli/core/context.ts
+import fs4 from "node:fs";
+import path4 from "node:path";
+
+// src/cli/core/project.ts
+import fs3 from "node:fs";
+import path3 from "node:path";
 var BUILT_IN_PROJECT_ALIASES = {
   malahor: ["malaho", "MalaHor", "malahor ai", "malahor-ai", "malahor_ai", "malahorai"]
 };
 function resolveProject(cwd = process.cwd(), aliases = {}) {
   const root = findProjectRoot(cwd);
-  const name = readPackageName(root) ?? path2.basename(root);
+  const name = readPackageName(root) ?? path3.basename(root);
   const canonicalKey = resolveCanonicalProjectKey(name, aliases);
   return {
     name,
@@ -181,23 +280,23 @@ function projectLookupKey(project) {
   return project.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 function findProjectRoot(cwd) {
-  let current = path2.resolve(cwd);
+  let current = path3.resolve(cwd);
   while (true) {
-    if (fs2.existsSync(path2.join(current, "package.json")) || fs2.existsSync(path2.join(current, ".git"))) {
+    if (fs3.existsSync(path3.join(current, "package.json")) || fs3.existsSync(path3.join(current, ".git"))) {
       return current;
     }
-    const parent = path2.dirname(current);
+    const parent = path3.dirname(current);
     if (parent === current)
-      return path2.resolve(cwd);
+      return path3.resolve(cwd);
     current = parent;
   }
 }
 function readPackageName(cwd) {
-  const packagePath = path2.join(cwd, "package.json");
-  if (!fs2.existsSync(packagePath))
+  const packagePath = path3.join(cwd, "package.json");
+  if (!fs3.existsSync(packagePath))
     return null;
   try {
-    const parsed = JSON.parse(fs2.readFileSync(packagePath, "utf8"));
+    const parsed = JSON.parse(fs3.readFileSync(packagePath, "utf8"));
     if (typeof parsed === "object" && parsed !== null && typeof parsed.name === "string" && parsed.name.trim()) {
       return parsed.name.trim();
     }
@@ -233,7 +332,7 @@ var CONTEXT_LEVELS = [
 var DEFAULT_CONTEXT_LEVEL = "memory+codegraph";
 function resolveRegisteredProject(paths, aliases = {}, options = {}) {
   const canonicalKey = options.override?.trim() ? resolveCanonicalProjectKey(options.override, aliases) : resolveProjectHint(paths, aliases, options.projectHint);
-  const absoluteTargets = (options.targetPaths ?? []).map((target) => path3.resolve(paths.cwd, target));
+  const absoluteTargets = (options.targetPaths ?? []).map((target) => path4.resolve(paths.cwd, target));
   const registered = canonicalKey ? rootsForProject(paths.projectsFile, canonicalKey).map((root2) => ({ canonicalKey, root: root2 })) : registeredProjectRoots(paths.projectsFile).filter((entry) => isWithinPath(paths.cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root))).sort((left, right) => right.root.length - left.root.length);
   const root = options.preferredRoot ?? registered[0]?.root;
   if (root) {
@@ -267,10 +366,10 @@ function parseContextLevel(value) {
   return value;
 }
 function loadProjectsFile(filePath) {
-  if (!fs3.existsSync(filePath)) {
+  if (!fs4.existsSync(filePath)) {
     return {};
   }
-  const raw = fs3.readFileSync(filePath, "utf8").trim();
+  const raw = fs4.readFileSync(filePath, "utf8").trim();
   if (!raw)
     return {};
   let parsed;
@@ -317,9 +416,9 @@ function registeredProjectRoots(projectsFile) {
   return Object.entries(projects).flatMap(([canonicalKey, entry]) => (entry.roots ?? []).map((root) => ({ canonicalKey, root })));
 }
 function normalizeRoot(root) {
-  const resolved = path3.resolve(root);
+  const resolved = path4.resolve(root);
   try {
-    return fs3.realpathSync(resolved);
+    return fs4.realpathSync(resolved);
   } catch {
     return resolved;
   }
@@ -345,17 +444,17 @@ function codegraphEnabled(level) {
   return level === "memory+codegraph" || level === "memory+codegraph+obsidian";
 }
 function isWithinPath(value, root) {
-  const relative = path3.relative(path3.resolve(root), path3.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path3.isAbsolute(relative);
+  const relative = path4.relative(path4.resolve(root), path4.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path4.isAbsolute(relative);
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/cli/core/codegraph-runtime.ts
-import { createHash } from "node:crypto";
-import fs4 from "node:fs";
-import path4 from "node:path";
+import { createHash as createHash2 } from "node:crypto";
+import fs5 from "node:fs";
+import path5 from "node:path";
 var CODEGRAPH_PROVIDER = "symgraph";
 var CODEGRAPH_VERSION = "2026.10.18";
 var CODEGRAPH_RELEASE = `v${CODEGRAPH_VERSION}`;
@@ -368,44 +467,44 @@ var CODEGRAPH_BINARIES = {
   "win32:x64": "3a834de37e870bfe0ab14217ddafbefd990442982a0c4c07965d5cd4e9089e32"
 };
 function codegraphDirectory(paths) {
-  return path4.join(paths.malahorHome, "codegraph");
+  return path5.join(paths.malahorHome, "codegraph");
 }
 function codegraphBinary(paths) {
-  return path4.join(codegraphDirectory(paths), "bin", process.platform === "win32" ? "symgraph.exe" : "symgraph");
+  return path5.join(codegraphDirectory(paths), "bin", process.platform === "win32" ? "symgraph.exe" : "symgraph");
 }
 function codegraphProxy(paths) {
-  return path4.join(codegraphDirectory(paths), "bin", "mcp-proxy.mjs");
+  return path5.join(codegraphDirectory(paths), "bin", "mcp-proxy.mjs");
 }
 function codegraphIndex(paths, root) {
-  const key = createHash("sha256").update(root).digest("hex");
-  const directory = path4.join(codegraphDirectory(paths), "indexes", key);
-  return { directory, database: path4.join(directory, "index.db"), state: path4.join(directory, "ownership.json") };
+  const key = createHash2("sha256").update(root).digest("hex");
+  const directory = path5.join(codegraphDirectory(paths), "indexes", key);
+  return { directory, database: path5.join(directory, "index.db"), state: path5.join(directory, "ownership.json") };
 }
 function codegraphRoot(paths, project) {
   const candidates = registeredProjectRoots(paths.projectsFile);
-  const selected = project ? candidates.filter((entry) => entry.canonicalKey === project) : candidates.filter((entry) => inside(fs4.realpathSync(paths.cwd), fs4.realpathSync(entry.root)));
+  const selected = project ? candidates.filter((entry) => entry.canonicalKey === project) : candidates.filter((entry) => inside(fs5.realpathSync(paths.cwd), fs5.realpathSync(entry.root)));
   if (selected.length === 0)
     throw new Error("Registra primero la raiz del proyecto con `malahor-ai context register`.");
-  const current = selected.filter((entry) => inside(fs4.realpathSync(paths.cwd), fs4.realpathSync(entry.root))).sort((a, b) => b.root.length - a.root.length)[0];
+  const current = selected.filter((entry) => inside(fs5.realpathSync(paths.cwd), fs5.realpathSync(entry.root))).sort((a, b) => b.root.length - a.root.length)[0];
   const preferred = project && rootsForProject(paths.projectsFile, project)[0];
   const chosen = current ?? (preferred ? selected.find((entry) => entry.root === preferred) : undefined) ?? (selected.length === 1 ? selected[0] : undefined);
   if (!chosen)
     throw new Error("El proyecto tiene varias raices; ejecuta el comando desde la raiz deseada.");
-  const root = fs4.realpathSync(chosen.root);
-  if (root !== fs4.realpathSync(paths.cwd) && !project && !inside(paths.cwd, root)) {
+  const root = fs5.realpathSync(chosen.root);
+  if (root !== fs5.realpathSync(paths.cwd) && !project && !inside(paths.cwd, root)) {
     throw new Error("No se pudo resolver una raiz registrada para el directorio actual.");
   }
-  if (root === path4.parse(root).root || root === paths.home)
+  if (root === path5.parse(root).root || root === paths.home)
     throw new Error("No se indexa la raiz del sistema ni HOME.");
   return { project: chosen.canonicalKey, root };
 }
 function assertExternalIndex(paths, root) {
   const base = physicalTarget(paths.malahorHome);
-  const physicalRoot = fs4.realpathSync(root);
+  const physicalRoot = fs5.realpathSync(root);
   if (inside(base, physicalRoot) || inside(physicalRoot, base)) {
     throw new Error("MALAHOR_HOME y el indice CodeGraph deben estar fuera del repositorio.");
   }
-  const roots = registeredProjectRoots(paths.projectsFile).map((entry) => fs4.realpathSync(entry.root));
+  const roots = registeredProjectRoots(paths.projectsFile).map((entry) => fs5.realpathSync(entry.root));
   for (const registeredRoot of roots) {
     if (inside(base, registeredRoot)) {
       throw new Error("MALAHOR_HOME esta dentro de un proyecto registrado; indice rechazado.");
@@ -414,16 +513,16 @@ function assertExternalIndex(paths, root) {
   const index = codegraphIndex(paths, physicalRoot);
   for (const target of [
     codegraphDirectory(paths),
-    path4.dirname(codegraphBinary(paths)),
+    path5.dirname(codegraphBinary(paths)),
     codegraphBinary(paths),
     codegraphProxy(paths),
-    path4.dirname(index.directory),
+    path5.dirname(index.directory),
     index.directory,
     index.database,
     index.state,
-    path4.join(codegraphDirectory(paths), "snapshots")
+    path5.join(codegraphDirectory(paths), "snapshots")
   ]) {
-    const expected = path4.join(base, path4.relative(paths.malahorHome, target));
+    const expected = path5.join(base, path5.relative(paths.malahorHome, target));
     const actual = physicalTarget(target);
     if (actual !== expected || roots.some((registeredRoot) => inside(actual, registeredRoot))) {
       throw new Error(`Ruta CodeGraph redirigida o dentro de un repositorio: ${target}`);
@@ -432,15 +531,15 @@ function assertExternalIndex(paths, root) {
 }
 function verifiedCodegraphBinary(paths) {
   const binary = codegraphBinary(paths);
-  const state = readJson(path4.join(codegraphDirectory(paths), "bin", "managed.json"));
+  const state = readJson(path5.join(codegraphDirectory(paths), "bin", "managed.json"));
   if (state?.provider !== CODEGRAPH_PROVIDER || state.version !== CODEGRAPH_VERSION || !/^[a-f0-9]{64}$/.test(state.sha256 ?? ""))
     return;
   try {
-    if (physicalTarget(binary) !== path4.join(physicalTarget(paths.malahorHome), path4.relative(paths.malahorHome, binary)))
+    if (physicalTarget(binary) !== path5.join(physicalTarget(paths.malahorHome), path5.relative(paths.malahorHome, binary)))
       return;
-    if (!fs4.lstatSync(binary).isFile())
+    if (!fs5.lstatSync(binary).isFile())
       return;
-    const digest = createHash("sha256").update(fs4.readFileSync(binary)).digest("hex");
+    const digest = createHash2("sha256").update(fs5.readFileSync(binary)).digest("hex");
     return digest === CODEGRAPH_BINARIES[`${process.platform}:${process.arch}`] && digest === state.sha256 ? binary : undefined;
   } catch {
     return;
@@ -449,19 +548,19 @@ function verifiedCodegraphBinary(paths) {
 function verifiedCodegraphProxy(paths) {
   const proxy = codegraphProxy(paths);
   try {
-    if (physicalTarget(proxy) !== path4.join(physicalTarget(paths.malahorHome), path4.relative(paths.malahorHome, proxy)))
+    if (physicalTarget(proxy) !== path5.join(physicalTarget(paths.malahorHome), path5.relative(paths.malahorHome, proxy)))
       return;
-    if (!fs4.lstatSync(proxy).isFile())
+    if (!fs5.lstatSync(proxy).isFile())
       return;
-    return createHash("sha256").update(fs4.readFileSync(proxy)).digest("hex") === CODEGRAPH_PROXY_SHA256 ? proxy : undefined;
+    return createHash2("sha256").update(fs5.readFileSync(proxy)).digest("hex") === CODEGRAPH_PROXY_SHA256 ? proxy : undefined;
   } catch {
     return;
   }
 }
 function codegraphRuntime(paths, project, root) {
   try {
-    const physicalRoot = fs4.realpathSync(root);
-    if (!registeredProjectRoots(paths.projectsFile).some((entry) => entry.canonicalKey === project && fs4.realpathSync(entry.root) === physicalRoot))
+    const physicalRoot = fs5.realpathSync(root);
+    if (!registeredProjectRoots(paths.projectsFile).some((entry) => entry.canonicalKey === project && fs5.realpathSync(entry.root) === physicalRoot))
       return;
     assertExternalIndex(paths, physicalRoot);
     const binary = verifiedCodegraphBinary(paths);
@@ -470,7 +569,7 @@ function codegraphRuntime(paths, project, root) {
     const state = readJson(index.state);
     if (!binary || !proxy || state?.provider !== CODEGRAPH_PROVIDER || state.version !== CODEGRAPH_VERSION || state.ready !== true || state.project !== project || state.root !== physicalRoot || state.database !== index.database)
       return;
-    if (!fs4.lstatSync(index.database).isFile() || fs4.realpathSync(index.database) !== index.database)
+    if (!fs5.lstatSync(index.database).isFile() || fs5.realpathSync(index.database) !== index.database)
       return;
     return { binary, proxy, root: physicalRoot, database: index.database };
   } catch {
@@ -479,35 +578,35 @@ function codegraphRuntime(paths, project, root) {
 }
 function readJson(file) {
   try {
-    if (!fs4.lstatSync(file).isFile())
+    if (!fs5.lstatSync(file).isFile())
       return;
-    const parsed = JSON.parse(fs4.readFileSync(file, "utf8"));
+    const parsed = JSON.parse(fs5.readFileSync(file, "utf8"));
     return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : undefined;
   } catch {
     return;
   }
 }
 function physicalTarget(target) {
-  const parent = path4.dirname(target);
+  const parent = path5.dirname(target);
   try {
-    fs4.lstatSync(target);
+    fs5.lstatSync(target);
   } catch (error) {
     if (error.code !== "ENOENT")
       throw error;
     if (parent === target)
-      return path4.resolve(target);
-    return path4.join(physicalTarget(parent), path4.basename(target));
+      return path5.resolve(target);
+    return path5.join(physicalTarget(parent), path5.basename(target));
   }
-  return fs4.realpathSync(target);
+  return fs5.realpathSync(target);
 }
 function inside(value, root) {
-  const relative = path4.relative(root, value);
-  return relative === "" || relative !== ".." && !relative.startsWith(`..${path4.sep}`) && !path4.isAbsolute(relative);
+  const relative = path5.relative(root, value);
+  return relative === "" || relative !== ".." && !relative.startsWith(`..${path5.sep}`) && !path5.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/policy-loader.ts
-import fs5 from "node:fs";
-import path5 from "node:path";
+import fs6 from "node:fs";
+import path6 from "node:path";
 
 // src/cli/core/jsonc.ts
 function stripJsonComments(input) {
@@ -561,7 +660,7 @@ function stripJsonComments(input) {
 }
 
 // src/cli/core/hooks/security-policy.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 var CONTROL_SCHEMA = {
   files: {
     enforceRoots: "boolean",
@@ -855,17 +954,17 @@ function validateSecurityLayer(value, options) {
     const group = {};
     for (const [controlName, controlValue] of Object.entries(rawGroup)) {
       const expected = groupSchema[controlName];
-      const path5 = `${groupName}.${controlName}`;
+      const path6 = `${groupName}.${controlName}`;
       if (!expected) {
-        const message = `control desconocido: ${path5}`;
+        const message = `control desconocido: ${path6}`;
         if (options.strict)
           errors.push(message);
         else
           warnings.push(`${message}; se ignora.`);
         continue;
       }
-      if (!validControlValue(path5, controlValue, expected)) {
-        errors.push(`control invalido: ${path5}`);
+      if (!validControlValue(path6, controlValue, expected)) {
+        errors.push(`control invalido: ${path6}`);
         continue;
       }
       group[controlName] = controlValue;
@@ -902,30 +1001,30 @@ function mergeSecurityLayers(layers) {
         const expected = groupSchema[controlName];
         if (!expected)
           continue;
-        const path5 = `${groupName}.${controlName}`;
+        const path6 = `${groupName}.${controlName}`;
         const current = target[controlName];
         if (expected === "const")
           continue;
         if (expected === "boolean") {
           if (current === true && value === false) {
-            warnings.push(`${sourceLabel(source)} intenta aflojar ${path5}; se conserva true.`);
+            warnings.push(`${sourceLabel(source)} intenta aflojar ${path6}; se conserva true.`);
           }
           target[controlName] = current === true || value === true;
           continue;
         }
         if (expected === "stringArray") {
-          const next = mergeArray(current, value, ARRAY_MODES[path5] ?? "intersect", path5, source, warnings);
+          const next = mergeArray(current, value, ARRAY_MODES[path6] ?? "intersect", path6, source, warnings);
           target[controlName] = next;
           continue;
         }
         if (expected === "integer") {
-          const mode = INTEGER_MODES[path5] ?? "min";
+          const mode = INTEGER_MODES[path6] ?? "min";
           if (current === undefined) {
             target[controlName] = value;
           } else {
             const next = mode === "min" ? Math.min(current, value) : Math.max(current, value);
             if (next !== value)
-              warnings.push(`${sourceLabel(source)} intenta aflojar ${path5}; se conserva ${next}.`);
+              warnings.push(`${sourceLabel(source)} intenta aflojar ${path6}; se conserva ${next}.`);
             target[controlName] = next;
           }
           continue;
@@ -933,7 +1032,7 @@ function mergeSecurityLayers(layers) {
         if (current === undefined) {
           target[controlName] = value;
         } else if (current !== value) {
-          warnings.push(`${sourceLabel(source)} intenta cambiar ${path5}; se conserva ${String(current)}.`);
+          warnings.push(`${sourceLabel(source)} intenta cambiar ${path6}; se conserva ${String(current)}.`);
         }
       }
     }
@@ -941,7 +1040,7 @@ function mergeSecurityLayers(layers) {
   return { controls, warnings, enabledPaths: enabledControlPaths(controls) };
 }
 function unenforcedControlPaths(layer) {
-  const paths = enabledControlPaths(layer.controls).filter((path5) => !ENFORCED_CONTROL_PATHS.has(path5));
+  const paths = enabledControlPaths(layer.controls).filter((path6) => !ENFORCED_CONTROL_PATHS.has(path6));
   for (const required of layer.controls.host?.requiredControls ?? []) {
     if (!ENFORCED_CONTROL_PATHS.has(required)) {
       paths.push(`host.required[${required}]`);
@@ -956,13 +1055,13 @@ function enabledControlPaths(controls) {
     if (!group)
       continue;
     for (const [controlName, expected] of Object.entries(groupSchema)) {
-      const path5 = `${groupName}.${controlName}`;
-      if (IGNORED_GAP_PATHS.has(path5))
+      const path6 = `${groupName}.${controlName}`;
+      if (IGNORED_GAP_PATHS.has(path6))
         continue;
       const value = group[controlName];
       if (value === undefined || value === false)
         continue;
-      const gate = CONTROL_GATES[path5];
+      const gate = CONTROL_GATES[path6];
       if (gate) {
         const [gateGroup, gateControl] = gate.split(".");
         const gateValue = controls[gateGroup]?.[gateControl];
@@ -970,15 +1069,15 @@ function enabledControlPaths(controls) {
           continue;
       }
       if (expected === "boolean") {
-        result.push(path5);
+        result.push(path6);
         continue;
       }
       if (expected === "stringArray") {
         if (Array.isArray(value) && value.length > 0)
-          result.push(path5);
+          result.push(path6);
         continue;
       }
-      result.push(path5);
+      result.push(path6);
     }
   }
   return result;
@@ -1018,24 +1117,24 @@ function canonicalJson(value) {
   return JSON.stringify(normalizeJson(value));
 }
 function sha256(value) {
-  return createHash2("sha256").update(value).digest("hex");
+  return createHash3("sha256").update(value).digest("hex");
 }
-function mergeArray(current, next, mode, path5, source, warnings) {
+function mergeArray(current, next, mode, path6, source, warnings) {
   if (current === undefined)
     return uniqueStrings(next);
   if (mode === "intersect") {
     const allowed = new Set(next);
     const result = current.filter((value) => allowed.has(value));
     if (next.some((value) => !current.includes(value))) {
-      warnings.push(`${sourceLabel(source)} intenta ampliar ${path5}; se conserva la interseccion.`);
+      warnings.push(`${sourceLabel(source)} intenta ampliar ${path6}; se conserva la interseccion.`);
     }
     return result;
   }
   return uniqueStrings([...current, ...next]);
 }
-function validControlValue(path5, value, expected) {
+function validControlValue(path6, value, expected) {
   if (expected === "const")
-    return Object.is(value, CONTROL_CONSTRAINTS[path5]);
+    return Object.is(value, CONTROL_CONSTRAINTS[path6]);
   if (expected === "boolean")
     return typeof value === "boolean";
   if (expected === "integer")
@@ -1110,7 +1209,7 @@ function loadHookPolicy(paths, project, profileOverride, options = {}) {
   let corporateLayer;
   let corporateProfileFloor;
   let merged = defaultPolicy(profileOverride ?? "standard");
-  if (corp.path && fs5.existsSync(corp.path)) {
+  if (corp.path && fs6.existsSync(corp.path)) {
     const trust = verifyCorporatePolicyTrust(corp.path, platform);
     if (!trust.ok) {
       corporateStatus = "untrusted";
@@ -1197,10 +1296,10 @@ function loadHookPolicy(paths, project, profileOverride, options = {}) {
   };
 }
 function hookDefaultPolicyPath(paths) {
-  return path5.join(paths.malahorHome, "policies", "default.jsonc");
+  return path6.join(paths.malahorHome, "policies", "default.jsonc");
 }
 function hookProjectPolicyPath(paths, project) {
-  return path5.join(paths.malahorHome, "policies", "projects", `${projectLookupKey(project) || "project"}.jsonc`);
+  return path6.join(paths.malahorHome, "policies", "projects", `${projectLookupKey(project) || "project"}.jsonc`);
 }
 function parseHookProfile(value) {
   if (HOOK_PROFILES.includes(value))
@@ -1250,11 +1349,11 @@ function mergePolicyFile(kind, filePath, read, layerInputs, sourceMeta, sources,
   return mergePolicy(currentPolicy, read.file);
 }
 function readPolicyFile(filePath, strictSecurity, requireSecurity, warnings) {
-  if (!fs5.existsSync(filePath))
+  if (!fs6.existsSync(filePath))
     return null;
   let raw;
   try {
-    raw = fs5.readFileSync(filePath, "utf8").trim();
+    raw = fs6.readFileSync(filePath, "utf8").trim();
   } catch (error) {
     return { kind: "invalid", message: error.message };
   }
@@ -1296,11 +1395,11 @@ function resolveCorporatePolicyPath(options, env, platform) {
   if (options.corporatePath === null)
     return { path: null };
   const configured = options.corporatePath ?? env.MALAHOR_CORPORATE_POLICY ?? defaultCorporatePolicyPath(platform, env);
-  return { path: configured ? path5.resolve(configured) : null };
+  return { path: configured ? path6.resolve(configured) : null };
 }
 function defaultCorporatePolicyPath(platform = process.platform, env = process.env) {
   if (platform === "win32") {
-    return path5.win32.join(env.ProgramData ?? "C:\\ProgramData", "Malahor", "security-policy.json");
+    return path6.win32.join(env.ProgramData ?? "C:\\ProgramData", "Malahor", "security-policy.json");
   }
   if (platform === "darwin") {
     return "/Library/Application Support/Malahor/security-policy.json";
@@ -1312,7 +1411,7 @@ function verifyCorporatePolicyTrust(filePath, platform) {
     return { ok: false, reason: "verificacion de ACL de Windows pendiente; se aplica fail-closed" };
   }
   try {
-    const stat = fs5.lstatSync(filePath);
+    const stat = fs6.lstatSync(filePath);
     if (stat.isSymbolicLink())
       return { ok: false, reason: "el archivo no puede ser un symlink" };
     if (!stat.isFile())
@@ -1324,7 +1423,7 @@ function verifyCorporatePolicyTrust(filePath, platform) {
       return { ok: false, reason: "debe ser propiedad de root/administrador" };
     if ((stat.mode & 18) !== 0)
       return { ok: false, reason: "no debe ser escribible por grupo/otros" };
-    const parent = fs5.lstatSync(path5.dirname(filePath));
+    const parent = fs6.lstatSync(path6.dirname(filePath));
     if (parent.uid !== 0)
       return { ok: false, reason: "el directorio contenedor debe ser propiedad de root/administrador" };
     if ((parent.mode & 18) !== 0)
@@ -1530,7 +1629,7 @@ function isTextPart(value) {
 }
 
 // src/plugin/memory-nudge.ts
-import path6 from "node:path";
+import path7 from "node:path";
 var MALAHOR_MEMORY_NUDGE_MARKER = "<!-- malahor-memory-nudge:v1 -->";
 var DEFAULT_MEMORY_STALE_MINUTES = 15;
 async function maybeInjectMemoryNudge(input, storage, options) {
@@ -1633,10 +1732,10 @@ async function resolveDirectory2(sessionID, options) {
     try {
       const directory = await options.resolveSessionDirectory(sessionID);
       if (directory)
-        return path6.resolve(directory);
+        return path7.resolve(directory);
     } catch {}
   }
-  return path6.resolve(options.cwd);
+  return path7.resolve(options.cwd);
 }
 function timestampValue(value) {
   if (typeof value !== "string")
@@ -1656,7 +1755,7 @@ function isTextPart2(value) {
 }
 
 // src/plugin/events.ts
-import path7 from "node:path";
+import path8 from "node:path";
 var SESSION_LIFECYCLE_EVENTS = new Set([
   "session.created",
   "session.execution.started",
@@ -1738,10 +1837,10 @@ async function resolveDirectory3(sessionID, options) {
     try {
       const directory = await options.resolveSessionDirectory(sessionID);
       if (directory)
-        return path7.resolve(directory);
+        return path8.resolve(directory);
     } catch {}
   }
-  return path7.resolve(options.cwd);
+  return path8.resolve(options.cwd);
 }
 function statusForEvent(type) {
   if (type.endsWith(".succeeded") || type.endsWith(".success") || type === "session.idle")
@@ -1770,19 +1869,19 @@ function recordValue2(value) {
 }
 
 // src/cli/core/hooks/plugin-adapter.ts
-import path12 from "node:path";
+import path13 from "node:path";
 
 // src/cli/core/hooks/approvals.ts
-import { randomBytes } from "node:crypto";
+import { randomBytes as randomBytes2 } from "node:crypto";
+import fs8 from "node:fs";
+import path11 from "node:path";
+
+// src/cli/core/hooks/audit.ts
 import fs7 from "node:fs";
 import path10 from "node:path";
 
-// src/cli/core/hooks/audit.ts
-import fs6 from "node:fs";
-import path9 from "node:path";
-
 // src/cli/core/hooks/resources.ts
-import path8 from "node:path";
+import path9 from "node:path";
 
 // src/cli/core/hooks/types.ts
 var HOOK_RESOURCE_KINDS = ["filesystem", "obsidian-vault"];
@@ -1865,7 +1964,7 @@ function normalizeHookResource(context, target) {
     throw new Error(`tipo de recurso no reconocido: ${String(context.resourceKind)}`);
   if (kind === "obsidian-vault")
     return `obsidian-vault:${normalizeVaultRelativePath(target)}`;
-  return path8.normalize(path8.resolve(context.cwd, target));
+  return path9.normalize(path9.resolve(context.cwd, target));
 }
 function hookResourceAuditIdentity(context, target) {
   try {
@@ -1882,7 +1981,7 @@ function normalizeVaultRelativePath(target) {
   if (/[\u0000-\u001f\u007f]/u.test(target)) {
     throw new Error("contiene caracteres de control");
   }
-  if (path8.posix.isAbsolute(target) || path8.win32.isAbsolute(target) || /^[A-Za-z]:/.test(target)) {
+  if (path9.posix.isAbsolute(target) || path9.win32.isAbsolute(target) || /^[A-Za-z]:/.test(target)) {
     throw new Error("debe ser relativa; no se aceptan rutas POSIX, Windows ni UNC absolutas");
   }
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(target)) {
@@ -1900,7 +1999,7 @@ function normalizeVaultRelativePath(target) {
       throw new Error("no puede contener segmentos de traversal '.' o '..', ni separadores codificados");
     }
   }
-  if (path8.posix.normalize(target) !== target) {
+  if (path9.posix.normalize(target) !== target) {
     throw new Error("debe estar en forma POSIX canonica");
   }
   return target;
@@ -1938,17 +2037,17 @@ function writeAudit(context, result, options = {}) {
     return { ok: true, skipped: true, required, path: filePath };
   }
   try {
-    const directory = path9.dirname(filePath);
+    const directory = path10.dirname(filePath);
     const directoryMode = parseMode(context.security?.audit?.directoryMode, 448);
     const fileMode = parseMode(context.security?.audit?.fileMode, 384);
     const prefix = auditFilePrefix(filePath);
     ensureAuditDirectory(directory, directoryMode, context.malahorHome);
     rotateIfNeeded(filePath, directory, options.now ?? new Date, fileMode, prefix);
     const entry = buildAuditEntry(context, result, options.now ?? new Date);
-    fs6.appendFileSync(filePath, `${JSON.stringify(entry)}
+    fs7.appendFileSync(filePath, `${JSON.stringify(entry)}
 `, { encoding: "utf8", mode: fileMode, flag: "a" });
-    secureChmod(filePath, fileMode);
-    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path9.basename(filePath), prefix);
+    secureChmod2(filePath, fileMode);
+    pruneAuditFiles(directory, options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES, options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS, options.now ?? new Date, path10.basename(filePath), prefix);
     return { ok: true, skipped: false, required, path: filePath };
   } catch (error) {
     return {
@@ -1965,13 +2064,13 @@ function approvalRefForAudit(nonce) {
 }
 function auditFilePath(malahorHome, overridePath, cwd = process.cwd()) {
   if (overridePath) {
-    const expanded = overridePath.startsWith("~/") ? path9.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
-    return path9.resolve(cwd, expanded);
+    const expanded = overridePath.startsWith("~/") ? path10.join(process.env.HOME ?? "", overridePath.slice(2)) : overridePath;
+    return path10.resolve(cwd, expanded);
   }
-  return path9.join(malahorHome, "audit", "security.jsonl");
+  return path10.join(malahorHome, "audit", "security.jsonl");
 }
 function auditFilePrefix(filePath) {
-  const base = path9.basename(filePath);
+  const base = path10.basename(filePath);
   return base.endsWith(".jsonl") ? base.slice(0, -6) : base;
 }
 function buildAuditEntry(context, result, now = new Date) {
@@ -2005,52 +2104,52 @@ function auditHost() {
   return process.platform;
 }
 function ensureAuditDirectory(directory, mode, managedRoot) {
-  if (fs6.existsSync(directory)) {
-    const stat = fs6.lstatSync(directory);
+  if (fs7.existsSync(directory)) {
+    const stat = fs7.lstatSync(directory);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error("directorio de auditoria invalido");
     }
     if (isWithin(directory, managedRoot))
-      secureChmod(directory, mode);
+      secureChmod2(directory, mode);
   } else {
-    fs6.mkdirSync(directory, { recursive: true, mode });
-    secureChmod(directory, mode);
+    fs7.mkdirSync(directory, { recursive: true, mode });
+    secureChmod2(directory, mode);
   }
 }
 function isWithin(target, root) {
-  const relative = path9.relative(path9.resolve(root), path9.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path9.isAbsolute(relative);
+  const relative = path10.relative(path10.resolve(root), path10.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path10.isAbsolute(relative);
 }
 function rotateIfNeeded(filePath, directory, now, fileMode, prefix) {
-  if (!fs6.existsSync(filePath))
+  if (!fs7.existsSync(filePath))
     return;
-  const stat = fs6.lstatSync(filePath);
+  const stat = fs7.lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error("archivo de auditoria invalido");
   }
   if (stat.size < MAX_AUDIT_BYTES)
     return;
-  const base = path9.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
+  const base = path10.join(directory, `${prefix}.${now.toISOString().replace(/[:.]/g, "-")}`);
   let rotated = `${base}.jsonl`;
   let suffix = 1;
-  while (fs6.existsSync(rotated)) {
+  while (fs7.existsSync(rotated)) {
     rotated = `${base}.${suffix}.jsonl`;
     suffix += 1;
   }
-  fs6.renameSync(filePath, rotated);
-  secureChmod(rotated, fileMode);
+  fs7.renameSync(filePath, rotated);
+  secureChmod2(rotated, fileMode);
 }
 function pruneAuditFiles(directory, maxFiles, retentionDays, now, activeName, prefix) {
   const keep = Math.max(1, maxFiles);
   const cutoff = now.getTime() - Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
-  const entries = fs6.readdirSync(directory).filter((name) => name !== activeName && name.startsWith(`${prefix}.`) && name.endsWith(".jsonl")).map((name) => {
-    const filePath = path9.join(directory, name);
-    const stat = fs6.statSync(filePath);
+  const entries = fs7.readdirSync(directory).filter((name) => name !== activeName && name.startsWith(`${prefix}.`) && name.endsWith(".jsonl")).map((name) => {
+    const filePath = path10.join(directory, name);
+    const stat = fs7.statSync(filePath);
     return { filePath, mtime: stat.mtimeMs };
   }).sort((left, right) => right.mtime - left.mtime);
   for (const [index, entry] of entries.entries()) {
     if (index >= keep - 1 || entry.mtime < cutoff) {
-      fs6.unlinkSync(entry.filePath);
+      fs7.unlinkSync(entry.filePath);
     }
   }
 }
@@ -2064,9 +2163,9 @@ function parseMode(value, fallback) {
   }
   return parsed;
 }
-function secureChmod(target, mode) {
+function secureChmod2(target, mode) {
   try {
-    fs6.chmodSync(target, mode);
+    fs7.chmodSync(target, mode);
   } catch (error) {
     if (process.platform !== "win32")
       throw error;
@@ -2089,10 +2188,10 @@ function consumeApproval(nonce, context, options = {}) {
   const filePath = approvalRecordPath(context.malahorHome, nonce);
   const claimPath = `${filePath}.claimed`;
   try {
-    ensurePrivateDirectory(directory);
-    if (fs7.existsSync(claimPath))
+    ensurePrivateDirectory2(directory);
+    if (fs8.existsSync(claimPath))
       return { ok: false, reason: "aprobacion ya consumida" };
-    if (!fs7.existsSync(filePath))
+    if (!fs8.existsSync(filePath))
       return { ok: false, reason: "aprobacion no encontrada" };
     const record = readRecord(filePath);
     if (record.nonce !== nonce)
@@ -2120,7 +2219,7 @@ function consumeApproval(nonce, context, options = {}) {
       return { ok: false, reason: "aprobacion no corresponde a la operacion actual" };
     let claimFd;
     try {
-      claimFd = fs7.openSync(claimPath, "wx", 384);
+      claimFd = fs8.openSync(claimPath, "wx", 384);
     } catch (error) {
       if (error.code === "EEXIST") {
         return { ok: false, reason: "aprobacion ya consumida" };
@@ -2133,19 +2232,19 @@ function consumeApproval(nonce, context, options = {}) {
       writeRecord(filePath, record);
       return { ok: true, record };
     } finally {
-      fs7.closeSync(claimFd);
+      fs8.closeSync(claimFd);
     }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : "ledger de aprobaciones no disponible" };
   }
 }
 function approvalsDirectory(malahorHome) {
-  return path10.join(malahorHome, "approvals");
+  return path11.join(malahorHome, "approvals");
 }
 function approvalRecordPath(malahorHome, nonce) {
   if (!/^[a-f0-9]{64}$/.test(nonce))
     throw new Error("nonce de aprobacion invalido");
-  return path10.join(approvalsDirectory(malahorHome), `${nonce}.json`);
+  return path11.join(approvalsDirectory(malahorHome), `${nonce}.json`);
 }
 function bindingForContext(context) {
   if (!context.policyMeta) {
@@ -2167,14 +2266,14 @@ function sameBinding(record, binding) {
   return record.operation === binding.operation && record.commandHash === binding.commandHash && record.memoryScope === binding.memoryScope && record.client === binding.client && record.project === binding.project && record.policyHash === binding.policyHash && record.contractVersion === binding.contractVersion && record.resources.length === binding.resources.length && record.resources.every((resource, index) => resource === binding.resources[index]);
 }
 function readRecord(filePath) {
-  const stat = fs7.lstatSync(filePath);
+  const stat = fs8.lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error("registro de aprobacion invalido");
   }
   if (process.platform !== "win32" && (stat.mode & 63) !== 0) {
     throw new Error("permisos de aprobacion inseguros");
   }
-  const raw = fs7.readFileSync(filePath, "utf8");
+  const raw = fs8.readFileSync(filePath, "utf8");
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -2187,37 +2286,37 @@ function readRecord(filePath) {
   return parsed;
 }
 function writeRecord(filePath, record) {
-  const temporary = `${filePath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const temporary = `${filePath}.${process.pid}.${randomBytes2(4).toString("hex")}.tmp`;
   try {
-    fs7.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}
+    fs8.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}
 `, { encoding: "utf8", mode: 384 });
-    fs7.renameSync(temporary, filePath);
-    secureChmod2(filePath, 384);
+    fs8.renameSync(temporary, filePath);
+    secureChmod3(filePath, 384);
   } finally {
     try {
-      fs7.unlinkSync(temporary);
+      fs8.unlinkSync(temporary);
     } catch {}
   }
 }
-function ensurePrivateDirectory(directory) {
-  if (fs7.existsSync(directory)) {
-    const stat = fs7.lstatSync(directory);
+function ensurePrivateDirectory2(directory) {
+  if (fs8.existsSync(directory)) {
+    const stat = fs8.lstatSync(directory);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error("directorio de aprobaciones invalido");
     }
   } else {
-    fs7.mkdirSync(directory, { recursive: true, mode: 448 });
+    fs8.mkdirSync(directory, { recursive: true, mode: 448 });
   }
-  secureChmod2(directory, 448);
+  secureChmod3(directory, 448);
 }
 function validRecord(value) {
   if (!isRecord3(value))
     return false;
   return typeof value.nonce === "string" && /^[a-f0-9]{64}$/.test(value.nonce) && typeof value.operation === "string" && Array.isArray(value.resources) && value.resources.every((item) => typeof item === "string") && (typeof value.commandHash === "string" || value.commandHash === null) && (typeof value.memoryScope === "string" || value.memoryScope === null) && (typeof value.client === "string" || value.client === null) && (typeof value.project === "string" || value.project === null) && typeof value.policyHash === "string" && typeof value.contractVersion === "number" && typeof value.channel === "string" && typeof value.createdAt === "string" && typeof value.expiresAt === "string" && (typeof value.consumedAt === "string" || value.consumedAt === null) && (typeof value.consumedBy === "string" || value.consumedBy === null) && (value.auditWarning === undefined || typeof value.auditWarning === "string");
 }
-function secureChmod2(target, mode) {
+function secureChmod3(target, mode) {
   try {
-    fs7.chmodSync(target, mode);
+    fs8.chmodSync(target, mode);
   } catch (error) {
     if (process.platform !== "win32")
       throw error;
@@ -2229,8 +2328,8 @@ function isRecord3(value) {
 
 // src/cli/core/hooks/rules.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
-import fs8 from "node:fs";
-import path11 from "node:path";
+import fs9 from "node:fs";
+import path12 from "node:path";
 var builtInHookRules = [
   { id: "policy-integrity", run: policyIntegrityGuard },
   { id: "resource-contract", run: resourceContractGuard },
@@ -2285,7 +2384,7 @@ function repoBoundaryGuard(context) {
   const targets = filesystemTargetPaths(context);
   if (!writesMalahorData || targets.length === 0)
     return [];
-  const unsafe = targets.map((targetPath) => path11.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
+  const unsafe = targets.map((targetPath) => path12.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
   if (unsafe.length === 0)
     return [];
   return [{
@@ -2516,13 +2615,13 @@ function fileBoundaryGuard(context) {
   if (context.event !== "file.read.before" && context.event !== "file.write.before")
     return [];
   const controls = context.security?.files;
-  const paths = filesystemTargetPaths(context).map((target) => path11.resolve(context.cwd, target));
+  const paths = filesystemTargetPaths(context).map((target) => path12.resolve(context.cwd, target));
   if (paths.length === 0)
     return [];
   const violations = [];
   const write = context.event === "file.write.before";
   const roots = (write ? controls?.allowedWriteRoots : controls?.allowedReadRoots) ?? [];
-  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path11.resolve(context.cwd, root));
+  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path12.resolve(context.cwd, root));
   const enforceRoots = controls?.enforceRoots === true;
   for (const target of paths) {
     const canonical = resolveTargetPath(target, controls?.resolveSymlinks !== false);
@@ -2544,7 +2643,7 @@ function fileBoundaryGuard(context) {
         fix: "Limita la operacion al proyecto/raiz aprobada o genera aprobacion vinculada."
       });
     }
-    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path11.basename(canonical)));
+    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path12.basename(canonical)));
     if (denied) {
       violations.push({
         id: "MAL-HOOK-FILE-DENYLIST",
@@ -2720,6 +2819,7 @@ var KNOWN_OPENCODE_TOOLS = new Set([
   "subagent",
   "malahor_plan",
   "malahor_run",
+  "malahor_plan_control",
   "invalid"
 ]);
 function commandMatches(pattern, value) {
@@ -2758,25 +2858,25 @@ function isIndirectExecution(command) {
 }
 function resolveTargetPath(target, followSymlinks) {
   try {
-    if (fs8.existsSync(target)) {
-      return followSymlinks ? fs8.realpathSync(target) : path11.resolve(target);
+    if (fs9.existsSync(target)) {
+      return followSymlinks ? fs9.realpathSync(target) : path12.resolve(target);
     }
-    let parent = path11.dirname(target);
-    while (!fs8.existsSync(parent)) {
-      const next = path11.dirname(parent);
+    let parent = path12.dirname(target);
+    while (!fs9.existsSync(parent)) {
+      const next = path12.dirname(parent);
       if (next === parent)
         return null;
       parent = next;
     }
-    const canonicalParent = followSymlinks ? fs8.realpathSync(parent) : path11.resolve(parent);
-    return path11.join(canonicalParent, path11.relative(parent, target));
+    const canonicalParent = followSymlinks ? fs9.realpathSync(parent) : path12.resolve(parent);
+    return path12.join(canonicalParent, path12.relative(parent, target));
   } catch {
     return null;
   }
 }
 function isSecretPath(target) {
   const normalized = target.replaceAll("\\", "/");
-  const base = path11.basename(normalized);
+  const base = path12.basename(normalized);
   if (base === ".env.example")
     return false;
   return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
@@ -2796,7 +2896,7 @@ function parseHttpUrl(value) {
 function programmingQualityGuard(context) {
   const violations = [];
   const files = filesystemTargetPaths(context);
-  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path11.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path12.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -2817,7 +2917,7 @@ function programmingQualityGuard(context) {
   return violations;
 }
 function readableTargetPaths(context) {
-  return filesystemTargetPaths(context).map((targetPath) => path11.resolve(context.cwd, targetPath)).filter((targetPath) => fs8.existsSync(targetPath) && fs8.statSync(targetPath).isFile() && fs8.statSync(targetPath).size <= 512 * 1024);
+  return filesystemTargetPaths(context).map((targetPath) => path12.resolve(context.cwd, targetPath)).filter((targetPath) => fs9.existsSync(targetPath) && fs9.statSync(targetPath).isFile() && fs9.statSync(targetPath).size <= 512 * 1024);
 }
 function scanStagedSecrets(cwd, includeWorktree = false) {
   const commands = [
@@ -2839,8 +2939,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
       return null;
     }
     for (const relative of output.split("\x00").filter(Boolean)) {
-      const file = path11.resolve(cwd, relative);
-      if (!fs8.existsSync(file))
+      const file = path12.resolve(cwd, relative);
+      if (!fs9.existsSync(file))
         continue;
       try {
         leaks.push(...scanFileForSecrets(file));
@@ -2853,8 +2953,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
 }
 var PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function scanFileForSecrets(filePath) {
-  const basename = path11.basename(filePath);
-  const content = fs8.readFileSync(filePath, "utf8");
+  const basename = path12.basename(filePath);
+  const content = fs9.readFileSync(filePath, "utf8");
   const patterns = [
     [PRIVATE_KEY_PATTERN, "private-key"],
     [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
@@ -2881,7 +2981,7 @@ function strictness(profile, fallback) {
 }
 function fileSize(filePath) {
   try {
-    return fs8.statSync(filePath).size;
+    return fs9.statSync(filePath).size;
   } catch {
     return 0;
   }
@@ -2911,12 +3011,12 @@ function controlAffectsEvent(gap, event) {
   return true;
 }
 function isWithin2(targetPath, rootPath) {
-  const relative = path11.relative(path11.resolve(rootPath), path11.resolve(targetPath));
-  return relative === "" || !relative.startsWith("..") && !path11.isAbsolute(relative);
+  const relative = path12.relative(path12.resolve(rootPath), path12.resolve(targetPath));
+  return relative === "" || !relative.startsWith("..") && !path12.isAbsolute(relative);
 }
 function isInside(targetPath, rootPath) {
-  const relative = path11.relative(path11.resolve(rootPath), path11.resolve(targetPath));
-  return Boolean(relative) && !relative.startsWith("..") && !path11.isAbsolute(relative);
+  const relative = path12.relative(path12.resolve(rootPath), path12.resolve(targetPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path12.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/engine.ts
@@ -3206,9 +3306,9 @@ function evaluate(context) {
   return auditHookResult(context, runHooks(context));
 }
 async function resolveEvaluationScope(input, options, operationCwd) {
-  const fallback = path12.resolve(options.cwd);
+  const fallback = path13.resolve(options.cwd);
   if (operationCwd) {
-    return { options: { ...options, cwd: path12.resolve(fallback, operationCwd) } };
+    return { options: { ...options, cwd: path13.resolve(fallback, operationCwd) } };
   }
   if (!options.resolveSessionDirectory) {
     return { options: { ...options, cwd: fallback } };
@@ -3228,7 +3328,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
         error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
       };
     }
-    return { options: { ...options, cwd: path12.resolve(directory) } };
+    return { options: { ...options, cwd: path13.resolve(directory) } };
   } catch (error) {
     return {
       options: { ...options, cwd: fallback },
@@ -3237,7 +3337,7 @@ async function resolveEvaluationScope(input, options, operationCwd) {
   }
 }
 function buildContext(event, options, details) {
-  const cwd = path12.resolve(options.cwd);
+  const cwd = path13.resolve(options.cwd);
   const env = options.env ?? process.env;
   try {
     const paths = pluginPaths(cwd, env);
@@ -3282,7 +3382,7 @@ function policyFailure(event, options, detail) {
     }]
   };
   try {
-    const cwd = path12.resolve(options.cwd);
+    const cwd = path13.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
     const project = resolveProject(cwd);
     const context = {
@@ -3306,7 +3406,7 @@ function pluginPaths(cwd, env) {
 }
 function resolveOperationProject(cwd, resourceKind, targetPaths, paths) {
   const candidates = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
-  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path12.resolve(cwd, target)) : [];
+  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path13.resolve(cwd, target)) : [];
   const candidate = candidates.find((entry) => isWithinPath2(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath2(target, entry.root)));
   if (!candidate)
     return resolveProject(cwd);
@@ -3314,8 +3414,8 @@ function resolveOperationProject(cwd, resourceKind, targetPaths, paths) {
   return { ...resolved, canonicalKey: candidate.canonicalKey };
 }
 function isWithinPath2(value, root) {
-  const relative = path12.relative(path12.resolve(root), path12.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path12.isAbsolute(relative);
+  const relative = path13.relative(path13.resolve(root), path13.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path13.isAbsolute(relative);
 }
 function permissionDetails(action, resources, metadata) {
   const normalized = action.toLowerCase();
@@ -3524,10 +3624,11 @@ Proyecto y contexto
 Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
 - Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
-- Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. Si cambia el plan o vence, preséntalo de nuevo.
+- Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. La autorización del plan no caduca por tiempo; si cambian revisión, efectos, proyecto, modo o política, deja de autorizar.
 - En asistente y ejecutor, despues de malahor_plan muestra el plan completo y termina el turno. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
+- Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni la documentación en Obsidian.
 - Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
 - No edites opencode.json/opencode.jsonc manualmente ni pidas al usuario hacerlo; usa las rutas de diagnóstico y reparación de Malahor.
@@ -3598,11 +3699,11 @@ function isRecord4(value) {
 }
 
 // src/plugin/planning.ts
-import path14 from "node:path";
+import path15 from "node:path";
 
 // src/cli/core/config.ts
-import { createHash as createHash3 } from "node:crypto";
-import fs9 from "node:fs";
+import { createHash as createHash4 } from "node:crypto";
+import fs10 from "node:fs";
 function loadConfig(env = process.env, cwd = process.cwd()) {
   const defaultPaths = resolvePaths(env, cwd);
   const fileConfig = readConfigFile(defaultPaths.configFile);
@@ -3642,10 +3743,10 @@ function modeForIntervention(intervention) {
   }
 }
 function readConfigFile(filePath) {
-  if (!fs9.existsSync(filePath)) {
+  if (!fs10.existsSync(filePath)) {
     return {};
   }
-  const raw = fs9.readFileSync(filePath, "utf8").trim();
+  const raw = fs10.readFileSync(filePath, "utf8").trim();
   if (!raw)
     return {};
   try {
@@ -3679,7 +3780,7 @@ function resolveExecutionPolicy(env, config, legacyMode) {
 }
 function readExecutionRevision(value, intervention) {
   if (value === undefined || value === null || value === "") {
-    return createHash3("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
+    return createHash4("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
   }
   if (typeof value === "string" && /^[a-f0-9]{32}$/.test(value))
     return value;
@@ -3747,9 +3848,9 @@ function readOptionalBoolean(value, key) {
 }
 
 // src/cli/core/mode.ts
-import { createHash as createHash4, randomBytes as randomBytes2 } from "node:crypto";
-import fs10 from "node:fs";
-import path13 from "node:path";
+import { createHash as createHash5, randomBytes as randomBytes3 } from "node:crypto";
+import fs11 from "node:fs";
+import path14 from "node:path";
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
 function createScanner(text, ignoreTrivia = false) {
@@ -4551,12 +4652,12 @@ function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
   }
   return result;
 }
-function findNodeAtLocation(root, path13) {
+function findNodeAtLocation(root, path14) {
   if (!root) {
     return;
   }
   let node = root;
-  for (let segment of path13) {
+  for (let segment of path14) {
     if (typeof segment === "string") {
       if (node.type !== "object" || !Array.isArray(node.children)) {
         return;
@@ -4857,14 +4958,14 @@ function getNodeType(value) {
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/edit.js
 function setProperty(text, originalPath, value, options) {
-  const path13 = originalPath.slice();
+  const path14 = originalPath.slice();
   const errors = [];
   const root = parseTree(text, errors);
   let parent = undefined;
   let lastSegment = undefined;
-  while (path13.length > 0) {
-    lastSegment = path13.pop();
-    parent = findNodeAtLocation(root, path13);
+  while (path14.length > 0) {
+    lastSegment = path14.pop();
+    parent = findNodeAtLocation(root, path14);
     if (parent === undefined && value !== undefined) {
       if (typeof lastSegment === "string") {
         value = { [lastSegment]: value };
@@ -5050,8 +5151,8 @@ var ParseErrorCode;
   ParseErrorCode2[ParseErrorCode2["InvalidEscapeCharacter"] = 15] = "InvalidEscapeCharacter";
   ParseErrorCode2[ParseErrorCode2["InvalidCharacter"] = 16] = "InvalidCharacter";
 })(ParseErrorCode || (ParseErrorCode = {}));
-function modify(text, path13, value, options) {
-  return setProperty(text, path13, value, options);
+function modify(text, path14, value, options) {
+  return setProperty(text, path14, value, options);
 }
 function applyEdits(text, edits) {
   let sortedEdits = edits.slice(0).sort((a, b) => {
@@ -5136,13 +5237,13 @@ function applyModeChange(target, expectedVersion, beforeWrite, env = process.env
     return { mode: plan.target, backup: null, configFile: plan.configFile };
   const config = loadConfig(env, cwd);
   beforeWrite(plan.configFile, config.paths.backupsDir);
-  fs10.mkdirSync(path13.dirname(plan.configFile), { recursive: true, mode: 448 });
+  fs11.mkdirSync(path14.dirname(plan.configFile), { recursive: true, mode: 448 });
   assertSafePath(plan.configFile);
   assertSafePath(config.paths.backupsDir);
   const lock = `${plan.configFile}.mode.lock`;
   let lockFd;
   try {
-    lockFd = fs10.openSync(lock, "wx", 384);
+    lockFd = fs11.openSync(lock, "wx", 384);
   } catch (error) {
     throw new Error(`Cambio de modo bloqueado (lock activo o directorio inexistente): ${error.message}`);
   }
@@ -5152,40 +5253,40 @@ function applyModeChange(target, expectedVersion, beforeWrite, env = process.env
     if (fresh.version !== expectedVersion)
       throw new Error("La configuracion cambio: repite el comando.");
     const raw = readConfig(plan.configFile);
-    const revision = randomBytes2(16).toString("hex");
+    const revision = randomBytes3(16).toString("hex");
     const after = editExecution(raw, target, revision);
-    const backup = fs10.existsSync(plan.configFile) ? path13.join(config.paths.backupsDir, `${path13.basename(plan.configFile)}.${timestamp()}.${randomBytes2(6).toString("hex")}.bak`) : null;
+    const backup = fs11.existsSync(plan.configFile) ? path14.join(config.paths.backupsDir, `${path14.basename(plan.configFile)}.${timestamp()}.${randomBytes3(6).toString("hex")}.bak`) : null;
     if (backup) {
-      fs10.mkdirSync(config.paths.backupsDir, { recursive: true, mode: 448 });
+      fs11.mkdirSync(config.paths.backupsDir, { recursive: true, mode: 448 });
       assertSafePath(config.paths.backupsDir);
-      fs10.copyFileSync(plan.configFile, backup, fs10.constants.COPYFILE_EXCL);
-      fs10.chmodSync(backup, 384);
+      fs11.copyFileSync(plan.configFile, backup, fs11.constants.COPYFILE_EXCL);
+      fs11.chmodSync(backup, 384);
     }
-    temporary = `${plan.configFile}.${randomBytes2(8).toString("hex")}.tmp`;
-    fs10.writeFileSync(temporary, after, { flag: "wx", mode: 384 });
+    temporary = `${plan.configFile}.${randomBytes3(8).toString("hex")}.tmp`;
+    fs11.writeFileSync(temporary, after, { flag: "wx", mode: 384 });
     if (readConfig(plan.configFile) !== raw)
       throw new Error("La configuracion cambio durante el respaldo: no se aplica.");
-    fs10.renameSync(temporary, plan.configFile);
+    fs11.renameSync(temporary, plan.configFile);
     temporary = undefined;
     return { mode: modeName(target), backup, configFile: plan.configFile };
   } finally {
     if (temporary)
-      fs10.rmSync(temporary, { force: true });
-    fs10.closeSync(lockFd);
-    fs10.unlinkSync(lock);
+      fs11.rmSync(temporary, { force: true });
+    fs11.closeSync(lockFd);
+    fs11.unlinkSync(lock);
   }
 }
 function readConfig(file) {
   assertSafePath(file);
   try {
-    if (!fs10.lstatSync(file).isFile())
+    if (!fs11.lstatSync(file).isFile())
       throw new Error("La configuracion de Malahor debe ser archivo regular, no symlink.");
   } catch (error) {
     if (error.code === "ENOENT")
       return "";
     throw error;
   }
-  return fs10.readFileSync(file, "utf8");
+  return fs11.readFileSync(file, "utf8");
 }
 function hasConfiguredIntervention(file) {
   const raw = readConfig(file);
@@ -5198,15 +5299,15 @@ function hasConfiguredIntervention(file) {
   return parsed?.execution?.intervention !== undefined;
 }
 function assertSafePath(file) {
-  for (let current = path13.resolve(file);; current = path13.dirname(current)) {
+  for (let current = path14.resolve(file);; current = path14.dirname(current)) {
     try {
-      if (fs10.lstatSync(current).isSymbolicLink())
+      if (fs11.lstatSync(current).isSymbolicLink())
         throw new Error(`Ruta con symlink no permitida: ${current}`);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
     }
-    if (path13.dirname(current) === current)
+    if (path14.dirname(current) === current)
       break;
   }
 }
@@ -5236,53 +5337,129 @@ function editExecution(raw, target, revision) {
 `;
 }
 function hash(input) {
-  return createHash4("sha256").update(input).digest("hex");
+  return createHash5("sha256").update(input).digest("hex");
 }
 
 // src/cli/core/planning.ts
-import { createHash as createHash5, createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
-var PLAN_TTL_MS = 30 * 60000;
+import { createHash as createHash6, randomBytes as randomBytes4 } from "node:crypto";
 var ACTIONS = new Set(["edit", "shell", "subagent"]);
+var PHASES = new Set([
+  "presented",
+  "reviewed",
+  "running",
+  "paused",
+  "blocked",
+  "completed",
+  "revoked",
+  "superseded"
+]);
+var TERMINAL = new Set(["completed", "revoked", "superseded"]);
 var CORE_INTERACTION_ID = "core:direct";
-var receiptKey = randomBytes3(32);
+var DEFAULT_PLANNING_AUTHORITY = createEphemeralPlanningAuthority();
 var transitions = new Map;
-async function presentPlan(scope, input, presentationInteractionID, adapter) {
+async function presentPlan(scope, input, presentationInteractionID, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
   return serialize(scope.sessionID, async () => {
-    const state = proposePlan(scope, input, Date.now(), presentationInteractionID);
+    const now = Date.now();
+    const stored = await adapter.loadActive(scope.sessionID);
+    const previous = validState(stored, authority) && stored.sessionID === scope.sessionID ? stored : undefined;
+    const current = previous && samePlanScope(previous, scope) ? previous : undefined;
+    const planID = current && !TERMINAL.has(current.phase) ? current.planID : randomID();
+    const state = proposePlan(scope, input, now, presentationInteractionID, planID, authority);
+    await assertDependencyGraph(state, adapter, authority);
+    if (previous && !TERMINAL.has(previous.phase)) {
+      await adapter.save(seal({ ...previous, phase: "superseded", supersededAt: now, updatedAt: now }, authority));
+    }
     await adapter.save(state);
     if (scope.mode !== "assistant")
       return state;
     await adapter.confirm("review", state);
-    const current = await adapter.load(scope.sessionID);
-    if (!validState(current) || current.revision !== state.revision || current.digest !== state.digest) {
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, state, authority))
       throw new Error("El plan cambio durante la revision: vuelve a presentarlo.");
-    }
-    await adapter.save(reviewPlan(current, state.digest));
-    return state;
+    const reviewed = reviewPlan(fresh, state.digest, Date.now(), authority);
+    await adapter.save(reviewed);
+    return reviewed;
   });
 }
-async function requestPlanExecution(scope, digest, executionInteractionID, adapter) {
+async function requestPlanExecution(scope, digest, executionInteractionID, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
   return serialize(scope.sessionID, async () => {
     if (!validInteractionID(executionInteractionID))
       throw new Error("Turno de ejecucion no evaluable.");
-    const state = await adapter.load(scope.sessionID);
-    if (!validState(state) || state.digest !== digest || state.sessionID !== scope.sessionID || state.project !== scope.project || state.mode !== scope.mode || state.policyRevision !== scope.policyRevision || state.expiresAt <= Date.now() || state.plan.actions.length === 0 || state.authorizedAt !== undefined) {
+    const stored = await adapter.loadActive(scope.sessionID);
+    if (!validState(stored, authority) || stored.digest !== digest || !samePlanScope(stored, scope) || stored.plan.actions.length === 0 || (stored.mode === "assistant" ? stored.phase !== "reviewed" : stored.phase !== "presented")) {
       throw new Error("No hay un plan ejecutable vigente.");
     }
-    if (state.presentationInteractionID === executionInteractionID) {
+    if (stored.presentationInteractionID === executionInteractionID) {
       throw new Error("El plan debe quedar visible y terminar su turno de presentacion. Espera una solicitud posterior del usuario antes de pedir aprobacion.");
     }
-    if (state.mode === "advisor" || state.mode === "assistant" && state.reviewedAt === undefined) {
+    if (stored.mode === "advisor")
       throw new Error("Primero revisa el plan.");
-    }
-    await adapter.confirm("run", state);
-    const current = await adapter.load(scope.sessionID);
-    if (!validState(current) || current.revision !== state.revision || current.digest !== state.digest) {
+    await adapter.confirm("run", stored);
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, stored, authority))
       throw new Error("El plan cambio durante la orden: vuelve a presentarlo.");
+    const pending = await pendingDependencies(fresh, adapter, authority);
+    const next = pending.length > 0 ? blockPlan(fresh, pending, Date.now(), authority) : authorizePlan(fresh, fresh.digest, Date.now(), authority);
+    await adapter.save(next);
+    return next;
+  });
+}
+async function controlPlan(scope, command, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
+  return serialize(scope.sessionID, async () => {
+    const stored = await adapter.loadActive(scope.sessionID);
+    if (!validState(stored, authority) || !samePlanScope(stored, scope))
+      throw new Error("No hay un plan vigente para esta sesion.");
+    if (command === "status")
+      return stored;
+    if (command === "pause") {
+      if (stored.phase !== "running")
+        throw new Error("Solo un plan en ejecucion puede pausarse.");
+      const next2 = seal({ ...stored, phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
+      await adapter.save(next2);
+      return next2;
     }
-    const authorized = authorizePlan(current, state.digest);
-    await adapter.save(authorized);
-    return authorized;
+    if (command === "revoke") {
+      if (TERMINAL.has(stored.phase))
+        throw new Error("El plan ya esta cerrado.");
+      const next2 = seal({ ...stored, phase: "revoked", revokedAt: Date.now(), updatedAt: Date.now() }, authority);
+      await adapter.save(next2);
+      return next2;
+    }
+    if (command === "resume") {
+      if (stored.phase !== "paused" && stored.phase !== "blocked")
+        throw new Error("Solo un plan pausado o bloqueado puede reanudarse.");
+      await adapter.confirm("resume", stored);
+      const fresh2 = await adapter.loadActive(scope.sessionID);
+      if (!sameRevision(fresh2, stored, authority))
+        throw new Error("El plan cambio durante la reanudacion.");
+      const pending2 = await pendingDependencies(fresh2, adapter, authority);
+      const now2 = Date.now();
+      const next2 = pending2.length > 0 ? blockPlan(fresh2, pending2, now2, authority) : seal({
+        ...fresh2,
+        phase: "running",
+        startedAt: fresh2.startedAt ?? now2,
+        updatedAt: now2,
+        blockedBy: undefined,
+        blockedAt: undefined,
+        pausedAt: undefined
+      }, authority);
+      await adapter.save(next2);
+      return next2;
+    }
+    if (stored.phase !== "running" && stored.phase !== "paused") {
+      throw new Error("Solo un plan iniciado puede completarse.");
+    }
+    await adapter.confirm("complete", stored);
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, stored, authority))
+      throw new Error("El plan cambio durante el cierre.");
+    const pending = await pendingDependencies(fresh, adapter, authority);
+    if (pending.length > 0)
+      throw new Error("El plan no puede completarse con dependencias pendientes.");
+    const now = Date.now();
+    const next = seal({ ...fresh, phase: "completed", completedAt: now, updatedAt: now }, authority);
+    await adapter.save(next);
+    return next;
   });
 }
 async function serialize(sessionID, operation) {
@@ -5302,94 +5479,71 @@ async function serialize(sessionID, operation) {
       transitions.delete(sessionID);
   }
 }
-function proposePlan(scope, input, now = Date.now(), presentationInteractionID = CORE_INTERACTION_ID) {
-  if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
-    throw new Error("Sesion/proyecto/politica de plan no evaluable.");
-  }
+function proposePlan(scope, input, now = Date.now(), presentationInteractionID = CORE_INTERACTION_ID, planID = randomID(), authority = DEFAULT_PLANNING_AUTHORITY) {
+  validateScope(scope, now);
   if (!validInteractionID(presentationInteractionID))
     throw new Error("Turno de presentacion no evaluable.");
-  if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
-    throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
-  }
-  if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || input.steps.length > 30 || input.actions.length > 80) {
-    throw new Error("Pasos/acciones de plan invalidos o demasiado extensos.");
-  }
-  if (scope.mode === "advisor" && (input.steps.length !== 0 || input.actions.length !== 0)) {
-    throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
-  }
-  if (scope.mode !== "advisor" && input.steps.length === 0)
-    throw new Error("El plan requiere pasos visibles.");
-  if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000)) {
-    throw new Error("Paso de plan invalido.");
-  }
-  if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action) || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {
-    throw new Error("La accion debe ser edit, shell o subagent con recurso exacto.");
-  }
-  if (JSON.stringify(input).length > 12000)
-    throw new Error("El plan es demasiado grande para una revision visible.");
-  const actions = [...new Map(input.actions.map((item) => [`${item.action}\x00${item.resource}`, { ...item }])).values()].sort((a, b) => `${a.action}\x00${a.resource}`.localeCompare(`${b.action}\x00${b.resource}`));
-  const plan = { summary: input.summary.trim(), steps: [...input.steps], actions };
-  const revision = randomBytes3(16).toString("hex");
-  const digest = createHash5("sha256").update(JSON.stringify({
-    scope,
-    plan,
-    revision,
-    presentationInteractionID
-  })).digest("hex");
-  return {
-    version: 2,
+  if (!/^[a-f0-9]{32}$/.test(planID))
+    throw new Error("Identidad de plan no evaluable.");
+  const plan = normalizePlan(scope.mode, input);
+  const revision = randomID();
+  const digest = digestPlan(scope, plan, planID, revision, presentationInteractionID);
+  return seal({
+    version: 3,
+    planID,
     ...scope,
     presentationInteractionID,
     plan,
     digest,
     revision,
+    phase: "presented",
     createdAt: now,
-    expiresAt: now + PLAN_TTL_MS
-  };
+    updatedAt: now,
+    proof: ""
+  }, authority);
 }
-function reviewPlan(state, digest, now = Date.now()) {
-  assertCurrent(state, digest, now);
-  if (state.mode !== "assistant" || state.reviewedAt !== undefined)
+function reviewPlan(state, digest, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
+  assertCurrent(state, digest, now, authority);
+  if (state.mode !== "assistant" || state.phase !== "presented")
     throw new Error("Revision de plan no aplicable.");
-  return { ...state, reviewedAt: now, reviewProof: receipt(state, "review", now) };
+  return seal({ ...state, phase: "reviewed", reviewedAt: now, updatedAt: now }, authority);
 }
-function authorizePlan(state, digest, now = Date.now()) {
-  assertCurrent(state, digest, now);
-  if (state.mode === "advisor" || state.mode === "assistant" && state.reviewedAt === undefined) {
+function authorizePlan(state, digest, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
+  assertCurrent(state, digest, now, authority);
+  if (state.mode === "advisor" || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) {
     throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
   }
-  if (state.authorizedAt !== undefined)
-    throw new Error("El plan ya tiene una autorizacion vigente.");
-  return { ...state, authorizedAt: now, authorizationProof: receipt(state, "run", now) };
+  if (state.plan.dependencies.length > 0)
+    throw new Error("Las dependencias deben validarse mediante el adaptador antes de ejecutar.");
+  return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
 }
-function planAllows(state, scope, operation, now = Date.now()) {
-  if (!validState(state) || state.mode === "advisor" || scope.mode === "advisor" || state.mode !== scope.mode || state.sessionID !== scope.sessionID || state.project !== scope.project || state.policyRevision !== scope.policyRevision || state.createdAt > now || state.expiresAt <= now || state.authorizedAt === undefined || state.authorizedAt > now)
+function planAllows(state, scope, operation, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
+  if (!validState(state, authority) || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor" || !samePlanScope(state, scope) || state.createdAt > now || state.updatedAt > now)
     return false;
   return state.plan.actions.some(({ action, resource }) => action === operation.action && resource === operation.resource);
 }
-function validState(state) {
+function validState(state, authority = DEFAULT_PLANNING_AUTHORITY) {
   if (!state || typeof state !== "object" || Array.isArray(state))
     return false;
   const value = state;
-  if (value.version !== 2 || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt) || value.expiresAt <= value.createdAt || value.expiresAt - value.createdAt > PLAN_TTL_MS || value.reviewedAt !== undefined && (typeof value.reviewedAt !== "number" || !Number.isFinite(value.reviewedAt)) || value.authorizedAt !== undefined && (typeof value.authorizedAt !== "number" || !Number.isFinite(value.authorizedAt)) || typeof value.reviewedAt === "number" && (value.reviewedAt < value.createdAt || value.reviewedAt >= value.expiresAt) || typeof value.authorizedAt === "number" && (value.authorizedAt < value.createdAt || value.authorizedAt >= value.expiresAt) || value.mode === "advisor" && (value.reviewedAt !== undefined || value.authorizedAt !== undefined) || value.mode === "executor" && value.reviewedAt !== undefined || value.mode === "assistant" && value.authorizedAt !== undefined && (typeof value.reviewedAt !== "number" || value.authorizedAt < value.reviewedAt) || value.reviewedAt === undefined && value.reviewProof !== undefined || value.authorizedAt === undefined && value.authorizationProof !== undefined || !value.plan || typeof value.plan !== "object" || Array.isArray(value.plan))
+  if (value.version !== 3 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || !validPlan(value.plan) || typeof value.proof !== "string")
     return false;
   const plan = value.plan;
-  if (typeof plan.summary !== "string" || !Array.isArray(plan.steps) || !Array.isArray(plan.actions) || !plan.steps.every((step) => typeof step === "string") || !plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.action === "string" && typeof entry.resource === "string"))
-    return false;
-  const expected = createHash5("sha256").update(JSON.stringify({ scope: {
+  const expected = digestPlan({
     sessionID: value.sessionID,
     project: value.project,
     mode: value.mode,
     policyRevision: value.policyRevision
-  }, plan, revision: value.revision, presentationInteractionID: value.presentationInteractionID })).digest("hex");
-  if (expected !== value.digest)
+  }, plan, value.planID, value.revision, value.presentationInteractionID);
+  if (expected !== value.digest || !validPhase(value))
     return false;
-  const planState = value;
-  return (value.reviewedAt === undefined || verifyReceipt(planState, "review", value.reviewedAt, value.reviewProof)) && (value.authorizedAt === undefined || verifyReceipt(planState, "run", value.authorizedAt, value.authorizationProof));
+  return authority.verify(statePayload(value), value.proof);
 }
 function renderPlan(state) {
+  const dependencies = state.plan.dependencies.length > 0 ? state.plan.dependencies.map((item) => `- ${item.planID}@${item.revision.slice(0, 12)}`) : ["- Ninguna."];
   return [
-    `Plan Malahor (${state.mode}) · ${state.digest.slice(0, 12)}`,
+    `Plan Malahor (${state.mode}) · ${state.planID.slice(0, 12)} · revision ${state.revision.slice(0, 12)}`,
+    `Estado: ${state.phase}`,
     "",
     "Resumen",
     state.plan.summary,
@@ -5397,45 +5551,166 @@ function renderPlan(state) {
     "Pasos",
     ...state.plan.steps.length > 0 ? state.plan.steps.map((step, index) => `${index + 1}. ${step}`) : ["- Sin pasos ejecutables."],
     "",
-    "Acciones y efectos exactos",
-    ...state.plan.actions.length > 0 ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`) : ["- Ninguna acción ejecutable."],
+    "Dependencias",
+    ...dependencies,
     "",
-    `Caduca: ${new Date(state.expiresAt).toISOString()}`,
-    state.mode === "advisor" ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto." : "Siguiente: muestra el plan completo y termina este turno. Espera un turno posterior y una solicitud posterior del usuario antes de pedir aprobacion."
+    "Acciones y efectos exactos",
+    ...state.plan.actions.length > 0 ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`) : ["- Ninguna accion ejecutable."],
+    "",
+    "Vigencia: sin caducidad temporal; cambia solo por revision, estado, proyecto, modo o politica.",
+    state.mode === "advisor" ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto." : "Siguiente: muestra el plan completo y termina este turno. Espera una solicitud posterior del usuario antes de pedir aprobacion."
   ].join(`
 `);
 }
-function assertCurrent(state, digest, now) {
-  if (!validState(state) || state.digest !== digest || !Number.isFinite(now) || state.expiresAt <= now) {
-    throw new Error("Plan cambiado, expirado o no evaluable: vuelve a presentarlo.");
+function normalizePlan(mode, input) {
+  if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
+    throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
+  }
+  const dependencies = input.dependencies ?? [];
+  if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || !Array.isArray(dependencies) || input.steps.length > 30 || input.actions.length > 80 || dependencies.length > 30) {
+    throw new Error("Pasos, acciones o dependencias invalidos o demasiado extensos.");
+  }
+  if (mode === "advisor" && (input.steps.length !== 0 || input.actions.length !== 0 || dependencies.length !== 0)) {
+    throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
+  }
+  if (mode !== "advisor" && input.steps.length === 0)
+    throw new Error("El plan requiere pasos visibles.");
+  if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000))
+    throw new Error("Paso de plan invalido.");
+  if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action) || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {
+    throw new Error("La accion debe ser edit, shell o subagent con recurso exacto.");
+  }
+  if (dependencies.some((item) => !item || !/^[a-f0-9]{32}$/.test(item.planID) || !/^[a-f0-9]{32}$/.test(item.revision))) {
+    throw new Error("Dependencia de plan invalida.");
+  }
+  if (JSON.stringify(input).length > 12000)
+    throw new Error("El plan es demasiado grande para una revision visible.");
+  const actions = uniqueSorted(input.actions, (item) => `${item.action}\x00${item.resource}`);
+  const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\x00${item.revision}`);
+  return { summary: input.summary.trim(), steps: [...input.steps], actions, dependencies: normalizedDependencies };
+}
+async function assertDependencyGraph(state, adapter, authority) {
+  const visit2 = async (dependencies, trail) => {
+    for (const dependency of dependencies) {
+      if (dependency.planID === state.planID || trail.has(dependency.planID))
+        throw new Error("Ciclo de dependencias de plan detectado.");
+      const raw = await adapter.loadPlan(dependency.planID);
+      if (!validState(raw, authority) || raw.project !== state.project || raw.revision !== dependency.revision) {
+        throw new Error(`Dependencia de plan no evaluable: ${dependency.planID}.`);
+      }
+      const next = new Set(trail);
+      next.add(dependency.planID);
+      await visit2(raw.plan.dependencies, next);
+    }
+  };
+  await visit2(state.plan.dependencies, new Set([state.planID]));
+}
+async function pendingDependencies(state, adapter, authority) {
+  const pending = [];
+  for (const dependency of state.plan.dependencies) {
+    const raw = await adapter.loadPlan(dependency.planID);
+    if (!validState(raw, authority) || raw.project !== state.project || raw.revision !== dependency.revision || raw.phase !== "completed")
+      pending.push(dependency);
+  }
+  return pending;
+}
+function blockPlan(state, blockedBy, now, authority) {
+  return seal({
+    ...state,
+    phase: "blocked",
+    authorizedAt: state.authorizedAt ?? now,
+    blockedAt: now,
+    blockedBy,
+    updatedAt: now
+  }, authority);
+}
+function assertCurrent(state, digest, now, authority) {
+  if (!validState(state, authority) || state.digest !== digest || !Number.isFinite(now) || state.createdAt > now) {
+    throw new Error("Plan cambiado o no evaluable: vuelve a presentarlo.");
   }
 }
-function receipt(state, kind, at) {
-  return createHmac("sha256", receiptKey).update(JSON.stringify({
-    kind,
-    sessionID: state.sessionID,
-    project: state.project,
-    mode: state.mode,
-    policyRevision: state.policyRevision,
-    digest: state.digest,
-    revision: state.revision,
-    presentationInteractionID: state.presentationInteractionID,
-    at,
-    reviewProof: kind === "run" ? state.reviewProof ?? null : null
-  })).digest("hex");
+function seal(state, authority) {
+  const next = { ...state, proof: "" };
+  return { ...next, proof: authority.sign(statePayload(next)) };
 }
-function verifyReceipt(state, kind, at, proof) {
-  if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof))
+function statePayload(value) {
+  const { proof: _proof, ...payload } = value;
+  return canonical(payload);
+}
+function digestPlan(scope, plan, planID, revision, presentationInteractionID) {
+  return createHash6("sha256").update(canonical({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
+}
+function sameRevision(value, expected, authority) {
+  return validState(value, authority) && value.planID === expected.planID && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
+}
+function samePlanScope(state, scope) {
+  return state.sessionID === scope.sessionID && state.project === scope.project && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
+}
+function validPlan(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
     return false;
-  return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(receipt(state, kind, at), "hex"));
+  const plan = value;
+  return typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions) && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string") && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && ACTIONS.has(String(entry.action)) && typeof entry.resource === "string") && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && /^[a-f0-9]{32}$/.test(String(entry.planID)) && /^[a-f0-9]{32}$/.test(String(entry.revision)));
+}
+function validPhase(value) {
+  const phase = value.phase;
+  if (value.mode === "advisor" && phase !== "presented" && phase !== "revoked" && phase !== "superseded")
+    return false;
+  if (phase === "reviewed" && (value.mode !== "assistant" || !validTime(value.reviewedAt)))
+    return false;
+  if (["running", "paused", "blocked", "completed"].includes(phase) && (!validTime(value.authorizedAt) || phase !== "blocked" && !validTime(value.startedAt)))
+    return false;
+  if (phase === "paused" && !validTime(value.pausedAt))
+    return false;
+  if (phase === "blocked" && (!validTime(value.blockedAt) || !Array.isArray(value.blockedBy) || value.blockedBy.length === 0))
+    return false;
+  if (phase === "completed" && !validTime(value.completedAt))
+    return false;
+  if (phase === "revoked" && !validTime(value.revokedAt))
+    return false;
+  if (phase === "superseded" && !validTime(value.supersededAt))
+    return false;
+  return true;
+}
+function validOptionalTimes(value) {
+  return ["reviewedAt", "authorizedAt", "startedAt", "pausedAt", "blockedAt", "completedAt", "revokedAt", "supersededAt"].every((key) => value[key] === undefined || validTime(value[key]));
+}
+function validateScope(scope, now) {
+  if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
+    throw new Error("Sesion/proyecto/politica de plan no evaluable.");
+  }
+}
+function validTime(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 function validInteractionID(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+function randomID() {
+  return randomBytes4(16).toString("hex");
+}
+function uniqueSorted(items, key) {
+  return [...new Map(items.map((item) => [key(item), { ...item }])).values()].sort((left, right) => compareText(key(left), key(right)));
+}
+function canonical(value) {
+  if (Array.isArray(value))
+    return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText(left, right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 // src/plugin/planning.ts
 var REVIEW_ACTION = "malahor_plan_review";
 var RUN_ACTION = "malahor_plan_run";
+var RESUME_ACTION = "malahor_plan_resume";
+var COMPLETE_ACTION = "malahor_plan_complete";
+var fallbackAuthority = DEFAULT_PLANNING_AUTHORITY;
 var READ_ONLY_TOOLS = new Set([
   "read",
   "glob",
@@ -5449,11 +5724,12 @@ var READ_ONLY_TOOLS = new Set([
   "todoread",
   "invalid",
   "malahor_plan",
-  "malahor_run"
+  "malahor_run",
+  "malahor_plan_control"
 ]);
 var PROTECTED = new Set(["edit", "shell", "subagent"]);
 var CODE_READ_TOOLS = new Set(["read", "glob", "grep"]);
-async function evaluatePlanningPermission(input, options, storage) {
+async function evaluatePlanningPermission(input, options, storage, authority = fallbackAuthority) {
   const action = text(input.action);
   const normalized = permissionAction(action);
   if (input.effect === "deny")
@@ -5480,15 +5756,17 @@ async function evaluatePlanningPermission(input, options, storage) {
     }
     return;
   }
-  if (action === REVIEW_ACTION || action === RUN_ACTION) {
-    const state2 = resolved && await readPlan(storage, resolved.scope.sessionID);
+  if (action === REVIEW_ACTION || action === RUN_ACTION || action === RESUME_ACTION || action === COMPLETE_ACTION) {
+    const state2 = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
     const digest = Array.isArray(input.resources) ? input.resources[0] : undefined;
-    if (!state2 || digest !== state2.digest || state2.project !== resolved?.scope.project || state2.mode !== resolved.scope.mode || state2.policyRevision !== resolved.scope.policyRevision || state2.expiresAt <= Date.now() || action === REVIEW_ACTION && (state2.mode !== "assistant" || state2.reviewedAt !== undefined) || action === RUN_ACTION && (state2.mode === "advisor" || state2.plan.actions.length === 0 || state2.mode === "assistant" && state2.reviewedAt === undefined)) {
+    if (!state2 || digest !== state2.digest || state2.project !== resolved?.scope.project || state2.mode !== resolved.scope.mode || state2.policyRevision !== resolved.scope.policyRevision || action === REVIEW_ACTION && (state2.mode !== "assistant" || state2.phase !== "presented") || action === RUN_ACTION && (state2.mode === "advisor" || state2.plan.actions.length === 0 || (state2.mode === "assistant" ? state2.phase !== "reviewed" : state2.phase !== "presented")) || action === RESUME_ACTION && !["paused", "blocked"].includes(state2.phase) || action === COMPLETE_ACTION && !["running", "paused"].includes(state2.phase)) {
       deny(input, "Plan no vigente o confirmacion fuera de orden.");
       return;
     }
     input.effect = "ask";
     input.message = action === REVIEW_ACTION ? `Revisa el plan; esta primera confirmacion NO autoriza ejecutar:
+${renderPlan(state2)}` : action === RESUME_ACTION ? `Reanuda SOLO el plan y revision mostrados:
+${renderPlan(state2)}` : action === COMPLETE_ACTION ? `Confirma el cierre del plan; puede desbloquear dependencias, pero no inicia otros planes:
 ${renderPlan(state2)}` : state2.mode === "executor" ? `Aprobacion previa del plan para ejecutar SOLO sus acciones:
 ${renderPlan(state2)}` : `Segunda confirmacion: ejecuta SOLO las acciones del plan revisado:
 ${renderPlan(state2)}`;
@@ -5511,15 +5789,15 @@ ${renderPlan(state2)}`;
     deny(input, "El asesor no ejecuta acciones de programacion ni con una solicitud explicita.");
     return;
   }
-  if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage))
+  if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority))
     return;
-  const state = await readPlan(storage, resolved.scope.sessionID);
+  const state = await readPlan(storage, resolved.scope.sessionID, authority);
   const resources = Array.isArray(input.resources) ? input.resources : [];
-  if (resources.length === 0 || resources.some((item) => typeof item !== "string" || !planAllows(state, resolved.scope, normalizeAction(normalized, item, resolved.directory)))) {
+  if (resources.length === 0 || resources.some((item) => typeof item !== "string" || !planAllows(state, resolved.scope, normalizeAction(normalized, item, resolved.directory), Date.now(), authority))) {
     deny(input, "Accion no incluida en un plan vigente y confirmado.");
   }
 }
-async function evaluatePlanningTool(input, options, storage) {
+async function evaluatePlanningTool(input, options, storage, authority = fallbackAuthority) {
   const tool = text(input.tool);
   if (routineTool(tool))
     return;
@@ -5534,15 +5812,15 @@ async function evaluatePlanningTool(input, options, storage) {
   if (resolved.scope.mode === "advisor") {
     throw new Error("Malahor: el asesor no ejecuta acciones de programacion.");
   }
-  if (["edit", "write", "patch", "shell", "bash"].includes(tool) && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage))
+  if (["edit", "write", "patch", "shell", "bash"].includes(tool) && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority))
     return;
   const actions = toolActions(tool, input.input, resolved.directory);
-  const state = await readPlan(storage, resolved.scope.sessionID);
-  if (!actions || actions.length === 0 || actions.some((operation) => !planAllows(state, resolved.scope, operation))) {
+  const state = await readPlan(storage, resolved.scope.sessionID, authority);
+  if (!actions || actions.length === 0 || actions.some((operation) => !planAllows(state, resolved.scope, operation, Date.now(), authority))) {
     throw new Error(`Malahor: ${tool || "tool"} fuera de un plan vigente y confirmado.`);
   }
 }
-async function registerPlanningTools(tools, approvals, storage, options) {
+async function registerPlanningTools(tools, approvals, storage, options, authority = fallbackAuthority) {
   return tools.transform((editor) => {
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
@@ -5558,6 +5836,12 @@ async function registerPlanningTools(tools, approvals, storage, options) {
             properties: { action: { type: "string" }, resource: { type: "string" } },
             required: ["action", "resource"],
             additionalProperties: false
+          } },
+          dependencies: { type: "array", items: {
+            type: "object",
+            properties: { planID: { type: "string" }, revision: { type: "string" } },
+            required: ["planID", "revision"],
+            additionalProperties: false
           } }
         },
         required: ["summary", "steps", "actions"],
@@ -5572,7 +5856,7 @@ async function registerPlanningTools(tools, approvals, storage, options) {
         if (detectSecretKinds(raw).length > 0)
           throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
-        const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call));
+        const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority);
         return { content: `${renderPlan(state)}
 Digest completo: ${state.digest}` };
       }
@@ -5587,28 +5871,52 @@ Digest completo: ${state.digest}` };
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede solicitar ejecucion.");
         const digest = text(value.digest);
-        const state = await requestPlanExecution(resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call));
-        return { content: `Plan ${state.digest.slice(0, 12)} autorizado hasta ${new Date(state.expiresAt).toISOString()}. Solo operaciones declaradas; guardrails vigentes.` };
+        const state = await requestPlanExecution(resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call), authority);
+        return { content: state.phase === "blocked" ? `Plan ${state.planID.slice(0, 12)} autorizado pero bloqueado por dependencias. No se ejecutara automaticamente.` : `Plan ${state.planID.slice(0, 12)} revision ${state.revision.slice(0, 12)} en ejecucion sin caducidad temporal. Solo operaciones declaradas; guardrails vigentes.` };
+      }
+    });
+    editor.add({
+      name: "plan_control",
+      description: "Consulta, pausa, reanuda, revoca o completa el plan activo sin ampliar sus efectos.",
+      input: { type: "object", properties: {
+        action: { type: "string", enum: ["status", "pause", "resume", "revoke", "complete"] }
+      }, required: ["action"], additionalProperties: false },
+      options: { namespace: "malahor", codemode: false },
+      execute: async (value, call) => {
+        const resolved = await requireScope(call, options);
+        if (call.agent !== "malahor")
+          throw new Error("Solo el primario puede controlar el plan.");
+        const action = text(value.action);
+        if (!["status", "pause", "resume", "revoke", "complete"].includes(action)) {
+          throw new Error("Control de plan invalido.");
+        }
+        const state = await controlPlan(resolved.scope, action, planningAdapter(storage, approvals, call), authority);
+        return { content: renderPlan(state) };
       }
     });
   });
 }
 function planningAdapter(storage, port, call) {
   return {
-    load: (sessionID) => storage.get(planKey(sessionID)),
-    save: (state) => storage.set(planKey(state.sessionID), state),
-    confirm: (kind, state) => ask(port, call, kind === "review" ? REVIEW_ACTION : RUN_ACTION, state.digest)
+    loadActive: (sessionID) => storage.get(planKey(sessionID)),
+    loadPlan: (planID) => storage.get(planRecordKey(planID)),
+    save: async (state) => {
+      await storage.set(planRevisionKey(state.planID, state.revision), state);
+      await storage.set(planRecordKey(state.planID), state);
+      await storage.set(planKey(state.sessionID), state);
+    },
+    confirm: (kind, state) => ask(port, call, kind === "review" ? REVIEW_ACTION : kind === "run" ? RUN_ACTION : kind === "resume" ? RESUME_ACTION : COMPLETE_ACTION, state.digest)
   };
 }
-async function delegatedSpecialist(sessionID, scope, options, storage) {
+async function delegatedSpecialist(sessionID, scope, options, storage, authority = fallbackAuthority) {
   if (!storage || typeof sessionID !== "string" || !options.resolveParentSession)
     return false;
   try {
     const parent = await options.resolveParentSession(sessionID);
     if (!parent || !["malahor-diagnostico", "malahor-testing"].includes(parent.agent))
       return false;
-    const state = await readPlan(storage, parent.parentID);
-    return planAllows(state, { ...scope, sessionID: parent.parentID }, { action: "subagent", resource: parent.agent });
+    const state = await readPlan(storage, parent.parentID, authority);
+    return planAllows(state, { ...scope, sessionID: parent.parentID }, { action: "subagent", resource: parent.agent }, Date.now(), authority);
   } catch {
     return false;
   }
@@ -5616,13 +5924,23 @@ async function delegatedSpecialist(sessionID, scope, options, storage) {
 function planKey(sessionID) {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
     throw new Error("ID de sesion no evaluable.");
-  return `planning/v2/${sessionID}`;
+  return `planning/v3/sessions/${sessionID}`;
 }
-async function injectPlanningInstructions(input, options, storage) {
+function planRecordKey(planID) {
+  if (!/^[a-f0-9]{32}$/.test(planID))
+    throw new Error("ID de plan no evaluable.");
+  return `planning/v3/plans/${planID}`;
+}
+function planRevisionKey(planID, revision) {
+  if (!/^[a-f0-9]{32}$/.test(revision))
+    throw new Error("Revision de plan no evaluable.");
+  return `${planRecordKey(planID)}/revisions/${revision}`;
+}
+async function injectPlanningInstructions(input, options, storage, authority = fallbackAuthority) {
   if (input.agent !== "malahor")
     return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
-  const state = resolved && await readPlan(storage, resolved.scope.sessionID);
+  const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
   const mode = resolved?.scope.mode;
   const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps y actions vacios." : [
     `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
@@ -5630,13 +5948,16 @@ async function injectPlanningInstructions(input, options, storage) {
     "Despues de malahor_plan, muestra el plan completo y termina este turno; no invoques malahor_run en la misma respuesta.",
     "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
     "Un go previo a la presentacion no aprueba un plan todavia no visto.",
-    "El plan enumera rutas/comandos/subagentes exactos. Si cambian, presenta otro plan y vuelve a pedir confirmaciones.",
+    "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
+    "La autorizacion no caduca por tiempo. Pausa, reanuda, revoca o consulta estado con malahor_plan_control o /malahor-plan.",
+    "Las dependencias bloquean sin heredar permisos ni arrancar automaticamente.",
     "Las aprobaciones de plan no autorizan commit, push, stage, instalacion local ni evitan guardrails.",
-    state ? `Estado: ${state.authorizedAt !== undefined ? "autorizado" : state.reviewedAt !== undefined ? "revisado" : "presentado"}; revision ${state.digest.slice(0, 12)}; caduca ${new Date(state.expiresAt).toISOString()}.` : "Estado: sin plan vigente."
+    state ? `Estado: ${state.phase}; plan ${state.planID.slice(0, 12)}; revision ${state.revision.slice(0, 12)}; sin caducidad temporal.` : "Estado: sin plan vigente."
   ].join(`
 `);
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v2 -->";
+  const marker = "<!-- malahor-planning:v3 -->";
+  const previousMarker = "<!-- malahor-planning:v2 -->";
   const legacyMarker = "<!-- malahor-planning:v1 -->";
   for (const part of system) {
     if (!isRecord5(part) || part.type !== "text" || typeof part.text !== "string")
@@ -5645,7 +5966,7 @@ async function injectPlanningInstructions(input, options, storage) {
       input.system = system;
       return;
     }
-    const legacyIndex = part.text.indexOf(legacyMarker);
+    const legacyIndex = Math.max(part.text.indexOf(previousMarker), part.text.indexOf(legacyMarker));
     if (legacyIndex >= 0) {
       part.text = `${part.text.slice(0, legacyIndex).trimEnd()}
 
@@ -5667,12 +5988,12 @@ ${instructions}` });
   }
   input.system = system;
 }
-async function readPlan(storage, sessionID) {
+async function readPlan(storage, sessionID, authority = fallbackAuthority) {
   if (!storage)
     return;
   try {
     const record = await storage.get(planKey(sessionID));
-    return validState(record) ? record : undefined;
+    return validState(record, authority) ? record : undefined;
   } catch {
     return;
   }
@@ -5719,7 +6040,7 @@ async function resolvePlanningScope(value, options) {
 function toolActions(tool, value, directory) {
   const args = isRecord5(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
-    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path14.resolve(directory, cwd) !== path14.resolve(directory))))
+    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path15.resolve(directory, cwd) !== path15.resolve(directory))))
       return;
     return typeof args.command === "string" && args.command.trim() ? [{ action: "shell", resource: args.command }] : undefined;
   }
@@ -5739,7 +6060,7 @@ function toolActions(tool, value, directory) {
   return;
 }
 function normalizeAction(action, resource, directory) {
-  return { action, resource: action === "edit" ? path14.resolve(directory, resource) : resource };
+  return { action, resource: action === "edit" ? path15.resolve(directory, resource) : resource };
 }
 function permissionAction(action) {
   if (["bash", "command"].includes(action))
@@ -5754,8 +6075,8 @@ function routineTool(tool) {
   return /^(?:mcp_)?(?:mnemo_|obsidian_|codegraph_(?!.*(?:index|write|delete)))/.test(tool);
 }
 function inside2(target, root) {
-  const relative = path14.relative(path14.resolve(root), path14.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
+  const relative = path15.relative(path15.resolve(root), path15.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path15.isAbsolute(relative);
 }
 function text(value) {
   return typeof value === "string" ? value : "";
@@ -5844,6 +6165,48 @@ Para aplicar: /malahor-modo ${plan.target}` : `Modo ${plan.target} ya persistido
   }));
 }
 
+// src/plugin/plan-command.ts
+var CONTROLS = new Set(["status", "pause", "resume", "revoke", "complete"]);
+async function registerPlanCommand(host, storage, authority, options) {
+  return host.command.transform((editor) => editor.add({
+    name: "malahor-plan",
+    description: "Consultar, pausar, reanudar, revocar o completar el plan activo",
+    execute: async ({ sessionID, prompt }) => {
+      if (!prompt || typeof prompt.text !== "string" || prompt.files?.length || prompt.agents?.length || prompt.skills?.length) {
+        throw new Error("El comando de plan solo acepta argumentos de texto, sin adjuntos.");
+      }
+      const args = prompt.text.trim().replace(/^\/?malahor-plan(?:\s+|$)/, "").trim().split(/\s+/).filter(Boolean);
+      const action = args[0] ?? "status";
+      if (args.length > 1 || !CONTROLS.has(action)) {
+        throw new Error("Uso: /malahor-plan [status|pause|resume|revoke|complete]");
+      }
+      const resolved = await resolvePlanningScope(sessionID, options);
+      if (!resolved)
+        throw new Error("Sesion sin proyecto registrado; plan no disponible.");
+      const adapter = {
+        loadActive: (id) => storage.get(planKey(id)),
+        loadPlan: (planID) => storage.get(planRecordKey(planID)),
+        save: async (state2) => {
+          await storage.set(planRevisionKey(state2.planID, state2.revision), state2);
+          await storage.set(planRecordKey(state2.planID), state2);
+          await storage.set(planKey(state2.sessionID), state2);
+        },
+        confirm: async (kind, state2) => {
+          const permissionAction2 = kind === "resume" ? "malahor_plan_resume" : kind === "complete" ? "malahor_plan_complete" : kind === "review" ? "malahor_plan_review" : "malahor_plan_run";
+          await host.permission.assert({
+            sessionID,
+            action: permissionAction2,
+            resources: [state2.digest],
+            save: []
+          });
+        }
+      };
+      const state = await controlPlan(resolved.scope, action, adapter, authority);
+      await host.session.synthetic({ sessionID, text: renderPlan(state) });
+    }
+  }));
+}
+
 // src/plugin/index.ts
 var PLUGIN_ID = "malahor";
 var PLUGIN_VERSION = "0.4.0";
@@ -5900,6 +6263,17 @@ async function setupV2(context) {
   const session = domain("session");
   const storage = storageDomain(context.storage);
   const planStorage = storage && typeof storage.get === "function" ? storage : undefined;
+  let planningAuthority;
+  if (planStorage) {
+    try {
+      planningAuthority = loadPlanningAuthority(resolvePaths(process.env, cwd).secretsDir);
+      capabilities["planning.authority"] = true;
+    } catch (error) {
+      capabilities["planning.authority"] = false;
+      criticalGaps.push("planning.authority");
+      warn(`autoridad de planeacion no disponible: ${error.message}`);
+    }
+  }
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {
       const value = await session.get?.({ sessionID });
@@ -5916,7 +6290,7 @@ async function setupV2(context) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
       const evaluated = await evaluatePermission(input, options);
       if (evaluated.effect !== "deny")
-        await evaluatePlanningPermission(input, options, planStorage);
+        await evaluatePlanningPermission(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
       if (input.effect === "deny") {
         warn(`permission.evaluate deny: ${evaluated.effect === "deny" ? summary(evaluated.result) : String(input.message ?? "plan no autorizado")}`);
       }
@@ -5954,7 +6328,7 @@ async function setupV2(context) {
       if (shouldBlockPluginResult(result, options)) {
         throw new Error(formatPluginBlock(result));
       }
-      await evaluatePlanningTool(input, options, planStorage);
+      await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
     }, cleanups);
     capabilities.tool = true;
     capabilities["tool.execute.before"] = registered;
@@ -5974,9 +6348,9 @@ async function setupV2(context) {
       degraded.push("memory.freshness");
     const planningTools = typeof tool.transform === "function" ? tool : undefined;
     const approvalPort = isRecord6(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
-    if (planningTools && approvalPort && planStorage && options.resolveSessionDirectory && options.permissionRegistered && registered) {
+    if (planningTools && approvalPort && planStorage && planningAuthority && options.resolveSessionDirectory && options.permissionRegistered && registered) {
       try {
-        const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options);
+        const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function")
           cleanups.push(() => registration.dispose?.());
         capabilities["planning.v2"] = true;
@@ -6006,6 +6380,19 @@ async function setupV2(context) {
   }
   if (!capabilities["mode.command"])
     degraded.push("mode.command");
+  const planCommandHost = isRecord6(context.command) && typeof context.command.transform === "function" && isRecord6(context.session) && typeof context.session.synthetic === "function" && isRecord6(context.permission) && typeof context.permission.assert === "function" && options.resolveSessionDirectory ? context : undefined;
+  if (planCommandHost && planStorage && planningAuthority) {
+    try {
+      const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
+      if (registration && typeof registration.dispose === "function")
+        cleanups.push(() => registration.dispose?.());
+      capabilities["plan.command"] = true;
+    } catch (error) {
+      warn(`comando de plan no registrado: ${error.message}`);
+    }
+  }
+  if (!capabilities["plan.command"])
+    degraded.push("plan.command");
   if (session) {
     for (const event2 of SESSION_HOOKS) {
       const registered = await registerHook(session, hookNameForEvent(event2), async (input) => {
@@ -6026,7 +6413,7 @@ async function setupV2(context) {
     }
     const protocolRegistered = await registerHook(session, "context", async (input) => {
       injectMalahorProtocol(input);
-      await injectPlanningInstructions(input, options, planStorage);
+      await injectPlanningInstructions(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
     }, cleanups);
     capabilities["protocol.context"] = protocolRegistered;
     if (!protocolRegistered)
@@ -6237,16 +6624,16 @@ function captureSubagentsOptIn(cwd, env) {
     return false;
   }
 }
-async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
+async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
-  if (!fs11.existsSync(paths.mnemoIndex)) {
+  if (!fs12.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs11.existsSync(paths.mnemoIndex)) {
+      if (fs12.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
@@ -6261,8 +6648,8 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
       }
       let target;
       try {
-        const registered = canonical ? registeredProjectRoots(paths.projectsFile).find((entry) => fs11.realpathSync(entry.root) === fs11.realpathSync(canonical)) : undefined;
-        if (!canonical || registered)
+        const registered = canonical2 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs12.realpathSync(entry.root) === fs12.realpathSync(canonical2)) : undefined;
+        if (!canonical2 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
       const level = target ? levelForProject(paths.projectsFile, target.project) : undefined;
@@ -6309,13 +6696,13 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path15.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path16.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path15.resolve(paths.opencodeDir, item) === path15.resolve(paths.mnemoIndex));
+  return command.some((item) => path16.resolve(paths.opencodeDir, item) === path16.resolve(paths.mnemoIndex));
 }
 function sessionLocationDirectory(value) {
   const response = isRecord6(value) && isRecord6(value.data) ? value.data : value;
@@ -6326,7 +6713,7 @@ function sessionLocationDirectory(value) {
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path15.join(directory, "plugin-state.json");
+  const file = path16.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -6338,15 +6725,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs11.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path15.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs11.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs12.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path16.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs12.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs11.chmodSync(temporary, 384);
-    fs11.renameSync(temporary, file);
+    fs12.chmodSync(temporary, 384);
+    fs12.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -6356,8 +6743,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path15.resolve(override);
-  return path15.join(os2.homedir(), ".malahor");
+    return path16.resolve(override);
+  return path16.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))

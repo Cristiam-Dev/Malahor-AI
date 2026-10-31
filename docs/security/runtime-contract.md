@@ -124,7 +124,21 @@ Reglas:
 
 ## 4. Aprobaciones
 
-Una aprobación DEBE:
+Este contrato distingue dos capacidades que NO son intercambiables:
+
+1. **Autorización de plan de desarrollo:** persistente mientras coincidan
+   `planID`, revisión, digest de efectos, proyecto, sesión, modo y revisión de
+   política. No caduca por reloj; pausa/reanudación no amplían efectos. Una
+   revisión material, revocación o cambio de scope/política la invalida.
+2. **Aprobación de operación sensible:** autorización puntual de un hook para
+   Git, instalación, secretos, datos o una destructiva. Continúa siendo efímera,
+   de un solo uso y ligada a operación y recursos.
+
+La autorización de plan nunca satisface por sí sola una aprobación sensible.
+Una dependencia completada desbloquea preparación, pero no hereda permisos ni
+inicia automáticamente otro plan.
+
+Una aprobación de operación sensible DEBE:
 
 - ser emitida por un canal humano/host de confianza (TTY, UI de OpenCode o
   mecanismo administrado equivalente);
@@ -144,6 +158,10 @@ NO DEBE aceptarse como aprobación:
 Si no existe un canal de aprobación confiable, `ask` se resuelve como `deny`.
 La aprobación no se pasa a procesos no autorizados ni se escribe en logs con
 payloads.
+
+El estado de plan DEBE ser resistente a alteración, conservar revisiones y
+fallar cerrado si su recibo, proyecto, modo, política o efectos no coinciden. El
+recibo local prueba integridad del estado, no identidad humana.
 
 ## 5. Cobertura por frontera
 

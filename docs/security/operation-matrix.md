@@ -87,6 +87,16 @@ y proyecto.
 | DEST-WRITE-01 | Escritura documental/remota | Conditional write/`ifMatch` cuando exista | Handler + hook previo | Denegar escritura ciega | T-5.9.4 |
 | DEST-AFTER-01 | “Deshacer” con after-hook | No usar after-hook para deshacer filtración | Solo auditoría | Denegar el enfoque | T-5.1.8 |
 
+### Planes de desarrollo
+
+| ID | Operación | Control obligatorio | Punto de ejecución V2 | Si no hay mediación | Dueño |
+|---|---|---|---|---|---|
+| PLAN-REVISION-01 | Presentar o cambiar plan | Revisión/digest nuevos; efectos exactos; estado anterior reemplazado | Core planning + storage firmado | Denegar ejecución | 0.1.2 |
+| PLAN-RUN-01 | Iniciar/reanudar | Orden posterior del usuario, estado válido y dependencias completas | UI nativa + `permission.evaluate` + `tool.execute.before` | Mantener pausado/bloqueado | 0.1.2 |
+| PLAN-STATE-01 | Pausar/revocar/completar | Transición válida; solo `running` concede efectos | Core planning + comando/tool estructurado | Denegar transición | 0.1.2 |
+| PLAN-DEPS-01 | Dependencia entre planes | `planID+revision` completados, sin ciclos, herencia ni autoarranque | Core planning antes de run/resume | Mantener bloqueado | 0.1.2 |
+| PLAN-SENSITIVE-01 | Acción sensible incluida en plan | Approval específico adicional; el plan no lo sustituye | Hook específico previo al efecto | Denegar operación sensible | 0.1.2/T-5.1.3 |
+
 ## 7. Egress, modelo y red
 
 | ID | Operación | Control obligatorio | Punto de ejecución V2 | Si no hay mediación | Dueño |

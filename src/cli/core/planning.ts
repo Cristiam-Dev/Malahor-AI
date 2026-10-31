@@ -1,35 +1,55 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { MalahorMode } from "./config";
+import {
+  createEphemeralPlanningAuthority,
+  type PlanningAuthority,
+} from "./planning-authority";
 
-/** Contrato portable: los adaptadores traducen operaciones del host a action/resource. */
 export interface PlannedAction {
   action: string;
   resource: string;
+}
+
+export interface PlanDependency {
+  planID: string;
+  revision: string;
 }
 
 export interface PlanInput {
   summary: string;
   steps: string[];
   actions: PlannedAction[];
+  dependencies?: PlanDependency[];
 }
 
+export type PlanPhase = "presented" | "reviewed" | "running" | "paused" | "blocked"
+  | "completed" | "revoked" | "superseded";
+export type PlanControl = "status" | "pause" | "resume" | "revoke" | "complete";
+
 export interface PlanState {
-  version: 2;
+  version: 3;
+  planID: string;
   sessionID: string;
   project: string;
   mode: MalahorMode;
   policyRevision: string;
-  /** Identidad portable del turno que mostro el plan; OpenCode aporta messageID. */
   presentationInteractionID: string;
-  plan: PlanInput;
+  plan: Required<PlanInput>;
   digest: string;
   revision: string;
+  phase: PlanPhase;
   createdAt: number;
-  expiresAt: number;
+  updatedAt: number;
   reviewedAt?: number;
   authorizedAt?: number;
-  reviewProof?: string;
-  authorizationProof?: string;
+  startedAt?: number;
+  pausedAt?: number;
+  blockedAt?: number;
+  completedAt?: number;
+  revokedAt?: number;
+  supersededAt?: number;
+  blockedBy?: PlanDependency[];
+  proof: string;
 }
 
 export interface PlanScope {
@@ -39,66 +59,128 @@ export interface PlanScope {
   policyRevision: string;
 }
 
-/** Puerto de harness: el core nunca conoce permisos, UI ni almacenamiento de OpenCode. */
 export interface PlanningAdapter {
-  load(sessionID: string): Promise<unknown>;
+  loadActive(sessionID: string): Promise<unknown>;
+  loadPlan(planID: string): Promise<unknown>;
   save(state: PlanState): Promise<void>;
-  confirm(kind: "review" | "run", state: PlanState): Promise<void>;
+  confirm(kind: "review" | "run" | "resume" | "complete", state: PlanState): Promise<void>;
 }
 
-const PLAN_TTL_MS = 30 * 60_000;
 const ACTIONS = new Set(["edit", "shell", "subagent"]);
+const PHASES = new Set<PlanPhase>([
+  "presented", "reviewed", "running", "paused", "blocked", "completed", "revoked", "superseded",
+]);
+const TERMINAL = new Set<PlanPhase>(["completed", "revoked", "superseded"]);
 const CORE_INTERACTION_ID = "core:direct";
-// Recibos efimeros: una alteracion del storage no fabrica confirmaciones. Al reiniciar se vuelven a pedir.
-// No prueban identidad humana: la UI del host sigue siendo la frontera de interaccion.
-const receiptKey = randomBytes(32);
-// El puerto de storage V2 solo expone get/set. Serializar las transiciones en este proceso
-// evita que una confirmacion anterior resucite un plan reemplazado en la misma sesion.
+export const DEFAULT_PLANNING_AUTHORITY = createEphemeralPlanningAuthority();
 const transitions = new Map<string, Promise<void>>();
 
 export async function presentPlan(
-  scope: PlanScope, input: PlanInput, presentationInteractionID: string, adapter: PlanningAdapter,
+  scope: PlanScope,
+  input: PlanInput,
+  presentationInteractionID: string,
+  adapter: PlanningAdapter,
+  authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
 ): Promise<PlanState> {
   return serialize(scope.sessionID, async () => {
-    const state = proposePlan(scope, input, Date.now(), presentationInteractionID);
-    await adapter.save(state); // Reemplazar el plan revoca autorizaciones anteriores.
+    const now = Date.now();
+    const stored = await adapter.loadActive(scope.sessionID);
+    const previous = validState(stored, authority) && stored.sessionID === scope.sessionID ? stored : undefined;
+    const current = previous && samePlanScope(previous, scope) ? previous : undefined;
+    const planID = current && !TERMINAL.has(current.phase) ? current.planID : randomID();
+    const state = proposePlan(scope, input, now, presentationInteractionID, planID, authority);
+    await assertDependencyGraph(state, adapter, authority);
+    if (previous && !TERMINAL.has(previous.phase)) {
+      await adapter.save(seal({ ...previous, phase: "superseded", supersededAt: now, updatedAt: now }, authority));
+    }
+    await adapter.save(state);
     if (scope.mode !== "assistant") return state;
     await adapter.confirm("review", state);
-    const current = await adapter.load(scope.sessionID);
-    if (!validState(current) || current.revision !== state.revision || current.digest !== state.digest) {
-      throw new Error("El plan cambio durante la revision: vuelve a presentarlo.");
-    }
-    await adapter.save(reviewPlan(current, state.digest));
-    return state;
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, state, authority)) throw new Error("El plan cambio durante la revision: vuelve a presentarlo.");
+    const reviewed = reviewPlan(fresh, state.digest, Date.now(), authority);
+    await adapter.save(reviewed);
+    return reviewed;
   });
 }
 
 export async function requestPlanExecution(
-  scope: PlanScope, digest: string, executionInteractionID: string, adapter: PlanningAdapter,
+  scope: PlanScope,
+  digest: string,
+  executionInteractionID: string,
+  adapter: PlanningAdapter,
+  authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
 ): Promise<PlanState> {
   return serialize(scope.sessionID, async () => {
     if (!validInteractionID(executionInteractionID)) throw new Error("Turno de ejecucion no evaluable.");
-    const state = await adapter.load(scope.sessionID);
-    if (!validState(state) || state.digest !== digest || state.sessionID !== scope.sessionID
-      || state.project !== scope.project || state.mode !== scope.mode || state.policyRevision !== scope.policyRevision
-      || state.expiresAt <= Date.now()
-      || state.plan.actions.length === 0 || state.authorizedAt !== undefined) {
+    const stored = await adapter.loadActive(scope.sessionID);
+    if (!validState(stored, authority) || stored.digest !== digest || !samePlanScope(stored, scope)
+      || stored.plan.actions.length === 0 || (stored.mode === "assistant" ? stored.phase !== "reviewed" : stored.phase !== "presented")) {
       throw new Error("No hay un plan ejecutable vigente.");
     }
-    if (state.presentationInteractionID === executionInteractionID) {
+    if (stored.presentationInteractionID === executionInteractionID) {
       throw new Error("El plan debe quedar visible y terminar su turno de presentacion. Espera una solicitud posterior del usuario antes de pedir aprobacion.");
     }
-    if (state.mode === "advisor" || (state.mode === "assistant" && state.reviewedAt === undefined)) {
-      throw new Error("Primero revisa el plan.");
+    if (stored.mode === "advisor") throw new Error("Primero revisa el plan.");
+    await adapter.confirm("run", stored);
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, stored, authority)) throw new Error("El plan cambio durante la orden: vuelve a presentarlo.");
+    const pending = await pendingDependencies(fresh, adapter, authority);
+    const next = pending.length > 0
+      ? blockPlan(fresh, pending, Date.now(), authority)
+      : authorizePlan(fresh, fresh.digest, Date.now(), authority);
+    await adapter.save(next);
+    return next;
+  });
+}
+
+export async function controlPlan(
+  scope: PlanScope,
+  command: PlanControl,
+  adapter: PlanningAdapter,
+  authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
+): Promise<PlanState> {
+  return serialize(scope.sessionID, async () => {
+    const stored = await adapter.loadActive(scope.sessionID);
+    if (!validState(stored, authority) || !samePlanScope(stored, scope)) throw new Error("No hay un plan vigente para esta sesion.");
+    if (command === "status") return stored;
+    if (command === "pause") {
+      if (stored.phase !== "running") throw new Error("Solo un plan en ejecucion puede pausarse.");
+      const next = seal({ ...stored, phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
+      await adapter.save(next);
+      return next;
     }
-    await adapter.confirm("run", state);
-    const current = await adapter.load(scope.sessionID);
-    if (!validState(current) || current.revision !== state.revision || current.digest !== state.digest) {
-      throw new Error("El plan cambio durante la orden: vuelve a presentarlo.");
+    if (command === "revoke") {
+      if (TERMINAL.has(stored.phase)) throw new Error("El plan ya esta cerrado.");
+      const next = seal({ ...stored, phase: "revoked", revokedAt: Date.now(), updatedAt: Date.now() }, authority);
+      await adapter.save(next);
+      return next;
     }
-    const authorized = authorizePlan(current, state.digest);
-    await adapter.save(authorized);
-    return authorized;
+    if (command === "resume") {
+      if (stored.phase !== "paused" && stored.phase !== "blocked") throw new Error("Solo un plan pausado o bloqueado puede reanudarse.");
+      await adapter.confirm("resume", stored);
+      const fresh = await adapter.loadActive(scope.sessionID);
+      if (!sameRevision(fresh, stored, authority)) throw new Error("El plan cambio durante la reanudacion.");
+      const pending = await pendingDependencies(fresh, adapter, authority);
+      const now = Date.now();
+      const next = pending.length > 0 ? blockPlan(fresh, pending, now, authority)
+        : seal({ ...fresh, phase: "running", startedAt: fresh.startedAt ?? now, updatedAt: now,
+          blockedBy: undefined, blockedAt: undefined, pausedAt: undefined }, authority);
+      await adapter.save(next);
+      return next;
+    }
+    if (stored.phase !== "running" && stored.phase !== "paused") {
+      throw new Error("Solo un plan iniciado puede completarse.");
+    }
+    await adapter.confirm("complete", stored);
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, stored, authority)) throw new Error("El plan cambio durante el cierre.");
+    const pending = await pendingDependencies(fresh, adapter, authority);
+    if (pending.length > 0) throw new Error("El plan no puede completarse con dependencias pendientes.");
+    const now = Date.now();
+    const next = seal({ ...fresh, phase: "completed", completedAt: now, updatedAt: now }, authority);
+    await adapter.save(next);
+    return next;
   });
 }
 
@@ -117,147 +199,272 @@ async function serialize<T>(sessionID: string, operation: () => Promise<T>): Pro
 }
 
 export function proposePlan(
-  scope: PlanScope, input: PlanInput, now = Date.now(), presentationInteractionID = CORE_INTERACTION_ID,
+  scope: PlanScope,
+  input: PlanInput,
+  now = Date.now(),
+  presentationInteractionID = CORE_INTERACTION_ID,
+  planID = randomID(),
+  authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
 ): PlanState {
-  if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
-    throw new Error("Sesion/proyecto/politica de plan no evaluable.");
-  }
+  validateScope(scope, now);
   if (!validInteractionID(presentationInteractionID)) throw new Error("Turno de presentacion no evaluable.");
-  if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
-    throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
-  }
-  if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || input.steps.length > 30 || input.actions.length > 80) {
-    throw new Error("Pasos/acciones de plan invalidos o demasiado extensos.");
-  }
-  if (scope.mode === "advisor" && (input.steps.length !== 0 || input.actions.length !== 0)) {
-    throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
-  }
-  if (scope.mode !== "advisor" && input.steps.length === 0) throw new Error("El plan requiere pasos visibles.");
-  if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000)) {
-    throw new Error("Paso de plan invalido.");
-  }
-  if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action)
-    || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {
-    throw new Error("La accion debe ser edit, shell o subagent con recurso exacto.");
-  }
-  if (JSON.stringify(input).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
-  const actions = [...new Map(input.actions.map((item) => [`${item.action}\0${item.resource}`, { ...item }])).values()]
-    .sort((a, b) => `${a.action}\0${a.resource}`.localeCompare(`${b.action}\0${b.resource}`));
-  const plan = { summary: input.summary.trim(), steps: [...input.steps], actions };
-  const revision = randomBytes(16).toString("hex");
-  const digest = createHash("sha256").update(JSON.stringify({
-    scope, plan, revision, presentationInteractionID,
-  })).digest("hex");
-  return {
-    version: 2, ...scope, presentationInteractionID, plan, digest, revision,
-    createdAt: now, expiresAt: now + PLAN_TTL_MS,
-  };
+  if (!/^[a-f0-9]{32}$/.test(planID)) throw new Error("Identidad de plan no evaluable.");
+  const plan = normalizePlan(scope.mode, input);
+  const revision = randomID();
+  const digest = digestPlan(scope, plan, planID, revision, presentationInteractionID);
+  return seal({
+    version: 3, planID, ...scope, presentationInteractionID, plan, digest, revision,
+    phase: "presented", createdAt: now, updatedAt: now, proof: "",
+  }, authority);
 }
 
-export function reviewPlan(state: PlanState, digest: string, now = Date.now()): PlanState {
-  assertCurrent(state, digest, now);
-  if (state.mode !== "assistant" || state.reviewedAt !== undefined) throw new Error("Revision de plan no aplicable.");
-  return { ...state, reviewedAt: now, reviewProof: receipt(state, "review", now) };
+export function reviewPlan(
+  state: PlanState,
+  digest: string,
+  now = Date.now(),
+  authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
+): PlanState {
+  assertCurrent(state, digest, now, authority);
+  if (state.mode !== "assistant" || state.phase !== "presented") throw new Error("Revision de plan no aplicable.");
+  return seal({ ...state, phase: "reviewed", reviewedAt: now, updatedAt: now }, authority);
 }
 
-export function authorizePlan(state: PlanState, digest: string, now = Date.now()): PlanState {
-  assertCurrent(state, digest, now);
-  if (state.mode === "advisor" || (state.mode === "assistant" && state.reviewedAt === undefined)) {
+export function authorizePlan(
+  state: PlanState,
+  digest: string,
+  now = Date.now(),
+  authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
+): PlanState {
+  assertCurrent(state, digest, now, authority);
+  if (state.mode === "advisor" || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) {
     throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
   }
-  if (state.authorizedAt !== undefined) throw new Error("El plan ya tiene una autorizacion vigente.");
-  return { ...state, authorizedAt: now, authorizationProof: receipt(state, "run", now) };
+  if (state.plan.dependencies.length > 0) throw new Error("Las dependencias deben validarse mediante el adaptador antes de ejecutar.");
+  return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
 }
 
-export function planAllows(state: unknown, scope: PlanScope, operation: PlannedAction, now = Date.now()): boolean {
-  if (!validState(state) || state.mode === "advisor" || scope.mode === "advisor" || state.mode !== scope.mode
-    || state.sessionID !== scope.sessionID || state.project !== scope.project || state.policyRevision !== scope.policyRevision
-    || state.createdAt > now || state.expiresAt <= now
-    || state.authorizedAt === undefined || state.authorizedAt > now) return false;
+export function planAllows(
+  state: unknown,
+  scope: PlanScope,
+  operation: PlannedAction,
+  now = Date.now(),
+  authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
+): boolean {
+  if (!validState(state, authority) || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor"
+    || !samePlanScope(state, scope) || state.createdAt > now || state.updatedAt > now) return false;
   return state.plan.actions.some(({ action, resource }) => action === operation.action && resource === operation.resource);
 }
 
-export function validState(state: unknown): state is PlanState {
+export function validState(state: unknown, authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY): state is PlanState {
   if (!state || typeof state !== "object" || Array.isArray(state)) return false;
   const value = state as Record<string, unknown>;
-  if (value.version !== 2 || typeof value.sessionID !== "string" || typeof value.project !== "string"
+  if (value.version !== 3 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID)
+    || typeof value.sessionID !== "string" || typeof value.project !== "string"
     || !["advisor", "assistant", "executor"].includes(String(value.mode))
     || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision)
     || !validInteractionID(value.presentationInteractionID)
     || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest)
     || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision)
-    || typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt)
-    || typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt)
-    || value.expiresAt <= value.createdAt || value.expiresAt - value.createdAt > PLAN_TTL_MS
-    || (value.reviewedAt !== undefined && (typeof value.reviewedAt !== "number" || !Number.isFinite(value.reviewedAt)))
-    || (value.authorizedAt !== undefined && (typeof value.authorizedAt !== "number" || !Number.isFinite(value.authorizedAt)))
-    || (typeof value.reviewedAt === "number" && (value.reviewedAt < value.createdAt || value.reviewedAt >= value.expiresAt))
-    || (typeof value.authorizedAt === "number" && (value.authorizedAt < value.createdAt || value.authorizedAt >= value.expiresAt))
-    || (value.mode === "advisor" && (value.reviewedAt !== undefined || value.authorizedAt !== undefined))
-    || (value.mode === "executor" && value.reviewedAt !== undefined)
-    || (value.mode === "assistant" && value.authorizedAt !== undefined && (typeof value.reviewedAt !== "number"
-      || (value.authorizedAt as number) < value.reviewedAt))
-    || (value.reviewedAt === undefined && value.reviewProof !== undefined)
-    || (value.authorizedAt === undefined && value.authorizationProof !== undefined)
-    || !value.plan || typeof value.plan !== "object" || Array.isArray(value.plan)) return false;
-  const plan = value.plan as Record<string, unknown>;
-  if (typeof plan.summary !== "string" || !Array.isArray(plan.steps) || !Array.isArray(plan.actions)
-    || !plan.steps.every((step) => typeof step === "string")
-    || !plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
-      && typeof entry.action === "string" && typeof entry.resource === "string")) return false;
-  const expected = createHash("sha256").update(JSON.stringify({ scope: {
-    sessionID: value.sessionID, project: value.project, mode: value.mode, policyRevision: value.policyRevision,
-  }, plan, revision: value.revision, presentationInteractionID: value.presentationInteractionID })).digest("hex");
-  if (expected !== value.digest) return false;
-  const planState = value as unknown as PlanState;
-  return (value.reviewedAt === undefined || verifyReceipt(planState, "review", value.reviewedAt, value.reviewProof))
-    && (value.authorizedAt === undefined || verifyReceipt(planState, "run", value.authorizedAt, value.authorizationProof));
+    || typeof value.phase !== "string" || !PHASES.has(value.phase as PlanPhase)
+    || !validTime(value.createdAt) || !validTime(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number)
+    || !validOptionalTimes(value)
+    || !validPlan(value.plan)
+    || typeof value.proof !== "string") return false;
+  const plan = value.plan as Required<PlanInput>;
+  const expected = digestPlan({
+    sessionID: value.sessionID as string, project: value.project as string,
+    mode: value.mode as MalahorMode, policyRevision: value.policyRevision as string,
+  }, plan, value.planID, value.revision, value.presentationInteractionID as string);
+  if (expected !== value.digest || !validPhase(value)) return false;
+  return authority.verify(statePayload(value), value.proof);
 }
 
 export function renderPlan(state: PlanState): string {
+  const dependencies = state.plan.dependencies.length > 0
+    ? state.plan.dependencies.map((item) => `- ${item.planID}@${item.revision.slice(0, 12)}`)
+    : ["- Ninguna."];
   return [
-    `Plan Malahor (${state.mode}) · ${state.digest.slice(0, 12)}`,
+    `Plan Malahor (${state.mode}) · ${state.planID.slice(0, 12)} · revision ${state.revision.slice(0, 12)}`,
+    `Estado: ${state.phase}`,
     "",
     "Resumen",
     state.plan.summary,
     "",
     "Pasos",
-    ...(state.plan.steps.length > 0
-      ? state.plan.steps.map((step, index) => `${index + 1}. ${step}`)
-      : ["- Sin pasos ejecutables."]),
+    ...(state.plan.steps.length > 0 ? state.plan.steps.map((step, index) => `${index + 1}. ${step}`) : ["- Sin pasos ejecutables."]),
+    "",
+    "Dependencias",
+    ...dependencies,
     "",
     "Acciones y efectos exactos",
     ...(state.plan.actions.length > 0
       ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`)
-      : ["- Ninguna acción ejecutable."]),
+      : ["- Ninguna accion ejecutable."]),
     "",
-    `Caduca: ${new Date(state.expiresAt).toISOString()}`,
-    state.mode === "advisor"
-      ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto."
-      : "Siguiente: muestra el plan completo y termina este turno. Espera un turno posterior y una solicitud posterior del usuario antes de pedir aprobacion.",
+    "Vigencia: sin caducidad temporal; cambia solo por revision, estado, proyecto, modo o politica.",
+    state.mode === "advisor" ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto."
+      : "Siguiente: muestra el plan completo y termina este turno. Espera una solicitud posterior del usuario antes de pedir aprobacion.",
   ].join("\n");
 }
 
-function assertCurrent(state: PlanState, digest: string, now: number): void {
-  if (!validState(state) || state.digest !== digest || !Number.isFinite(now) || state.expiresAt <= now) {
-    throw new Error("Plan cambiado, expirado o no evaluable: vuelve a presentarlo.");
+function normalizePlan(mode: MalahorMode, input: PlanInput): Required<PlanInput> {
+  if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
+    throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
+  }
+  const dependencies = input.dependencies ?? [];
+  if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || !Array.isArray(dependencies)
+    || input.steps.length > 30 || input.actions.length > 80 || dependencies.length > 30) {
+    throw new Error("Pasos, acciones o dependencias invalidos o demasiado extensos.");
+  }
+  if (mode === "advisor" && (input.steps.length !== 0 || input.actions.length !== 0 || dependencies.length !== 0)) {
+    throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
+  }
+  if (mode !== "advisor" && input.steps.length === 0) throw new Error("El plan requiere pasos visibles.");
+  if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000)) throw new Error("Paso de plan invalido.");
+  if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action)
+    || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {
+    throw new Error("La accion debe ser edit, shell o subagent con recurso exacto.");
+  }
+  if (dependencies.some((item) => !item || !/^[a-f0-9]{32}$/.test(item.planID) || !/^[a-f0-9]{32}$/.test(item.revision))) {
+    throw new Error("Dependencia de plan invalida.");
+  }
+  if (JSON.stringify(input).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
+  const actions = uniqueSorted(input.actions, (item) => `${item.action}\0${item.resource}`);
+  const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\0${item.revision}`);
+  return { summary: input.summary.trim(), steps: [...input.steps], actions, dependencies: normalizedDependencies };
+}
+
+async function assertDependencyGraph(state: PlanState, adapter: PlanningAdapter, authority: PlanningAuthority): Promise<void> {
+  const visit = async (dependencies: PlanDependency[], trail: Set<string>): Promise<void> => {
+    for (const dependency of dependencies) {
+      if (dependency.planID === state.planID || trail.has(dependency.planID)) throw new Error("Ciclo de dependencias de plan detectado.");
+      const raw = await adapter.loadPlan(dependency.planID);
+      if (!validState(raw, authority) || raw.project !== state.project || raw.revision !== dependency.revision) {
+        throw new Error(`Dependencia de plan no evaluable: ${dependency.planID}.`);
+      }
+      const next = new Set(trail);
+      next.add(dependency.planID);
+      await visit(raw.plan.dependencies, next);
+    }
+  };
+  await visit(state.plan.dependencies, new Set([state.planID]));
+}
+
+async function pendingDependencies(
+  state: PlanState, adapter: PlanningAdapter, authority: PlanningAuthority,
+): Promise<PlanDependency[]> {
+  const pending: PlanDependency[] = [];
+  for (const dependency of state.plan.dependencies) {
+    const raw = await adapter.loadPlan(dependency.planID);
+    if (!validState(raw, authority) || raw.project !== state.project
+      || raw.revision !== dependency.revision || raw.phase !== "completed") pending.push(dependency);
+  }
+  return pending;
+}
+
+function blockPlan(state: PlanState, blockedBy: PlanDependency[], now: number, authority: PlanningAuthority): PlanState {
+  return seal({ ...state, phase: "blocked", authorizedAt: state.authorizedAt ?? now, blockedAt: now,
+    blockedBy, updatedAt: now }, authority);
+}
+
+function assertCurrent(state: PlanState, digest: string, now: number, authority: PlanningAuthority): void {
+  if (!validState(state, authority) || state.digest !== digest || !Number.isFinite(now) || state.createdAt > now) {
+    throw new Error("Plan cambiado o no evaluable: vuelve a presentarlo.");
   }
 }
 
-function receipt(state: PlanState, kind: "review" | "run", at: number): string {
-  return createHmac("sha256", receiptKey).update(JSON.stringify({
-    kind, sessionID: state.sessionID, project: state.project, mode: state.mode, policyRevision: state.policyRevision,
-    digest: state.digest, revision: state.revision, presentationInteractionID: state.presentationInteractionID, at,
-    reviewProof: kind === "run" ? state.reviewProof ?? null : null,
-  })).digest("hex");
+function seal(state: PlanState, authority: PlanningAuthority): PlanState {
+  const next = { ...state, proof: "" };
+  return { ...next, proof: authority.sign(statePayload(next as unknown as Record<string, unknown>)) };
 }
 
-function verifyReceipt(state: PlanState, kind: "review" | "run", at: number, proof: unknown): boolean {
-  if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof)) return false;
-  return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(receipt(state, kind, at), "hex"));
+function statePayload(value: Record<string, unknown>): string {
+  const { proof: _proof, ...payload } = value;
+  return canonical(payload);
+}
+
+function digestPlan(
+  scope: PlanScope, plan: Required<PlanInput>, planID: unknown, revision: unknown, presentationInteractionID: string,
+): string {
+  return createHash("sha256").update(canonical({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
+}
+
+function sameRevision(value: unknown, expected: PlanState, authority: PlanningAuthority): value is PlanState {
+  return validState(value, authority) && value.planID === expected.planID
+    && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
+}
+
+function samePlanScope(state: PlanState, scope: PlanScope): boolean {
+  return state.sessionID === scope.sessionID && state.project === scope.project
+    && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
+}
+
+function validPlan(value: unknown): value is Required<PlanInput> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const plan = value as Record<string, unknown>;
+  return typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions)
+    && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string")
+    && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+      && ACTIONS.has(String((entry as Record<string, unknown>).action))
+      && typeof (entry as Record<string, unknown>).resource === "string")
+    && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+      && /^[a-f0-9]{32}$/.test(String((entry as Record<string, unknown>).planID))
+      && /^[a-f0-9]{32}$/.test(String((entry as Record<string, unknown>).revision)));
+}
+
+function validPhase(value: Record<string, unknown>): boolean {
+  const phase = value.phase as PlanPhase;
+  if (value.mode === "advisor" && phase !== "presented" && phase !== "revoked" && phase !== "superseded") return false;
+  if (phase === "reviewed" && (value.mode !== "assistant" || !validTime(value.reviewedAt))) return false;
+  if (["running", "paused", "blocked", "completed"].includes(phase)
+    && (!validTime(value.authorizedAt) || (phase !== "blocked" && !validTime(value.startedAt)))) return false;
+  if (phase === "paused" && !validTime(value.pausedAt)) return false;
+  if (phase === "blocked" && (!validTime(value.blockedAt) || !Array.isArray(value.blockedBy) || value.blockedBy.length === 0)) return false;
+  if (phase === "completed" && !validTime(value.completedAt)) return false;
+  if (phase === "revoked" && !validTime(value.revokedAt)) return false;
+  if (phase === "superseded" && !validTime(value.supersededAt)) return false;
+  return true;
+}
+
+function validOptionalTimes(value: Record<string, unknown>): boolean {
+  return ["reviewedAt", "authorizedAt", "startedAt", "pausedAt", "blockedAt", "completedAt", "revokedAt", "supersededAt"]
+    .every((key) => value[key] === undefined || validTime(value[key]));
+}
+
+function validateScope(scope: PlanScope, now: number): void {
+  if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
+    throw new Error("Sesion/proyecto/politica de plan no evaluable.");
+  }
+}
+
+function validTime(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function validInteractionID(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 256
-    && !/[\u0000-\u001f\u007f]/.test(value);
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function randomID(): string {
+  return randomBytes(16).toString("hex");
+}
+
+function uniqueSorted<T extends object>(items: T[], key: (item: T) => string): T[] {
+  return [...new Map(items.map((item) => [key(item), { ...item } as T])).values()]
+    .sort((left, right) => compareText(key(left), key(right)));
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => compareText(left, right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

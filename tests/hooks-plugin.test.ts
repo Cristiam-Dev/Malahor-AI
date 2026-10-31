@@ -445,6 +445,20 @@ describe("adaptador de plugin V2", () => {
     expect(permission.effect).toBe("deny");
   });
 
+  test("reconoce malahor_plan_control sin abrir tools desconocidas", async () => {
+    writeProjectPolicy({ integrations: { blockUnapprovedIntegrations: true } });
+    const options = { cwd: repo, permissionRegistered: true, shellRegistered: true, env };
+    const control = await evaluateToolHook({
+      tool: "malahor_plan_control",
+      input: { action: "status" },
+    }, options);
+    const unknown = await evaluateToolHook({ tool: "malahor_unknown", input: {} }, options);
+
+    expect(control.decision).toBe("allow");
+    expect(unknown.decision).toBe("deny");
+    expect(unknown.violations.some((violation) => violation.id === "MAL-HOOK-TOOL-UNKNOWN")).toBe(true);
+  });
+
   test("tool hook pide aprobacion para rutas fuera de raices sin borrar el control", async () => {
     writeProjectPolicy({ files: { requireApprovalOutsideRoots: true } });
 

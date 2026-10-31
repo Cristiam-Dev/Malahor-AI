@@ -163,6 +163,12 @@ describe("raíces registradas por proyecto", () => {
     expect(order).toMatch(/obsidian.*habilitad/i);
   });
 
+  test("el protocolo mantiene planes sin TTL y dependencias sin autoarranque", () => {
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/no caduca por tiempo/i);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toContain("malahor_plan_control");
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/dependencia.*no hereda permisos.*nunca inicia autom[aá]ticamente/is);
+  });
+
   test("resuelve la raíz registrada al trabajar desde otra ubicación", () => {
     const { projects, paths } = fixture();
     registerProjectRoot(projects, "malahor", paths.cwd, false);

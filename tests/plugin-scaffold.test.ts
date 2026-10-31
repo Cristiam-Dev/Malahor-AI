@@ -94,7 +94,9 @@ describe("scaffold del plugin", () => {
       "permission.evaluate": true,
       "tool.execute.before": true,
       "planning.v2": true,
+      "planning.authority": true,
       "mode.command": true,
+      "plan.command": true,
       "shell.create.before": true,
       "session.prompt.before": true,
       "session.context.before": true,
@@ -148,7 +150,7 @@ describe("scaffold del plugin", () => {
       expect(capabilities["planning.v2"]).toBe(true);
       expect(capabilities["planning.v1"]).toBeUndefined();
       const text = (input.system as Array<{ text: string }>).map((item) => item.text).join("\n");
-      expect(text.match(/malahor-planning:v2/g) ?? []).toHaveLength(1);
+      expect(text.match(/malahor-planning:v3/g) ?? []).toHaveLength(1);
       expect(text).not.toContain("malahor-planning:v1");
       expect(text).toMatch(/plan completo/i);
       expect(text).toMatch(/termina(?:r)? (?:este )?turno/i);

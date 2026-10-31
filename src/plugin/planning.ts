@@ -5,9 +5,10 @@ import { registeredProjectRoots } from "../cli/core/context";
 import { MODE_CHANGE_ACTION, parseModeName, previewModeChange } from "../cli/core/mode";
 import { resolvePaths } from "../cli/core/paths";
 import {
-  planAllows, presentPlan, renderPlan, requestPlanExecution, validState,
-  type PlanInput, type PlannedAction, type PlanScope, type PlanState, type PlanningAdapter,
+  controlPlan, DEFAULT_PLANNING_AUTHORITY, planAllows, presentPlan, renderPlan, requestPlanExecution, validState,
+  type PlanControl, type PlanInput, type PlannedAction, type PlanScope, type PlanState, type PlanningAdapter,
 } from "../cli/core/planning";
+import type { PlanningAuthority } from "../cli/core/planning-authority";
 import { detectSecretKinds, type PluginAdapterOptions } from "../cli/core/hooks/plugin-adapter";
 
 export interface PlanningStorage {
@@ -44,9 +45,12 @@ export interface PlanningTools {
 
 const REVIEW_ACTION = "malahor_plan_review";
 const RUN_ACTION = "malahor_plan_run";
+const RESUME_ACTION = "malahor_plan_resume";
+const COMPLETE_ACTION = "malahor_plan_complete";
+const fallbackAuthority = DEFAULT_PLANNING_AUTHORITY;
 const READ_ONLY_TOOLS = new Set([
   "read", "glob", "grep", "webfetch", "websearch", "list", "question", "skill",
-  "todowrite", "todoread", "invalid", "malahor_plan", "malahor_run",
+  "todowrite", "todoread", "invalid", "malahor_plan", "malahor_run", "malahor_plan_control",
 ]);
 const PROTECTED = new Set(["edit", "shell", "subagent"]);
 const CODE_READ_TOOLS = new Set(["read", "glob", "grep"]);
@@ -54,6 +58,7 @@ const CODE_READ_TOOLS = new Set(["read", "glob", "grep"]);
 /** Solo las acciones declaradas se median aquí; las demás políticas del host siguen vigentes. */
 export async function evaluatePlanningPermission(
   input: Record<string, unknown>, options: PluginAdapterOptions, storage?: PlanningStorage,
+  authority: PlanningAuthority = fallbackAuthority,
 ): Promise<void> {
   const action = text(input.action);
   const normalized = permissionAction(action);
@@ -81,22 +86,25 @@ export async function evaluatePlanningPermission(
     }
     return;
   }
-  if (action === REVIEW_ACTION || action === RUN_ACTION) {
-    const state = resolved && await readPlan(storage, resolved.scope.sessionID);
+  if (action === REVIEW_ACTION || action === RUN_ACTION || action === RESUME_ACTION || action === COMPLETE_ACTION) {
+    const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
     const digest = Array.isArray(input.resources) ? input.resources[0] : undefined;
     if (!state || digest !== state.digest || state.project !== resolved?.scope.project
       || state.mode !== resolved.scope.mode || state.policyRevision !== resolved.scope.policyRevision
-      || state.expiresAt <= Date.now()
-      || (action === REVIEW_ACTION && (state.mode !== "assistant" || state.reviewedAt !== undefined))
+      || (action === REVIEW_ACTION && (state.mode !== "assistant" || state.phase !== "presented"))
       || (action === RUN_ACTION && (state.mode === "advisor" || state.plan.actions.length === 0
-        || (state.mode === "assistant" && state.reviewedAt === undefined)))) {
+        || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")))
+      || (action === RESUME_ACTION && !["paused", "blocked"].includes(state.phase))
+      || (action === COMPLETE_ACTION && !["running", "paused"].includes(state.phase))) {
       deny(input, "Plan no vigente o confirmacion fuera de orden.");
       return;
     }
     input.effect = "ask"; // Nunca heredar una aprobacion persistente 'always'.
     input.message = action === REVIEW_ACTION
       ? `Revisa el plan; esta primera confirmacion NO autoriza ejecutar:\n${renderPlan(state)}`
-      : state.mode === "executor"
+      : action === RESUME_ACTION ? `Reanuda SOLO el plan y revision mostrados:\n${renderPlan(state)}`
+        : action === COMPLETE_ACTION ? `Confirma el cierre del plan; puede desbloquear dependencias, pero no inicia otros planes:\n${renderPlan(state)}`
+        : state.mode === "executor"
         ? `Aprobacion previa del plan para ejecutar SOLO sus acciones:\n${renderPlan(state)}`
         : `Segunda confirmacion: ejecuta SOLO las acciones del plan revisado:\n${renderPlan(state)}`;
     return;
@@ -119,11 +127,11 @@ export async function evaluatePlanningPermission(
     deny(input, "El asesor no ejecuta acciones de programacion ni con una solicitud explicita.");
     return;
   }
-  if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage)) return;
-  const state = await readPlan(storage, resolved.scope.sessionID);
+  if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority)) return;
+  const state = await readPlan(storage, resolved.scope.sessionID, authority);
   const resources = Array.isArray(input.resources) ? input.resources : [];
   if (resources.length === 0 || resources.some((item) => typeof item !== "string"
-    || !planAllows(state, resolved.scope, normalizeAction(normalized, item, resolved.directory)))) {
+    || !planAllows(state, resolved.scope, normalizeAction(normalized, item, resolved.directory), Date.now(), authority))) {
     deny(input, "Accion no incluida en un plan vigente y confirmado.");
   }
 }
@@ -131,6 +139,7 @@ export async function evaluatePlanningPermission(
 /** Segunda frontera: rutas directas y argumentos de tool, no solo permission.evaluate. */
 export async function evaluatePlanningTool(
   input: Record<string, unknown>, options: PluginAdapterOptions, storage?: PlanningStorage,
+  authority: PlanningAuthority = fallbackAuthority,
 ): Promise<void> {
   const tool = text(input.tool);
   if (routineTool(tool)) return;
@@ -144,16 +153,17 @@ export async function evaluatePlanningTool(
     throw new Error("Malahor: el asesor no ejecuta acciones de programacion.");
   }
   if (["edit", "write", "patch", "shell", "bash"].includes(tool)
-    && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage)) return;
+    && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority)) return;
   const actions = toolActions(tool, input.input, resolved.directory);
-  const state = await readPlan(storage, resolved.scope.sessionID);
-  if (!actions || actions.length === 0 || actions.some((operation) => !planAllows(state, resolved.scope, operation))) {
+  const state = await readPlan(storage, resolved.scope.sessionID, authority);
+  if (!actions || actions.length === 0 || actions.some((operation) => !planAllows(state, resolved.scope, operation, Date.now(), authority))) {
     throw new Error(`Malahor: ${tool || "tool"} fuera de un plan vigente y confirmado.`);
   }
 }
 
 export async function registerPlanningTools(
   tools: PlanningTools, approvals: ApprovalPort, storage: PlanningStorage, options: PluginAdapterOptions,
+  authority: PlanningAuthority = fallbackAuthority,
 ): Promise<{ dispose?: () => Promise<void> | void } | void> {
   return tools.transform((editor) => {
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
@@ -168,6 +178,10 @@ export async function registerPlanningTools(
             type: "object", properties: { action: { type: "string" }, resource: { type: "string" } },
             required: ["action", "resource"], additionalProperties: false,
           } },
+          dependencies: { type: "array", items: {
+            type: "object", properties: { planID: { type: "string" }, revision: { type: "string" } },
+            required: ["planID", "revision"], additionalProperties: false,
+          } },
         }, required: ["summary", "steps", "actions"], additionalProperties: false,
       },
       options: { namespace: "malahor", codemode: false },
@@ -178,7 +192,7 @@ export async function registerPlanningTools(
         if (detectSecretKinds(raw).length > 0) throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
         const state = await presentPlan(
-          resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call),
+          resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority,
         );
         return { content: `${renderPlan(state)}\nDigest completo: ${state.digest}` };
       },
@@ -193,9 +207,30 @@ export async function registerPlanningTools(
         if (call.agent !== "malahor") throw new Error("Solo el primario puede solicitar ejecucion.");
         const digest = text((value as { digest?: unknown }).digest);
         const state = await requestPlanExecution(
-          resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call),
+          resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call), authority,
         );
-        return { content: `Plan ${state.digest.slice(0, 12)} autorizado hasta ${new Date(state.expiresAt).toISOString()}. Solo operaciones declaradas; guardrails vigentes.` };
+        return { content: state.phase === "blocked"
+          ? `Plan ${state.planID.slice(0, 12)} autorizado pero bloqueado por dependencias. No se ejecutara automaticamente.`
+          : `Plan ${state.planID.slice(0, 12)} revision ${state.revision.slice(0, 12)} en ejecucion sin caducidad temporal. Solo operaciones declaradas; guardrails vigentes.` };
+      },
+    });
+    editor.add({
+      name: "plan_control",
+      description: "Consulta, pausa, reanuda, revoca o completa el plan activo sin ampliar sus efectos.",
+      input: { type: "object", properties: {
+        action: { type: "string", enum: ["status", "pause", "resume", "revoke", "complete"] },
+      }, required: ["action"], additionalProperties: false },
+      options: { namespace: "malahor", codemode: false },
+      execute: async (value: unknown, call: ToolCall) => {
+        const resolved = await requireScope(call, options);
+        if (call.agent !== "malahor") throw new Error("Solo el primario puede controlar el plan.");
+        const action = text((value as { action?: unknown }).action) as PlanControl;
+        if (!["status", "pause", "resume", "revoke", "complete"].includes(action)) {
+          throw new Error("Control de plan invalido.");
+        }
+        const state = await controlPlan(resolved.scope, action,
+          planningAdapter(storage, approvals, call), authority);
+        return { content: renderPlan(state) };
       },
     });
   });
@@ -203,37 +238,56 @@ export async function registerPlanningTools(
 
 function planningAdapter(storage: PlanningStorage, port: ApprovalPort, call: ToolCall): PlanningAdapter {
   return {
-    load: (sessionID) => storage.get(planKey(sessionID)),
-    save: (state) => storage.set(planKey(state.sessionID), state),
-    confirm: (kind, state) => ask(port, call, kind === "review" ? REVIEW_ACTION : RUN_ACTION, state.digest),
+    loadActive: (sessionID) => storage.get(planKey(sessionID)),
+    loadPlan: (planID) => storage.get(planRecordKey(planID)),
+    save: async (state) => {
+      await storage.set(planRevisionKey(state.planID, state.revision), state);
+      await storage.set(planRecordKey(state.planID), state);
+      await storage.set(planKey(state.sessionID), state);
+    },
+    confirm: (kind, state) => ask(port, call,
+      kind === "review" ? REVIEW_ACTION : kind === "run" ? RUN_ACTION
+        : kind === "resume" ? RESUME_ACTION : COMPLETE_ACTION, state.digest),
   };
 }
 
 /** El subagente hereda SOLO la delegacion explicitamente autorizada; el host conserva sus permisos propios. */
 async function delegatedSpecialist(
   sessionID: unknown, scope: PlanScope, options: PluginAdapterOptions, storage?: PlanningStorage,
+  authority: PlanningAuthority = fallbackAuthority,
 ): Promise<boolean> {
   if (!storage || typeof sessionID !== "string" || !options.resolveParentSession) return false;
   try {
     const parent = await options.resolveParentSession(sessionID);
     if (!parent || !["malahor-diagnostico", "malahor-testing"].includes(parent.agent)) return false;
-    const state = await readPlan(storage, parent.parentID);
-    return planAllows(state, { ...scope, sessionID: parent.parentID }, { action: "subagent", resource: parent.agent });
+    const state = await readPlan(storage, parent.parentID, authority);
+    return planAllows(state, { ...scope, sessionID: parent.parentID }, { action: "subagent", resource: parent.agent }, Date.now(), authority);
   } catch { return false; }
 }
 
 export function planKey(sessionID: string): string {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID)) throw new Error("ID de sesion no evaluable.");
-  return `planning/v2/${sessionID}`;
+  return `planning/v3/sessions/${sessionID}`;
+}
+
+export function planRecordKey(planID: string): string {
+  if (!/^[a-f0-9]{32}$/.test(planID)) throw new Error("ID de plan no evaluable.");
+  return `planning/v3/plans/${planID}`;
+}
+
+export function planRevisionKey(planID: string, revision: string): string {
+  if (!/^[a-f0-9]{32}$/.test(revision)) throw new Error("Revision de plan no evaluable.");
+  return `${planRecordKey(planID)}/revisions/${revision}`;
 }
 
 export async function injectPlanningInstructions(
   input: Record<string, unknown>, options: PluginAdapterOptions, storage?: PlanningStorage,
+  authority: PlanningAuthority = fallbackAuthority,
 ): Promise<void> {
   // Los especialistas tienen permisos propios; la mediacion de su lanzamiento es del primario.
   if (input.agent !== "malahor") return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
-  const state = resolved && await readPlan(storage, resolved.scope.sessionID);
+  const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
   const mode = resolved?.scope.mode;
   const instructions = !resolved || !storage
     ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host."
@@ -246,13 +300,16 @@ export async function injectPlanningInstructions(
         "Despues de malahor_plan, muestra el plan completo y termina este turno; no invoques malahor_run en la misma respuesta.",
         "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
         "Un go previo a la presentacion no aprueba un plan todavia no visto.",
-        "El plan enumera rutas/comandos/subagentes exactos. Si cambian, presenta otro plan y vuelve a pedir confirmaciones.",
+        "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
+        "La autorizacion no caduca por tiempo. Pausa, reanuda, revoca o consulta estado con malahor_plan_control o /malahor-plan.",
+        "Las dependencias bloquean sin heredar permisos ni arrancar automaticamente.",
         "Las aprobaciones de plan no autorizan commit, push, stage, instalacion local ni evitan guardrails.",
-        state ? `Estado: ${state.authorizedAt !== undefined ? "autorizado" : state.reviewedAt !== undefined ? "revisado" : "presentado"}; revision ${state.digest.slice(0, 12)}; caduca ${new Date(state.expiresAt).toISOString()}.`
+        state ? `Estado: ${state.phase}; plan ${state.planID.slice(0, 12)}; revision ${state.revision.slice(0, 12)}; sin caducidad temporal.`
           : "Estado: sin plan vigente.",
       ].join("\n");
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v2 -->";
+  const marker = "<!-- malahor-planning:v3 -->";
+  const previousMarker = "<!-- malahor-planning:v2 -->";
   const legacyMarker = "<!-- malahor-planning:v1 -->";
   for (const part of system) {
     if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") continue;
@@ -260,7 +317,7 @@ export async function injectPlanningInstructions(
       input.system = system;
       return;
     }
-    const legacyIndex = part.text.indexOf(legacyMarker);
+    const legacyIndex = Math.max(part.text.indexOf(previousMarker), part.text.indexOf(legacyMarker));
     if (legacyIndex >= 0) {
       part.text = `${part.text.slice(0, legacyIndex).trimEnd()}\n\n${marker}\n${instructions}`;
       input.system = system;
@@ -276,11 +333,13 @@ export async function injectPlanningInstructions(
   input.system = system;
 }
 
-async function readPlan(storage: PlanningStorage | undefined, sessionID: string): Promise<PlanState | undefined> {
+export async function readPlan(
+  storage: PlanningStorage | undefined, sessionID: string, authority: PlanningAuthority = fallbackAuthority,
+): Promise<PlanState | undefined> {
   if (!storage) return undefined;
   try {
     const record = await storage.get(planKey(sessionID));
-    return validState(record) ? record : undefined;
+    return validState(record, authority) ? record : undefined;
   } catch { return undefined; }
 }
 
@@ -297,7 +356,7 @@ async function requireScope(call: ToolCall, options: PluginAdapterOptions) {
   return resolved;
 }
 
-async function resolvePlanningScope(value: unknown, options: PluginAdapterOptions): Promise<{ scope: PlanScope; directory: string } | undefined> {
+export async function resolvePlanningScope(value: unknown, options: PluginAdapterOptions): Promise<{ scope: PlanScope; directory: string } | undefined> {
   if (typeof value !== "string" || !options.resolveSessionDirectory) return undefined;
   try {
     const directory = await options.resolveSessionDirectory(value);

@@ -6,8 +6,8 @@ import { loadConfig, type MalahorIntervention, type MalahorMode } from "../src/c
 import type { PluginAdapterOptions } from "../src/cli/core/hooks/plugin-adapter";
 import { MODE_CHANGE_ACTION, previewModeChange } from "../src/cli/core/mode";
 import {
-  authorizePlan, planAllows, proposePlan, reviewPlan, validState,
-  type PlanInput, type PlanScope, type PlanState,
+  authorizePlan, controlPlan, planAllows, presentPlan, proposePlan, requestPlanExecution, reviewPlan, validState,
+  type PlanInput, type PlanningAdapter, type PlanScope, type PlanState,
 } from "../src/cli/core/planning";
 import plugin from "../src/plugin/index";
 import {
@@ -158,7 +158,7 @@ async function registeredTools(onApproval?: (request: ApprovalRequest) => Promis
     },
   };
   const registration = await registerPlanningTools(tools, port, storage, options);
-  const execute = async (name: "plan" | "run", value: unknown, context = call()) => {
+  const execute = async (name: "plan" | "run" | "plan_control", value: unknown, context = call()) => {
     const definition = definitions.get(name);
     if (!definition || typeof definition.execute !== "function") throw new Error(`Tool ${name} no registrada`);
     return (definition.execute as (value: unknown, context: ReturnType<typeof call>) => Promise<{ content: string }>)(value, context);
@@ -259,14 +259,14 @@ describe("nucleo: transiciones y binding del plan", () => {
     expect(() => proposePlan(scope(), { ...input(), actions: [{ action: "edit", resource: "" }] }, NOW)).toThrow();
   });
 
-  test("el hash anterior, la caducidad exacta y cualquier recurso no previsto cierran acceso", () => {
+  test("el hash anterior y cualquier recurso no previsto cierran acceso, pero el tiempo no", () => {
     const presented = proposePlan(scope(), input(), NOW);
     const active = authorizePlan(reviewPlan(presented, presented.digest, NOW), presented.digest, NOW);
     const operation = input().actions[0]!;
     expect(() => reviewPlan(active, "0".repeat(64), NOW)).toThrow();
-    expect(planAllows(active, scope(), operation, active.expiresAt - 1)).toBe(true);
-    expect(planAllows(active, scope(), operation, active.expiresAt)).toBe(false);
-    expect(() => authorizePlan(reviewPlan(presented, presented.digest, NOW), presented.digest, active.expiresAt)).toThrow();
+    expect(planAllows(active, scope(), operation, NOW + 365 * 24 * 60 * 60_000)).toBe(true);
+    expect(authorizePlan(reviewPlan(presented, presented.digest, NOW), presented.digest,
+      NOW + 365 * 24 * 60 * 60_000).phase).toBe("running");
     expect(planAllows(active, scope(), { ...operation, resource: path.join(repo, "other.ts") }, NOW)).toBe(false);
     expect(planAllows(active, scope(), { action: "shell", resource: operation.resource }, NOW)).toBe(false);
     expect(planAllows(active, { ...scope(), sessionID: "ses_other" }, operation, NOW)).toBe(false);
@@ -298,6 +298,78 @@ describe("nucleo: transiciones y binding del plan", () => {
   });
 });
 
+describe("nucleo: dependencias y control persistente", () => {
+  test("una dependencia bloquea sin autoarranque y solo resume tras completarse", async () => {
+    const active = new Map<string, PlanState>();
+    const plans = new Map<string, PlanState>();
+    const confirmations: string[] = [];
+    const adapter: PlanningAdapter = {
+      loadActive: async (sessionID) => active.get(sessionID),
+      loadPlan: async (planID) => plans.get(planID),
+      save: async (state) => { active.set(state.sessionID, state); plans.set(state.planID, state); },
+      confirm: async (kind) => { confirmations.push(kind); },
+    };
+    const parentScope = scope("executor");
+    const parent = await presentPlan(parentScope, input(), "msg-parent-plan", adapter);
+    await requestPlanExecution(parentScope, parent.digest, "msg-parent-go", adapter);
+
+    const childScope = { ...parentScope, sessionID: "ses_child_dependency" };
+    const child = await presentPlan(childScope, {
+      ...input(),
+      dependencies: [{ planID: parent.planID, revision: parent.revision }],
+    }, "msg-child-plan", adapter);
+    const blocked = await requestPlanExecution(childScope, child.digest, "msg-child-go", adapter);
+    expect(blocked.phase).toBe("blocked");
+    expect(planAllows(blocked, childScope, child.plan.actions[0]!)).toBe(false);
+
+    const completedParent = await controlPlan(parentScope, "complete", adapter);
+    expect(completedParent.phase).toBe("completed");
+    expect(active.get(childScope.sessionID)?.phase).toBe("blocked");
+    const resumed = await controlPlan(childScope, "resume", adapter);
+    expect(resumed.phase).toBe("running");
+    expect(confirmations).toEqual(["run", "run", "complete", "resume"]);
+  });
+
+  test("rechaza ciclos al revisar un plan existente", async () => {
+    const active = new Map<string, PlanState>();
+    const plans = new Map<string, PlanState>();
+    const adapter: PlanningAdapter = {
+      loadActive: async (sessionID) => active.get(sessionID),
+      loadPlan: async (planID) => plans.get(planID),
+      save: async (state) => { active.set(state.sessionID, state); plans.set(state.planID, state); },
+      confirm: async () => undefined,
+    };
+    const firstScope = scope("executor");
+    const first = await presentPlan(firstScope, input(), "msg-cycle-a", adapter);
+    const secondScope = { ...firstScope, sessionID: "ses_cycle_b" };
+    const second = await presentPlan(secondScope, {
+      ...input(), dependencies: [{ planID: first.planID, revision: first.revision }],
+    }, "msg-cycle-b", adapter);
+    await expect(presentPlan(firstScope, {
+      ...input(), dependencies: [{ planID: second.planID, revision: second.revision }],
+    }, "msg-cycle-a2", adapter)).rejects.toThrow(/Ciclo/);
+  });
+
+  test("cambiar modo o politica reemplaza explicitamente el plan anterior", async () => {
+    const active = new Map<string, PlanState>();
+    const plans = new Map<string, PlanState>();
+    const adapter: PlanningAdapter = {
+      loadActive: async (sessionID) => active.get(sessionID),
+      loadPlan: async (planID) => plans.get(planID),
+      save: async (state) => { active.set(state.sessionID, state); plans.set(state.planID, state); },
+      confirm: async () => undefined,
+    };
+    const originalScope = scope("executor");
+    const original = await presentPlan(originalScope, input(), "msg-scope-original", adapter);
+    const changedScope = { ...originalScope, policyRevision: "b".repeat(32) };
+    const replacement = await presentPlan(changedScope, input(), "msg-scope-replacement", adapter);
+
+    expect(replacement.planID).not.toBe(original.planID);
+    expect(plans.get(original.planID)?.phase).toBe("superseded");
+    expect(active.get(originalScope.sessionID)?.planID).toBe(replacement.planID);
+  });
+});
+
 describe("adaptador: solicitudes de permiso y segunda frontera", () => {
   test("el cambio de modo siempre pide confirmacion nativa sin exponer la version interna", async () => {
     const preview = previewModeChange("ejecutar", env, repo);
@@ -323,7 +395,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     const review = { sessionID: SESSION, action: "malahor_plan_review", resources: [plan.digest], effect: "allow" } as Record<string, unknown>;
     await evaluatePlanningPermission(review, options, storage);
     expect(review.effect).toBe("ask");
-    expect(review.message).toContain(plan.digest.slice(0, 12));
+    expect(review.message).toContain(plan.planID.slice(0, 12));
 
     const denied = { ...review, effect: "deny" };
     await evaluatePlanningPermission(denied, options, storage);
@@ -339,13 +411,13 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     const run = { ...earlyRun, effect: "allow" };
     await evaluatePlanningPermission(run, options, storage);
     expect(run.effect).toBe("ask");
-    expect(run.message).toContain(plan.digest.slice(0, 12));
+    expect(run.message).toContain(plan.planID.slice(0, 12));
     const hostDenied = { ...run, effect: "deny" };
     await evaluatePlanningPermission(hostDenied, options, storage);
     expect(hostDenied.effect).toBe("deny");
   });
 
-  test("ejecutor solo pide run; asesor, plan vencido y sesion sin resolver no obtienen ask", async () => {
+  test("ejecutor solo pide run; asesor y sesion sin resolver no obtienen ask; la antiguedad no bloquea", async () => {
     configure("ejecutar");
     const plan = proposePlan(scope("executor"), input(), Date.now());
     records.set(planKey(SESSION), plan);
@@ -360,9 +432,9 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       expect(invalid.effect).toBe("deny");
     }
     records.set(planKey(SESSION), proposePlan(scope("executor"), input(), Date.now() - 31 * 60_000));
-    const expired = { ...request, effect: "allow", resources: [(records.get(planKey(SESSION)) as PlanState).digest] };
-    await evaluatePlanningPermission(expired, options, storage);
-    expect(expired.effect).toBe("deny");
+    const old = { ...request, effect: "allow", resources: [(records.get(planKey(SESSION)) as PlanState).digest] };
+    await evaluatePlanningPermission(old, options, storage);
+    expect(old.effect).toBe("ask");
     configure("acompanar");
     const concept = proposePlan(scope("advisor"), { summary: "Idea", steps: [], actions: [] });
     records.set(planKey(SESSION), concept);
@@ -597,24 +669,24 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     }
   });
 
-  test("malahor_plan guarda estado v2 ligado al turno y renderiza el plan completo por secciones", async () => {
+  test("malahor_plan guarda estado v3 ligado al turno y renderiza el plan completo por secciones", async () => {
     configure("ejecutar");
     const harness = await registeredTools();
     const planCall = call(SESSION, "malahor", "msg_executor_presentation");
     const result = await harness.execute("plan", input(), planCall);
 
-    expect(planKey(SESSION)).toBe(`planning/v2/${SESSION}`);
-    expect([...records.keys()]).toEqual([`planning/v2/${SESSION}`]);
-    const state = records.get(`planning/v2/${SESSION}`) as PlanState;
-    expect(state.version).toBe(2);
+    expect(planKey(SESSION)).toBe(`planning/v3/sessions/${SESSION}`);
+    expect(records.has(planKey(SESSION))).toBe(true);
+    const state = records.get(planKey(SESSION)) as PlanState;
+    expect(state.version).toBe(3);
     expect(presentationIdentity(state)).toBe(planCall.messageID);
     expect(validState(state)).toBe(true);
     expect(harness.approvals).toHaveLength(0);
     expect(result.content).toMatch(/^Resumen\b/im);
     expect(result.content).toMatch(/^Pasos\b/im);
     expect(result.content).toMatch(/^Acciones y efectos exactos\b/im);
-    expect(result.content).toMatch(/espera.*turno posterior/is);
-    expect(validState({ ...state, version: 1 })).toBe(false);
+    expect(result.content).toMatch(/termina.*turno.*espera.*solicitud posterior/is);
+    expect(validState({ ...state, version: 2 })).toBe(false);
     expect(validState(tamperPresentationIdentity(state))).toBe(false);
   });
 
@@ -625,7 +697,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const harness = await registeredTools((request) => {
       phases.push({ action: request.action, state: records.get(planKey(SESSION)) as PlanState });
     });
-    expect([...harness.definitions.keys()]).toEqual(["plan", "run"]);
+    expect([...harness.definitions.keys()]).toEqual(["plan", "run", "plan_control"]);
     expect(harness.definitions.get("plan")?.options).toMatchObject({ namespace: "malahor", codemode: false });
     const planCall = call(SESSION, "malahor", "msg_assistant_presentation");
     await harness.execute("plan", input(), planCall);
@@ -708,6 +780,23 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await evaluatePlanningPermission(advisor, options, storage);
     expect(advisor.effect).toBe("deny");
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, options, storage)).rejects.toThrow();
+  });
+
+  test("plan_control pausa, reanuda y completa sin ampliar efectos", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_control_plan"));
+    const presented = records.get(planKey(SESSION)) as PlanState;
+    await harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_control_go"));
+    await harness.execute("plan_control", { action: "pause" }, call(SESSION, "malahor", "msg_control_pause"));
+    expect((records.get(planKey(SESSION)) as PlanState).phase).toBe("paused");
+    await harness.execute("plan_control", { action: "resume" }, call(SESSION, "malahor", "msg_control_resume"));
+    expect((records.get(planKey(SESSION)) as PlanState).phase).toBe("running");
+    await harness.execute("plan_control", { action: "complete" }, call(SESSION, "malahor", "msg_control_complete"));
+    expect((records.get(planKey(SESSION)) as PlanState).phase).toBe("completed");
+    expect(harness.approvals.map((item) => item.action)).toEqual([
+      "malahor_plan_run", "malahor_plan_resume", "malahor_plan_complete",
+    ]);
   });
 
   test("reemplazo de plan revoca autorizacion anterior y rehace confirmaciones", async () => {
@@ -841,13 +930,13 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeUndefined();
   });
 
-  test("run rechaza estado vencido antes de pedir confirmacion al host", async () => {
+  test("run acepta un plan antiguo sin caducidad y aun pide confirmacion al host", async () => {
     configure("ejecutar");
     const harness = await registeredTools();
     const stale = proposePlan(scope("executor"), input(), Date.now() - 31 * 60_000);
     records.set(planKey(SESSION), stale);
-    await expect(harness.execute("run", { digest: stale.digest }, call(SESSION, "malahor", RUN_MESSAGE))).rejects.toThrow();
-    expect(harness.approvals).toHaveLength(0);
+    await harness.execute("run", { digest: stale.digest }, call(SESSION, "malahor", RUN_MESSAGE));
+    expect(harness.approvals).toHaveLength(1);
   });
 
   test("cambiar intervention tras revisar revoca el plan antes de la segunda confirmacion", async () => {
@@ -878,7 +967,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await injectPlanningInstructions(instructions, options, storage);
     await injectPlanningInstructions(instructions, options, storage);
     const text = (instructions.system as Array<{ text: string }>)[0]?.text ?? "";
-    expect(text.match(/malahor-planning:v2/g) ?? []).toHaveLength(1);
+    expect(text.match(/malahor-planning:v3/g) ?? []).toHaveLength(1);
     expect(text).not.toContain("malahor-planning:v1");
     expect(text).toMatch(/plan completo/i);
     expect(text).toMatch(/termina(?:r)? (?:este )?turno/i);
@@ -920,7 +1009,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       storage,
     });
     try {
-      expect(definitions).toEqual(["plan", "run"]);
+      expect(definitions).toEqual(["plan", "run", "plan_control"]);
       expect(hooks.has("permission.evaluate")).toBe(true);
       expect(hooks.has("tool.execute.before")).toBe(true);
       expect(hooks.has("shell.create.before")).toBe(true);

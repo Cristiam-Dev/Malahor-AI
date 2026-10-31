@@ -555,6 +555,7 @@ const KNOWN_OPENCODE_TOOLS = new Set([
   "subagent",
   "malahor_plan",
   "malahor_run",
+  "malahor_plan_control",
   "invalid",
 ]);
 
