@@ -107,6 +107,33 @@ function writeFrontmatter(agentId: MalahorAgentId, lines: string[]): string {
   return file;
 }
 
+function expectTestingEditGuardrails(content: string, host: "v1" | "v2"): void {
+  const editRule = (resource: string, effect: "allow" | "deny"): string =>
+    host === "v1"
+      ? `    "${resource}": ${effect}`
+      : `  - action: edit\n    resource: "${resource}"\n    effect: ${effect}`;
+  const denyAll = editRule("*", "deny");
+  const rootTests = editRule("tests/**", "allow");
+  const nestedTests = editRule("**/tests/**", "allow");
+
+  expect(content).toContain(denyAll);
+  expect(content).toContain(rootTests);
+  expect(content).toContain(nestedTests);
+  expect(content.indexOf(rootTests)).toBeGreaterThan(content.indexOf(denyAll));
+  expect(content.indexOf(nestedTests)).toBeGreaterThan(content.indexOf(denyAll));
+  expect(content).not.toContain(editRule("src/**", "allow"));
+  expect(content).not.toContain(editRule("**/src/**", "allow"));
+}
+
+function matchesOpenCodeResource(pattern: string, resource: string): boolean {
+  const expression = [...pattern].map((character) => {
+    if (character === "*") return ".*";
+    if (character === "?") return ".";
+    return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
+  }).join("");
+  return new RegExp(`^${expression}$`).test(resource);
+}
+
 describe("agentes malahor gestionados", () => {
   test("assets V1/V2 de los tres agentes existen y declaran el contrato esperado", () => {
     expect(MALAHOR_AGENT_IDS).toEqual(["malahor", "malahor-diagnostico", "malahor-testing"]);
@@ -115,6 +142,9 @@ describe("agentes malahor gestionados", () => {
       for (const host of ["v1", "v2"] as const) {
         const asset = assetPath(host, agentId);
         expect(fs.existsSync(asset)).toBe(true);
+        if (agentId === "malahor-testing") {
+          expectTestingEditGuardrails(fs.readFileSync(asset, "utf8"), host);
+        }
         expect(agentContractProblems(asset, agentId)).toEqual([]);
         expect(readAgentContract(asset)).toEqual(EXPECTED_CONTRACTS[agentId]);
       }
@@ -153,9 +183,9 @@ describe("agentes malahor gestionados", () => {
 
     const testing = fs.readFileSync(malahorAgentPath(paths, "malahor-testing"), "utf8");
     expect(testing).toContain("mode: subagent");
+    expectTestingEditGuardrails(testing, "v2");
     expect(testing).toContain('resource: "**/*.test.*"');
     expect(testing).toContain('resource: "**/__tests__/**"');
-    expect(testing).toContain('resource: "**/tests/**"');
     expect(testing).toContain('resource: "bun test*"');
     expect(testing).not.toContain('resource: "malahor-*"');
 
@@ -184,8 +214,8 @@ describe("agentes malahor gestionados", () => {
 
     const testing = fs.readFileSync(malahorAgentPath(paths, "malahor-testing"), "utf8");
     expect(testing).toContain("bash:");
+    expectTestingEditGuardrails(testing, "v1");
     expect(testing).toContain('"**/*.test.*": allow');
-    expect(testing).toContain('"**/tests/**": allow');
     expect(testing).toContain('"bun test*": allow');
     expect(testing).toContain("question: deny");
     expect(testing).not.toContain("shell:");
@@ -404,6 +434,68 @@ describe("agentes malahor gestionados", () => {
     expect(overprivilegedProblems).toContain("mode no es subagent");
     expect(overprivilegedProblems).toContain("especialista no debe permitir malahor-*");
     expect(overprivilegedProblems).toContain("especialista no debe permitir question");
+  });
+
+  test("agentContractProblems exige tests en raiz ademas de tests anidados", () => {
+    const writeTestingContract = (editResources: string[]): string =>
+      writeFrontmatter("malahor-testing", [
+        "mode: subagent",
+        "permissions:",
+        "  - action: edit",
+        '    resource: "*"',
+        "    effect: deny",
+        ...editResources.flatMap((resource) => [
+          "  - action: edit",
+          `    resource: "${resource}"`,
+          "    effect: allow",
+        ]),
+        "  - action: shell",
+        '    resource: "*"',
+        "    effect: deny",
+        "  - action: shell",
+        '    resource: "bun test*"',
+        "    effect: allow",
+        "  - action: subagent",
+        '    resource: "*"',
+        "    effect: deny",
+        "  - action: question",
+        '    resource: "*"',
+        "    effect: deny",
+      ]);
+    const nestedTestResources = [
+      "**/*.test.*",
+      "**/*.spec.*",
+      "**/__tests__/**",
+      "**/tests/**",
+      "**/test/**",
+      "**/*_test.go",
+      "**/*_test.py",
+      "**/test_*.py",
+      "**/*Test.java",
+      "**/*Tests.cs",
+    ];
+    const rootTestsProblem = "falta allow de edit para tests/**";
+
+    const withoutRootTests = agentContractProblems(
+      writeTestingContract(nestedTestResources),
+      "malahor-testing",
+    );
+    expect(withoutRootTests).toEqual([rootTestsProblem]);
+
+    const withRootTests = agentContractProblems(
+      writeTestingContract([...nestedTestResources, "tests/**"]),
+      "malahor-testing",
+    );
+    expect(withRootTests).not.toContain(rootTestsProblem);
+    expect(withRootTests).toEqual([]);
+  });
+
+  test("tests/** cubre fixtures de raiz sin habilitar codigo de produccion", () => {
+    const fixture = "tests/fixtures/memory-bank-scopes.ts";
+    expect(matchesOpenCodeResource("tests/**", fixture)).toBe(true);
+    expect(matchesOpenCodeResource("**/tests/**", fixture)).toBe(false);
+    expect(matchesOpenCodeResource("**/tests/**", `packages/api/${fixture}`)).toBe(true);
+    expect(matchesOpenCodeResource("tests/**", "src/memory-bank-scopes.ts")).toBe(false);
   });
 
   test("validateInstallation exige los tres agentes y rechaza un especialista foreign", () => {

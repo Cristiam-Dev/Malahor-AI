@@ -25,6 +25,9 @@ permissions:
     resource: "**/__tests__/**"
     effect: allow
   - action: edit
+    resource: "tests/**"
+    effect: allow
+  - action: edit
     resource: "**/tests/**"
     effect: allow
   - action: edit

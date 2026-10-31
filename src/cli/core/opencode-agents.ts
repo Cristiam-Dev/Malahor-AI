@@ -281,7 +281,7 @@ export function agentContractProblems(
     if (!contract.hasEditAllow) problems.push("falta allow acotado de edit");
     if (!contract.hasShellAllow) problems.push("falta allow de shell de tests");
 
-    for (const glob of ["**/*.test.*", "**/__tests__/**", "**/tests/**"]) {
+    for (const glob of ["**/*.test.*", "**/__tests__/**", "tests/**", "**/tests/**"]) {
       if (!hasAllowedEditResource(frontmatter, glob)) {
         problems.push(`falta allow de edit para ${glob}`);
       }

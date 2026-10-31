@@ -11,6 +11,7 @@ permission:
     "**/*.test.*": allow
     "**/*.spec.*": allow
     "**/__tests__/**": allow
+    "tests/**": allow
     "**/tests/**": allow
     "**/test/**": allow
     "**/*_test.go": allow
