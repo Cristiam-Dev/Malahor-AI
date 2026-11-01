@@ -5,6 +5,7 @@ import { loadHookPolicy, parseHookProfile } from "../cli/core/hooks/policy-loade
 import { usesFilesystemResources } from "../cli/core/hooks/resources";
 import { HOOK_RESOURCE_KINDS, type HookEvent, type HookResourceKind } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
+import { parseGitIntent } from "../cli/core/git-intent";
 import { getObservation, listProjects, saveObservation, saveSessionSummary, searchObservations, type ObservationType } from "./db";
 import { contextForProject, memoryBrief } from "./context";
 import { deleteProjectMemory, inspectProjectMemory, moveMemory, previewMemoryMove, previewProjectDeletion } from "./admin";
@@ -112,6 +113,7 @@ function checkMalahorHooks(args: Record<string, unknown>): unknown {
     command: optionalStringArg(args.command),
     resourceKind,
     targetPaths,
+    gitIntent: parseGitIntent(args.intent),
     confirmation: optionalStringArg(args.confirm),
     approval,
     metadata,

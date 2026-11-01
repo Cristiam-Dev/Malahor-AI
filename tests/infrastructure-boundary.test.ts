@@ -193,7 +193,7 @@ describe("guard built-in de infraestructura", () => {
     expect(ordinary.decision).toBe("allow");
   });
 
-  test("stage, commit y push no heredan consentimiento Git", () => {
+  test("stage y commit conservan el ASK de infraestructura; push queda en DENY", () => {
     const root = temporaryRepo();
     const target = ".github/workflows/ci.yml";
     const stage = runHooks(context(root, {
@@ -218,13 +218,15 @@ describe("guard built-in de infraestructura", () => {
       confirmation: "CHECKS_OK",
     }));
 
-    for (const result of [stage, commit, push]) {
+    for (const result of [stage, commit]) {
       expect(result.decision).toBe("ask");
       expect(infrastructureAsk(result)).toBe(true);
     }
+    expect(push.decision).toBe("deny");
+    expect(push.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
   });
 
-  test("descubre rutas staged y outgoing aunque el caller no las declare", () => {
+  test("descubre rutas staged; un remoto se deniega sin inspeccionar outgoing", () => {
     const root = temporaryRepo();
     const target = ".github/workflows/ci.yml";
     fs.mkdirSync(path.join(root, ".github", "workflows"), { recursive: true });
@@ -249,7 +251,8 @@ describe("guard built-in de infraestructura", () => {
       event: "git.push.before",
       command: "git push",
     }));
-    expect(infrastructureAsk(outgoing)).toBe(true);
+    expect(outgoing.decision).toBe("deny");
+    expect(outgoing.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
   });
 
   test("git add exacto no hereda otro cambio protegido pero git add -A si", () => {

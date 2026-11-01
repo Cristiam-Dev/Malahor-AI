@@ -98,14 +98,15 @@ describe("malahor hooks", () => {
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-REPO-BOUNDARY")).toBe(true);
   });
 
-  test("bloquea comandos git destructivos", () => {
+  test("presenta target y pide aprobacion para Git local destructivo", () => {
     const result = runHooks(baseContext({
       event: "git.reset.before",
       command: "git reset --hard HEAD~1",
     }));
 
-    expect(result.decision).toBe("deny");
+    expect(result.decision).toBe("ask");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE")).toBe(true);
+    expect(result.violations.some((violation) => violation.message.includes("HEAD~1"))).toBe(true);
   });
 
   test("bloquea secretos antes de stage/commit", () => {
@@ -180,11 +181,11 @@ describe("malahor hooks", () => {
     expect(result.violations.length).toBe(2);
   });
 
-  test("push requiere evidencia de checks", () => {
+  test("push es hard DENY aunque el perfil pudiera rebajar otros controles", () => {
     const result = runHooks(baseContext({ event: "git.push.before", profile: "release" }));
 
-    expect(result.decision).toBe("ask");
-    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-PUSH-CHECKS")).toBe(true);
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
   });
 
   test("advierte mensajes de commit fuera del formato Malahor", () => {
@@ -210,7 +211,7 @@ describe("malahor hooks", () => {
     expect(result.decision).toBe("allow");
   });
 
-  test("bloquea commit real sin consentimiento explicito", () => {
+  test("pide consentimiento para commit real sin intencion explicita", () => {
     const result = runHooks(baseContext({
       event: "git.commit.before",
       command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
@@ -218,64 +219,175 @@ describe("malahor hooks", () => {
       profile: "release",
     }));
 
-    expect(result.decision).toBe("deny");
+    expect(result.decision).toBe("ask");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-CONSENT")).toBe(true);
   });
 
-  test("permite commit real con consentimiento explicito", () => {
-    const result = runHooks(baseContext({
+  test("tokens y metadata legacy no autorizan commit ni stage", () => {
+    const commit = runHooks(baseContext({
       event: "git.commit.before",
       command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
       targetPaths: ["src/fixture.ts"],
       confirmation: "USER_REQUESTED_COMMIT",
       profile: "release",
     }));
+    const stage = runHooks(baseContext({
+      event: "file.stage.before",
+      command: "git add -- src/fixture.ts",
+      targetPaths: ["src/fixture.ts"],
+      metadata: { userExplicitlyRequestedStage: true },
+      profile: "release",
+    }));
 
-    expect(result.decision).toBe("allow");
+    expect(commit.decision).toBe("ask");
+    expect(commit.violations.some((violation) => violation.id === "MAL-HOOK-GIT-CONSENT")).toBe(true);
+    expect(stage.decision).toBe("ask");
+    expect(stage.violations.some((violation) => violation.id === "MAL-HOOK-GIT-STAGE-CONSENT")).toBe(true);
   });
 
-  test("bloquea stage real sin consentimiento explicito", () => {
+  test("una intencion commit estructurada cubre stage exacto y commit ordinario", () => {
+    const stage = runHooks(baseContext({
+      event: "file.stage.before",
+      command: "git add -- src/fixture.ts",
+      targetPaths: ["src/fixture.ts"],
+      gitIntent: "commit",
+    }));
+    const commit = runHooks(baseContext({
+      event: "git.commit.before",
+      command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
+      targetPaths: ["src/fixture.ts"],
+      gitIntent: "commit",
+    }));
+    const amend = runHooks(baseContext({
+      event: "git.commit.before",
+      command: "git commit --amend --no-edit",
+      targetPaths: ["src/fixture.ts"],
+      gitIntent: "commit",
+    }));
+
+    expect(stage.decision).toBe("allow");
+    expect(commit.decision).toBe("allow");
+    expect(amend.decision).toBe("ask");
+    expect(amend.violations.some((violation) => violation.id === "MAL-HOOK-GIT-CONSENT")).toBe(true);
+  });
+
+  test("la intencion commit rechaza stage amplio, paths distintos y commit -a", () => {
+    const broadStage = runHooks(baseContext({
+      event: "file.stage.before",
+      command: "git add -A",
+      targetPaths: ["src/fixture.ts"],
+      gitIntent: "commit",
+    }));
+    const differentPath = runHooks(baseContext({
+      event: "file.stage.before",
+      command: "git add -- src/otro.ts",
+      targetPaths: ["src/fixture.ts"],
+      gitIntent: "commit",
+    }));
+    const magicPathspec = runHooks(baseContext({
+      event: "file.stage.before",
+      command: "git add -- :/",
+      targetPaths: [":/"],
+      gitIntent: "commit",
+    }));
+    const implicitStage = runHooks(baseContext({
+      event: "git.commit.before",
+      command: "git commit -am '🧠 feat(memoria): agrega hooks seguros'",
+      targetPaths: ["src/fixture.ts"],
+      gitIntent: "commit",
+    }));
+
+    for (const result of [broadStage, differentPath, magicPathspec]) {
+      expect(result.decision).toBe("deny");
+      expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-INTENT-SCOPE")).toBe(true);
+    }
+    expect(implicitStage.decision).toBe("deny");
+    expect(implicitStage.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE-DENY")).toBe(true);
+  });
+
+  test("pide consentimiento para stage real sin intencion explicita", () => {
     const result = runHooks(baseContext({
       event: "file.stage.before",
       command: "git add README.md",
       profile: "release",
     }));
 
-    expect(result.decision).toBe("deny");
+    expect(result.decision).toBe("ask");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-STAGE-CONSENT")).toBe(true);
   });
 
-  test("profile off no desactiva el suelo critico", () => {
+  test("profile off no elimina el ASK destructivo local", () => {
     const result = runHooks(baseContext({
       event: "git.reset.before",
       command: "git reset --hard HEAD~1",
       profile: "off",
     }));
 
-    expect(result.decision).toBe("deny");
+    expect(result.decision).toBe("ask");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE")).toBe(true);
   });
 
   test("assertHooksAllowed bloquea ask pendiente", () => {
     expect(() => assertHooksAllowed(baseContext({
-      event: "git.push.before",
+      event: "git.reset.before",
+      command: "git reset --hard HEAD~1",
       profile: "release",
     }))).toThrow(/ASK pendiente/);
   });
 
-  test("ask pendiente no se autoriza con CHECKS_OK", () => {
+  test("CHECKS_OK no habilita un remoto hard DENY", () => {
     const result = runHooks(baseContext({
       event: "git.push.before",
       profile: "release",
       confirmation: "CHECKS_OK",
     }));
 
-    expect(result.decision).toBe("ask");
+    expect(result.decision).toBe("deny");
     expect(() => assertHooksAllowed(baseContext({
       event: "git.push.before",
       profile: "release",
       confirmation: "CHECKS_OK",
-    }))).toThrow(/ASK pendiente/);
+    }))).toThrow(/remota prohibida|hard DENY/i);
+  });
+
+  test.each([
+    "git pull",
+    "git fetch --all",
+    "git clone https://example.com/demo.git",
+    "git remote update",
+    "git -c alias.publicar=push publicar",
+    "echo \"$(git fetch origin)\"",
+    "printf '%s' `git push origin HEAD`",
+  ])("deniega remoto desde shell aun con metadata de aprobacion: %s", (command) => {
+    const result = runHooks(baseContext({
+      event: "shell.exec.before",
+      command,
+      profile: "off",
+      confirmation: "APPROVE",
+      gitIntent: "commit",
+      metadata: { checksVerified: true, planID: "plan", revision: "rev" },
+    }));
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
+  });
+
+  test.each([
+    "git rm -- src/fixture.ts",
+    "git stash push -m temporal",
+    "git revert abc123",
+    "git update-index --assume-unchanged src/fixture.ts",
+    "git update-ref refs/heads/dev abc123",
+    "git tag -d v1.0.0",
+    "git notes add -m nota abc123",
+  ])("deniega mutadores locales no modelados: %s", (command) => {
+    const result = runHooks(baseContext({
+      event: "shell.exec.before",
+      command,
+      profile: "off",
+    }));
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE-DENY")).toBe(true);
   });
 
   test("USER_REQUESTED_COMMIT no autoriza un ask de mensaje", () => {
@@ -346,7 +458,7 @@ describe("malahor hooks", () => {
       },
     }) as { decision: string; violations: Array<{ id: string }> };
 
-    expect(result.decision).toBe("deny");
+    expect(result.decision).toBe("ask");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE")).toBe(true);
   });
 

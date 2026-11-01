@@ -14,13 +14,12 @@ Evitar perdida accidental de cambios o acciones Git destructivas.
 - `git reset --hard`
 - `git checkout -- <file>`
 - `git clean`
-- `git push --force`
 - `git commit --amend`
 - Borrado de ramas o tags.
 
 ## Regla
 
-No ejecutar acciones peligrosas sin una instruccion explicita y especifica del usuario.
+No ejecutar acciones locales peligrosas sin una instruccion explicita y especifica, preview del target y aprobacion propia. Las operaciones remotas no entran en este flujo: son hard DENY y ninguna confirmacion las habilita.
 
 ## Salida
 

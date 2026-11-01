@@ -177,10 +177,14 @@ describe("raíces registradas por proyecto", () => {
 
   test("el protocolo hace estructural la frontera de infraestructura", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/CI\/CD, IaC, publicaci[oó]n y despliegue.*solo lectura por defecto/is);
-    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/aprobaci[oó]n de plan, implementaci[oó]n, stage, commit o push no autoriza/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/aprobaci[oó]n de plan, implementaci[oó]n, stage o commit no autoriza/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/ASK humano separado.*vinculado a operaci[oó]n, proyecto, recursos o comando y policy hash/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/preflight de solo lectura.*diferido.*no consume ni sustituye el ASK nativo/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/Sin esa aprobaci[oó]n verificable.*leer, analizar y proponer/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/Git es local-only.*push, pull, fetch, clone/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/hard DENY.*ningún plan, perfil, token, aprobación, metadata o fallback/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/intención estructurada commit.*stage exacto revisado y el commit ordinario/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/precommit quedó verde.*commit-fallback/is);
   });
 
   test("resuelve la raíz registrada al trabajar desde otra ubicación", () => {

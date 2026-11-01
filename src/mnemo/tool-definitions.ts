@@ -213,15 +213,20 @@ export const toolDefinitions = [
   },
   {
     name: "malahor_hook_check",
-    description: "Ejecuta guardrails cross-harness de Malahor antes de acciones sensibles (git, memoria, instalacion, archivos, secretos). Usar antes de commit/push/reset/push --force, escrituras de archivos o acciones destructivas.",
+    description: "Ejecuta guardrails cross-harness antes de acciones sensibles. Git es local-only: las operaciones remotas siempre se deniegan.",
     inputSchema: {
       type: "object",
       properties: {
-        event: { type: "string", description: "Evento hook, por ejemplo git.commit.before, git.push.before, memory.delete.apply, install.beforePolicy." },
+        event: { type: "string", description: "Evento hook, por ejemplo git.commit.before, git.reset.before, memory.delete.apply, install.beforePolicy." },
         profile: { type: "string", description: "off|light|standard|strict|release. Default standard." },
         command: { type: "string", description: "Comando shell que se planea ejecutar, si aplica." },
         paths: { type: "array", items: { type: "string" }, description: "Rutas fisicas objetivo a revisar." },
         resourceKind: { type: "string", enum: ["filesystem"], description: "Tipo de paths; default y unico valor admitido: filesystem." },
+        intent: {
+          type: "string",
+          enum: ["stage", "commit", "amend", "reset", "rebase", "cherry-pick", "merge", "branch-create", "branch-switch"],
+          description: "Intencion Git local estructurada inferida de una orden explicita; commit cubre solo stage exacto y commit ordinario.",
+        },
         confirm: { type: "string", description: "Confirmacion exacta para operaciones destructivas; CHECKS_OK no autoriza una operacion ask." },
         approval: { type: "string", description: "Nonce humano de un solo uso para consumir un ASK exacto; no se sustituye con confirm, plan o metadata." },
         metadata: { type: "object", description: "Metadatos del evento (previewToken, requiresConfirmation, writesMalahorData, etc.)." },

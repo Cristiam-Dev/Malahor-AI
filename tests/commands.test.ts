@@ -64,9 +64,24 @@ describe("comandos gestionados de OpenCode", () => {
     expect(commit).toContain("git-commit-text");
     expect(commit).toContain("malahor-ai git precommit");
     expect(commit).toContain("git commit -m");
-    expect(commit).toContain("Nunca autoriza push");
+    expect(commit).toContain("Git remoto es hard DENY");
+    expect(commit).toContain('intent: "commit"');
+    expect(commit).toContain("malahor-ai git commit-fallback");
+    expect(commit).toContain('--paths \'["ruta/uno.ts","ruta/con,coma.ts"]\'');
+    expect(commit).toContain("PowerShell");
+    expect(commit).toContain("git --no-pager log -1");
     expect(commit).toContain("No uses `--no-verify`");
+    expect(commit).not.toContain("git prepush");
     expect(commit).not.toContain("!`git ");
+
+    const gitHelp = Bun.spawnSync(["bun", "run", "src/cli/index.ts", "git", "help"], {
+      cwd: process.cwd(),
+      env: { ...process.env, MALAHOR_OPENCODE_DETECT: "0" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(gitHelp.exitCode).toBe(0);
+    expect(gitHelp.stdout.toString()).toContain("--paths <json-array>");
   });
 
   test("los dos prompts primarios aplican el mismo flujo de commit", () => {
@@ -76,7 +91,9 @@ describe("comandos gestionados de OpenCode", () => {
       expect(prompt).toContain("git-commit-text");
       expect(prompt).toContain("testing+build");
       expect(prompt).toContain("malahor-ai git precommit");
-      expect(prompt).toContain("Nunca push");
+      expect(prompt).toContain("Git es local-only");
+      expect(prompt).toContain("commit-fallback");
+      expect(prompt).toContain("sin confirmación redundante");
     }
   });
 

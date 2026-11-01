@@ -5,6 +5,7 @@ import { writeAudit } from "./audit";
 import { normalizeHookResource } from "./resources";
 import { sha256 } from "./security-policy";
 import type { HookContext, HookResult } from "./types";
+import { classifyGitCommand, loadGitAliases } from "../git-command-policy";
 
 const DEFAULT_TTL_SECONDS = 300;
 const TRUSTED_CHANNELS = new Set(["cli-tty", "opencode-ui", "host-ui"]);
@@ -46,6 +47,7 @@ export interface ApprovalConsumeResult {
 }
 
 export function grantApproval(context: HookContext, options: ApprovalGrantOptions): ApprovalRecord {
+  assertLocalApproval(context);
   const channel = options.channel.trim();
   assertTrustedChannel(context, channel);
 
@@ -105,6 +107,9 @@ export function consumeApproval(
   context: HookContext,
   options: ApprovalConsumeOptions = {},
 ): ApprovalConsumeResult {
+  if (isRemoteGitContext(context)) {
+    return { ok: false, reason: "las operaciones Git remotas no admiten aprobaciones" };
+  }
   if (!/^[a-f0-9]{64}$/.test(nonce)) {
     return { ok: false, reason: "nonce de aprobacion invalido" };
   }
@@ -167,6 +172,20 @@ export function consumeApproval(
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : "ledger de aprobaciones no disponible" };
   }
+}
+
+function assertLocalApproval(context: HookContext): void {
+  if (isRemoteGitContext(context)) {
+    throw new Error("las operaciones Git remotas son hard DENY y no admiten aprobaciones");
+  }
+}
+
+function isRemoteGitContext(context: HookContext): boolean {
+  if (context.event === "git.push.before" || context.event === "git.remote.before") return true;
+  if (!context.command?.trim()) return false;
+  return classifyGitCommand(context.command, {
+    aliases: loadGitAliases(context.projectRoot),
+  }).remote;
 }
 
 export function approvalsDirectory(malahorHome: string): string {

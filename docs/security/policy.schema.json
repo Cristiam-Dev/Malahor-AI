@@ -181,6 +181,7 @@
     },
     "git": {
       "type": "object",
+      "description": "Controles Git locales. Toda operacion remota es hard DENY no configurable; los campos legacy de push solo se aceptan por compatibilidad y nunca lo habilitan.",
       "additionalProperties": false,
       "properties": {
         "requireStageConsent": {
@@ -193,7 +194,7 @@
         },
         "requirePushApproval": {
           "type": "boolean",
-          "description": "Exige aprobación humana para push."
+          "description": "Legacy de lectura: no habilita push ni reemplaza el hard DENY remoto."
         },
         "scanStagedContent": {
           "type": "boolean",
@@ -201,11 +202,11 @@
         },
         "scanOutgoingCommits": {
           "type": "boolean",
-          "description": "Escanea commits salientes antes del push."
+          "description": "Legacy de lectura: no se publica ni contacta un remoto."
         },
         "requireChecksBeforePush": {
           "type": "boolean",
-          "description": "Exige checks verdes antes de push."
+          "description": "Legacy de lectura: los checks no habilitan push."
         },
         "bindChecksToRevision": {
           "type": "boolean",
@@ -213,7 +214,7 @@
         },
         "blockDestructive": {
           "type": "boolean",
-          "description": "Bloquea reset/rebase/checkout/push --force y equivalentes sin aprobación."
+          "description": "Exige preview y aprobación para operaciones locales destructivas; Git remoto permanece hard DENY."
         }
       }
     },

@@ -1,5 +1,6 @@
-export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v3 -->";
+export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v4 -->";
 const LEGACY_PROTOCOL_MARKERS = [
+  "<!-- malahor-runtime-protocol:v3 -->",
   "<!-- malahor-runtime-protocol:v2 -->",
   "<!-- malahor-runtime-protocol:v1 -->",
 ];
@@ -68,9 +69,9 @@ Construcción y SDD
 
 Infraestructura, entrega y despliegue
 - CI/CD, IaC, publicación y despliegue son superficies protegidas y solo lectura por defecto en todo repositorio gestionado, incluido Malahor.
-- Una aprobación de plan, implementación, stage, commit o push no autoriza modificar esas superficies ni ejecutar publicación o despliegue. Tampoco lo hacen perfiles, metadata del agente, confirmaciones Git ni Allow always.
-- Cada escritura, stage, commit o push que las afecte y cada comando mutante de publicación/despliegue requiere un ASK humano separado, específico y vinculado a operación, proyecto, recursos o comando y policy hash.
-- Un preflight de solo lectura puede informar MAL-HOOK-INFRA-APPROVAL como diferido y completar la validación; no consume ni sustituye el ASK nativo del stage, commit, push, publicación o despliegue real.
+- Una aprobación de plan, implementación, stage o commit no autoriza modificar esas superficies ni ejecutar publicación o despliegue. Tampoco lo hacen perfiles, metadata del agente, confirmaciones Git ni Allow always.
+- Cada escritura, stage o commit que las afecte y cada comando mutante de publicación/despliegue requiere un ASK humano separado, específico y vinculado a operación, proyecto, recursos o comando y policy hash.
+- Un preflight de solo lectura puede informar MAL-HOOK-INFRA-APPROVAL como diferido y completar la validación; no consume ni sustituye el ASK nativo del stage, commit, publicación o despliegue real.
 - Sin esa aprobación verificable, limita la actuación a leer, analizar y proponer; no edites archivos protegidos ni ejecutes la operación.
 
 Principio de socio
@@ -78,7 +79,12 @@ Principio de socio
 - Si el usuario insiste después de una discrepancia informada, procede dentro de los guardrails y registra la decisión/discrepancia cuando sea relevante.
 
 Git y delegación
-- Stage y commit requieren una orden explícita del usuario; “continúa”, “listo” o “cierra la fase” no autorizan esas acciones.
+- Git es local-only. Nunca ejecutes push, pull, fetch, clone, ls-remote, remote update, submódulos remotos ni equivalentes que contacten un remoto. Son hard DENY incluso si el usuario los pide; ningún plan, perfil, token, aprobación, metadata o fallback los habilita.
+- Stage y commit requieren una orden explícita del usuario; “continúa”, “listo” o “cierra la fase” no autorizan esas acciones. Un pedido inequívoco de commit o /malahor-commit autoriza, tras gates verdes, el stage exclusivo de las rutas revisadas y un commit ordinario local, sin pedir otra confirmación humana.
+- Propaga esa orden mediante la intención estructurada commit de malahor_hook_check. Esa intención solo cubre el stage exacto revisado y el commit ordinario; no autoriza amend, reset, rebase, cherry-pick, merge ni ramas.
+- Amend, reset, rebase, cherry-pick, merge y creación/cambio de ramas son locales y permitidos solo con una orden específica para esa operación. Las variantes destructivas exigen preview con target visible y un ASK/aprobación de un solo uso.
+- Al pedir commit/comitea o /malahor-commit: revisa status/diff; ejecuta diagnóstico, testing y build; detente si falla; stagea solo las rutas revisadas con intent=commit; valida el staged y el mensaje con malahor-ai git precommit; vuelve a validar git.commit.before con intent=commit; ejecuta git commit sin --no-verify; relee status y git --no-pager log -1.
+- Si y solo si precommit quedó verde, el staged y su huella siguen exactos y el intento real de git commit fue bloqueado por el host/harness, genera el fallback con malahor-ai git commit-fallback. Declara que el agente no ejecutó el commit, conserva subject/cuerpo/cwd, nunca uses --no-verify y revalida status/log después de la ejecución humana. Un DENY/ASK de contenido o política no admite fallback.
 - Antes de operaciones sensibles usa el flujo de hooks de Malahor. Si recibes DENY, detente; si recibes ASK pendiente, solicita evidencia humana verificable.
 - Un único primario coordina y construye. Los especialistas gestionados son subagentes hermanos, con contexto, restricciones, permisos y criterios explícitos; no delegan entre sí.
 - Delegación secuencial por defecto; paralelo solo para tareas independientes, sin edición concurrente de los mismos archivos ni background autónomo.

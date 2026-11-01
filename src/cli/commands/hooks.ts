@@ -10,6 +10,7 @@ import { usesFilesystemResources } from "../core/hooks/resources";
 import { HOOK_EVENTS, HOOK_RESOURCE_KINDS, type HookContext, type HookEvent, type HookResourceKind, type HookResult } from "../core/hooks/types";
 import { isSandbox } from "../core/paths";
 import { resolveCanonicalProjectKey } from "../core/project";
+import { parseGitIntent } from "../core/git-intent";
 
 export interface HooksOptions {
   action: string;
@@ -20,6 +21,7 @@ export interface HooksOptions {
   profile: string | undefined;
   project: string | undefined;
   scope: string | undefined;
+  intent: string | undefined;
   confirm: string | undefined;
   approval: string | undefined;
   ttl: string | undefined;
@@ -89,6 +91,7 @@ function resolveHookContext(options: HooksOptions, eventValue = options.args[0])
     resourceKind,
     targetPaths,
     memoryScope: options.scope,
+    gitIntent: parseGitIntent(options.intent),
     confirmation: options.confirm,
     approval: options.approval,
     destructive: event.includes(".apply") || event.startsWith("git.reset") || event.startsWith("git.checkout"),
@@ -215,8 +218,8 @@ function printHooksStatus(options: HooksOptions): void {
     process.stdout.write(`Warnings:\n- ${policyLoad.warnings.join("\n- ")}\n`);
   }
   process.stdout.write(`Rules:\n`);
+  process.stdout.write(`- git.remoteOperations=deny (invariante, no configurable)\n`);
   process.stdout.write(`- git.blockDestructiveCommands=${policyLoad.policy.git.blockDestructiveCommands}\n`);
-  process.stdout.write(`- git.requireChecksBeforePush=${policyLoad.policy.git.requireChecksBeforePush}\n`);
   process.stdout.write(`- git.validateCommitMessage=${policyLoad.policy.git.validateCommitMessage}\n`);
   process.stdout.write(`- secrets.scanBeforeCommit=${policyLoad.policy.secrets.scanBeforeCommit}\n`);
   process.stdout.write(`- memory.destructiveRequiresPreview=${policyLoad.policy.memory.destructiveRequiresPreview}\n`);
@@ -257,7 +260,7 @@ function parseTargetPaths(value: string | undefined, cwd: string, event: HookEve
     return value.split(",").map((item) => item.trim()).filter(Boolean);
   }
 
-  if (event === "git.commit.before" || event === "git.push.before" || event === "file.stage.before") {
+  if (event === "git.commit.before" || event === "file.stage.before") {
     return changedFiles(cwd);
   }
 
@@ -307,7 +310,7 @@ function printEvents(): void {
 function printHooksHelp(): void {
   process.stdout.write(`
 Usage:
-  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--resource-kind filesystem] [--scope <scope>] [--confirm TOKEN] [--approval <nonce>] [--json]
+  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--intent <git-local>] [--resource-kind filesystem] [--scope <scope>] [--confirm TOKEN] [--approval <nonce>] [--json]
   malahor-ai hooks approval grant <event> --confirm APPROVE [--ttl <segundos>] [--command <cmd>] [--paths a,b] [--resource-kind filesystem] [--scope <scope>] [--json]
   malahor-ai hooks status [--project <key>]
   malahor-ai hooks profile get [--project <key>]
@@ -315,11 +318,10 @@ Usage:
   malahor-ai hooks events
 
 Ejemplos:
-  malahor-ai hooks check git.commit.before
-  malahor-ai hooks check git.push.before --profile release
+  malahor-ai hooks check git.commit.before --command "git commit -m '✨ feat(git): commit local'" --intent commit
+  malahor-ai hooks check git.push.before --command "git push" # DENY permanente
   malahor-ai hooks check git.reset.before --command "git reset --hard"
   malahor-ai hooks check file.stage.before --paths .env,src/index.ts
-  malahor-ai hooks approval grant git.push.before --profile release --confirm APPROVE --ttl 300
 
 Decisiones:
   allow: sin hallazgos

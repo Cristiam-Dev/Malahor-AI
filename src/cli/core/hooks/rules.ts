@@ -14,6 +14,8 @@ import {
   isRemovalOperation,
   type DocumentationOperation,
 } from "../documentation-boundary";
+import { classifyGitCommand, loadGitAliases, type GitOperation } from "../git-command-policy";
+import { intentAuthorizes, type GitIntent } from "../git-intent";
 
 export const builtInHookRules: HookRule[] = [
   { id: "policy-integrity", run: policyIntegrityGuard },
@@ -23,11 +25,12 @@ export const builtInHookRules: HookRule[] = [
   { id: "documentation-boundary", run: documentationBoundaryGuard },
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
+  { id: "git-remote", run: remoteGitGuard },
+  { id: "git-intent-scope", run: gitIntentScopeGuard },
   { id: "dangerous-git", run: dangerousGitGuard },
   { id: "git-consent", run: gitConsentGuard },
   { id: "commit-message", run: commitMessageGuard },
   { id: "secret-scan", run: secretScanGuard },
-  { id: "push-checks", run: pushChecksGuard },
   { id: "shell-policy", run: shellPolicyGuard },
   { id: "file-boundary", run: fileBoundaryGuard },
   { id: "tool-policy", run: toolPolicyGuard },
@@ -140,16 +143,13 @@ function infrastructureTargetPaths(context: HookContext, command: string): Infra
   if (context.event === "file.write.before") return { paths: [], unresolved: true };
   if (context.event === "file.stage.before") return gitResolution(changedPaths(context.projectRoot));
   if (context.event === "git.commit.before") return gitResolution(stagedPaths(context.projectRoot));
-  if (context.event === "git.push.before") return gitResolution(outgoingPaths(context.projectRoot));
+  if (context.event === "git.push.before" || context.event === "git.remote.before") return { paths: [], unresolved: false };
   if (context.event === "tool.execute.before") return { paths: [], unresolved: false };
   if (context.event !== "shell.exec.before" || !command) return { paths: [], unresolved: false };
 
   if (isGitCommandOperation(command, "add")) return gitAddResolution(context, command);
   if (isGitCommandOperation(command, "commit")) return gitResolution(stagedPaths(context.projectRoot));
-  if (isGitCommandOperation(command, "push")) {
-    if (/(?:^|\s)--dry-run(?:\s|$)/.test(command)) return { paths: [], unresolved: false };
-    return gitResolution(outgoingPaths(context.projectRoot));
-  }
+  if (isGitCommandOperation(command, "push")) return { paths: [], unresolved: false };
   if (isPotentialFilesystemMutation(command)) {
     return { paths: shellPathCandidates(command), unresolved: false };
   }
@@ -177,9 +177,12 @@ function gitAddResolution(context: HookContext, command: string): Infrastructure
 }
 
 function isGitCommandOperation(command: string, operation: "add" | "commit" | "push"): boolean {
-  return command.split(/(?:&&|\|\||[;|\n])/).some((segment) => (
-    new RegExp(`\\bgit\\b[^;&|\\n]*\\b${operation}\\b`).test(segment)
-  ));
+  const classification = classifyGitCommand(command);
+  if (operation === "add") return classification.operations.includes("stage");
+  if (operation === "commit") {
+    return classification.operations.includes("commit") || classification.operations.includes("amend");
+  }
+  return classification.remoteReasons.some((reason) => reason === "git-push");
 }
 
 function shellTokens(command: string): string[] {
@@ -239,7 +242,7 @@ function gitResolution(paths: string[] | null): InfrastructureTargetResolution {
 
 function documentationBoundaryGuard(context: HookContext): HookViolation[] {
   const commit = context.event === "git.commit.before"
-    || (context.event === "shell.exec.before" && /\bgit\s+commit\b/.test(context.command ?? ""));
+    || (context.event === "shell.exec.before" && gitClassification(context).operations.some((operation) => operation === "commit" || operation === "amend"));
   const relevant = context.event === "file.write.before"
     || context.event === "file.stage.before"
     || commit;
@@ -361,17 +364,6 @@ function changedPaths(cwd: string): string[] | null {
   return [...new Set(available.flat())];
 }
 
-function outgoingPaths(cwd: string): string[] | null {
-  const upstream = gitPathQuery(cwd, ["diff", "--name-only", "--diff-filter=ACMRD", "-z", "@{u}...HEAD"]);
-  if (upstream !== null) return upstream;
-
-  // Una rama sin upstream puede publicar cualquier archivo de su primer push.
-  // Se usa el arbol completo de HEAD en lugar de presumir que no hay recursos.
-  const initialPush = gitPathQuery(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]);
-  if (initialPush !== null) return initialPush;
-  return changedPaths(cwd);
-}
-
 function gitPathQuery(cwd: string, args: string[]): string[] | null {
   try {
     return execFileSync("git", args, {
@@ -477,50 +469,111 @@ function policySafetyGuard(context: HookContext): HookViolation[] {
   return violations;
 }
 
+function remoteGitGuard(context: HookContext): HookViolation[] {
+  const classification = gitClassification(context);
+  const remoteEvent = context.event === "git.push.before" || context.event === "git.remote.before";
+  if (!remoteEvent && !classification.remote) return [];
+
+  const detail = classification.remoteReasons.length > 0
+    ? classification.remoteReasons.join(", ")
+    : context.event;
+  return [{
+    id: "MAL-HOOK-GIT-REMOTE-DENY",
+    decision: "deny",
+    message: `Operacion Git remota prohibida permanentemente (${detail}). Malahor solo opera Git local.`,
+    fix: "No hay aprobacion, perfil, plan, token ni fallback que habilite red. Ejecuta fuera de Malahor bajo tu propia responsabilidad.",
+  }];
+}
+
 function dangerousGitGuard(context: HookContext): HookViolation[] {
-  const blockDestructive = context.security?.git?.blockDestructive
-    ?? context.policy?.git.blockDestructiveCommands;
-  if (blockDestructive === false) return [];
-  const command = (context.command ?? "").trim();
-  if (!command && !context.event.startsWith("git.")) return [];
+  const classification = gitClassification(context);
+  if (!classification.hasGitCommand || classification.remote) return [];
 
-  const checks: Array<[RegExp, string, string]> = [
-    [/\bgit\s+reset\s+--hard\b/, "git reset --hard descarta trabajo local.", "Pide confirmacion fuerte y respaldo; preferir reset no destructivo."],
-    [/\bgit\s+clean\s+-[^\n]*[fd]/, "git clean -fd borra archivos no rastreados.", "Usa dry-run `git clean -nd` y confirmacion explicita antes."],
-    [/\bgit\s+checkout\s+(--\s*)?\.\b/, "git checkout -- . descarta cambios del usuario.", "No revertir trabajo ajeno; limita el path y pide confirmacion fuerte."],
-    [/\bgit\s+push\b[^\n]*(--force|-f)\b/, "push --force puede sobrescribir historia remota.", "Usa --force-with-lease solo con confirmacion fuerte y razon documentada."],
-    [/\bgit\s+commit\b[^\n]*--amend\b/, "commit --amend reescribe historia local.", "Evitalo salvo pedido explicito del usuario."],
-  ];
+  const unsupported = classification.operations.filter((operation) => (
+    operation === "clean"
+    || operation === "discard"
+    || operation === "branch-delete"
+    || operation === "implicit-stage"
+    || operation === "unknown"
+  ));
+  if (classification.failClosed || unsupported.length > 0) {
+    const detail = unsupported.length > 0 ? unsupported.join(", ") : "ejecucion indirecta no evaluable";
+    return [{
+      id: "MAL-HOOK-GIT-DESTRUCTIVE-DENY",
+      decision: "deny",
+      message: `Operacion local destructiva fuera del alcance permitido: ${detail}.`,
+      fix: "No descartes, borres ni stages implicitamente con commit. Usa paths exactos y el flujo local especifico para cada efecto.",
+    }];
+  }
+  if (!classification.destructive) return [];
 
-  return checks
-    .filter(([pattern]) => pattern.test(command))
-    .map(([, message, fix]) => ({ id: "MAL-HOOK-GIT-DESTRUCTIVE", decision: "deny", message, fix }));
+  const target = classification.targets.length > 0 ? classification.targets.join(", ") : inferredGitTarget(classification.operations);
+  return [{
+    id: "MAL-HOOK-GIT-DESTRUCTIVE",
+    decision: "ask",
+    message: `Operacion Git local destructiva: ${classification.operations.join(", ")}; target: ${target}.`,
+    fix: "Muestra este preview y solicita una aprobacion humana de un solo uso vinculada al comando, proyecto, target y policy hash.",
+  }];
+}
+
+function gitIntentScopeGuard(context: HookContext): HookViolation[] {
+  if (context.metadata?.validationOnly === true) return [];
+  const classification = gitClassification(context);
+  if (!classification.hasGitCommand || classification.remote || context.gitIntentVerified === true) return [];
+  const intent = contextGitIntent(context);
+  if (!intent) return [];
+
+  if (classification.operations.includes("stage") && intentAuthorizes(intent, "stage")) {
+    const declared = normalizedGitPaths(context, filesystemTargetPaths(context));
+    const commandPaths = normalizedGitPaths(context, classification.targets);
+    const unsafe = declared.length === 0
+      || commandPaths.length === 0
+      || !sameStringSet(declared, commandPaths)
+      || classification.targets.some(unsafeGitPathspec)
+      || commandPaths.some((target) => unsafeStageTarget(context, target))
+      || /(?:^|\s)(?:-[^-]*[Aipux][^-]*|--all|--interactive|--patch|--pathspec-from-file(?:=|\s)|--renormalize|--update)(?:\s|$)/.test(context.command ?? "");
+    if (unsafe) {
+      return [{
+        id: "MAL-HOOK-GIT-INTENT-SCOPE",
+        decision: "deny",
+        message: "La intencion de stage/commit no esta vinculada a una lista exacta de archivos revisados.",
+        fix: "Usa `git add -- <archivos exactos>` y declara esos mismos paths; no uses -A, directorios, globs, modo interactivo ni pathspecs indirectos.",
+      }];
+    }
+  }
+
+  if ((classification.operations.includes("commit") || classification.operations.includes("amend"))
+    && (intentAuthorizes(intent, "commit") || intentAuthorizes(intent, "amend"))
+    && filesystemTargetPaths(context).length === 0) {
+    return [{
+      id: "MAL-HOOK-GIT-INTENT-SCOPE",
+      decision: "deny",
+      message: "La intencion de commit no declara el staged exacto revisado.",
+      fix: "Declara los paths staged verificados o usa la evidencia one-shot emitida por malahor_hook_check.",
+    }];
+  }
+
+  return [];
 }
 
 function gitConsentGuard(context: HookContext): HookViolation[] {
   const command = (context.command ?? "").trim();
   if (!command || context.metadata?.validationOnly === true) return [];
 
-  const shell = context.event === "shell.exec.before";
-  if ((context.event === "git.commit.before" || shell) && /\bgit\s+commit\b/.test(command) && !hasConsent(context, "USER_REQUESTED_COMMIT", "userExplicitlyRequestedCommit")) {
-    return [{
-      id: "MAL-HOOK-GIT-CONSENT",
-      decision: shell ? "ask" : "deny",
-      message: "git commit requiere pedido explicito del usuario; 'continuar', 'cerrar fase' o 'implementar' no autorizan commitear.",
-      fix: "No ejecutes el commit. Pide confirmacion explicita o valida con confirmacion USER_REQUESTED_COMMIT si el usuario pidio commitear.",
-    }];
-  }
+  const classification = gitClassification(context);
+  if (!classification.hasGitCommand || classification.remote) return [];
+  const protectedOperations = classification.operations.filter(requiresGitIntent);
+  if (protectedOperations.length === 0) return [];
 
-  if ((context.event === "file.stage.before" || shell) && /\bgit\s+add\b/.test(command) && !hasConsent(context, "USER_REQUESTED_STAGE", "userExplicitlyRequestedStage")) {
-    return [{
-      id: "MAL-HOOK-GIT-STAGE-CONSENT",
-      decision: shell ? "ask" : "deny",
-      message: "git add/stage requiere pedido explicito del usuario; preparar cambios no equivale a staging.",
-      fix: "No ejecutes git add. Pide confirmacion explicita o valida con confirmacion USER_REQUESTED_STAGE si el usuario pidio stagear.",
-    }];
-  }
+  const intent = contextGitIntent(context);
+  if (intent && protectedOperations.every((operation) => intentAuthorizes(intent, operation))) return [];
 
-  return [];
+  return [{
+    id: protectedOperations.includes("stage") ? "MAL-HOOK-GIT-STAGE-CONSENT" : "MAL-HOOK-GIT-CONSENT",
+    decision: "ask",
+    message: `Git local requiere intencion explicita para: ${protectedOperations.join(", ")}. Un pedido de commit solo autoriza stage exacto y commit ordinario.`,
+    fix: "Propaga `gitIntent` desde el pedido explicito. No uses tokens humanos ni reutilices intenciones para otra operacion.",
+  }];
 }
 
 function commitMessageGuard(context: HookContext): HookViolation[] {
@@ -556,19 +609,6 @@ function secretScanGuard(context: HookContext): HookViolation[] {
     decision: "deny",
     message: `Posibles secretos detectados: ${leaks.slice(0, 5).join(", ")}`,
     fix: "Remueve secretos, usa variables de entorno/secret manager y rota credenciales si fueron expuestas.",
-  }];
-}
-
-function pushChecksGuard(context: HookContext): HookViolation[] {
-  const requireChecks = context.security?.git?.requireChecksBeforePush
-    ?? context.policy?.git.requireChecksBeforePush;
-  if (requireChecks === false || context.event !== "git.push.before") return [];
-
-  return [{
-    id: "MAL-HOOK-PUSH-CHECKS",
-    decision: strictness(context.profile, "ask"),
-    message: "Push sin evidencia de checks vinculada a la revision.",
-    fix: "Corre tests/build y registra evidencia verificable; CHECKS_OK no autoriza por si solo.",
   }];
 }
 
@@ -634,16 +674,8 @@ function shellPolicyGuard(context: HookContext): HookViolation[] {
     }
   }
 
-  if (/\bgit\s+push\b/.test(command) && context.metadata?.checksVerified !== true) {
-    violations.push({
-      id: "MAL-HOOK-PUSH-CLI-EVIDENCE",
-      decision: "ask",
-      message: "Push desde el plugin sin evidencia de checks vinculada a la revision.",
-      fix: "Ejecuta prepush por CLI con evidencia verificable; la aprobacion de UI no sustituye checks.",
-    });
-  }
-
-  if (/\bgit\s+commit\b/.test(command) && context.security?.git?.scanStagedContent !== false) {
+  const git = gitClassification(context);
+  if ((git.operations.includes("commit") || git.operations.includes("amend")) && context.security?.git?.scanStagedContent !== false) {
     const staged = scanStagedSecrets(context.cwd, /\s(?:-a|--all)\b/.test(command));
     if (staged === null) {
       violations.push({
@@ -1061,8 +1093,59 @@ function extractCommitMessage(command: string): string | null {
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
 }
 
-function hasConsent(context: HookContext, confirmation: string, metadataKey: string): boolean {
-  return context.confirmation === confirmation || context.metadata?.[metadataKey] === true;
+const GIT_CLASSIFICATIONS = new WeakMap<HookContext, ReturnType<typeof classifyGitCommand>>();
+
+function gitClassification(context: HookContext): ReturnType<typeof classifyGitCommand> {
+  const cached = GIT_CLASSIFICATIONS.get(context);
+  if (cached) return cached;
+  const classification = classifyGitCommand(context.command ?? "", {
+    aliases: loadGitAliases(context.projectRoot),
+  });
+  GIT_CLASSIFICATIONS.set(context, classification);
+  return classification;
+}
+
+function requiresGitIntent(operation: GitOperation): boolean {
+  return [
+    "stage", "commit", "amend", "reset", "rebase", "cherry-pick", "merge",
+    "branch-create", "branch-switch",
+  ].includes(operation);
+}
+
+function contextGitIntent(context: HookContext): GitIntent | undefined {
+  return context.gitIntent;
+}
+
+function inferredGitTarget(operations: GitOperation[]): string {
+  if (operations.includes("amend")) return "HEAD";
+  if (operations.includes("reset")) return "HEAD (por defecto)";
+  if (operations.includes("rebase")) return "rebase en curso o upstream indicado";
+  return "estado local actual";
+}
+
+function normalizedGitPaths(context: HookContext, values: string[]): string[] {
+  return [...new Set(values.map((value) => {
+    const absolute = path.resolve(context.cwd, value);
+    const relative = path.relative(context.projectRoot, absolute);
+    return (relative || ".").replaceAll("\\", "/");
+  }))].sort();
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function unsafeStageTarget(context: HookContext, target: string): boolean {
+  if (target === "." || target === ":/" || /[*?\[\]$`]/.test(target)) return true;
+  try {
+    return fs.statSync(path.resolve(context.projectRoot, target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function unsafeGitPathspec(target: string): boolean {
+  return target === "." || target.startsWith(":") || /[*?\[\]$`]/.test(target);
 }
 
 function strictness(profile: HookProfile, fallback: "warn" | "ask"): "warn" | "ask" | "deny" {

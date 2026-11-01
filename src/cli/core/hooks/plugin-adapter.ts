@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 
 import { registeredProjectRoots } from "../context";
@@ -8,6 +9,7 @@ import { loadHookPolicy } from "./policy-loader";
 import { usesFilesystemResources } from "./resources";
 import {
   CODE_MODE_TOOL_NAMES,
+  HOOK_EVENTS,
   isMcpToolName,
   type HookContext,
   type HookDecision,
@@ -17,6 +19,8 @@ import {
   type HookViolation,
 } from "./types";
 import { parsePatchOperations } from "../documentation-boundary";
+import { classifyGitCommand, loadGitAliases, type GitOperation } from "../git-command-policy";
+import { parseGitIntent, type GitIntent, type GitIntentRegistry } from "../git-intent";
 
 export type PermissionEffect = "allow" | "ask" | "deny";
 
@@ -42,6 +46,7 @@ export interface PluginAdapterOptions {
     hints?: SessionProjectHints,
   ) => Promise<ResolvedSessionProject | undefined>;
   resolveParentSession?: (sessionID: string) => Promise<{ parentID: string; agent: string } | undefined>;
+  gitIntentRegistry?: GitIntentRegistry;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -62,6 +67,9 @@ interface EvaluationDetails {
   command?: string;
   resourceKind?: HookResourceKind;
   targetPaths?: string[];
+  confirmation?: string;
+  approval?: string;
+  gitIntent?: GitIntent;
   metadata?: Record<string, unknown>;
   destructive?: boolean;
 }
@@ -87,6 +95,7 @@ export async function evaluatePermission(
   const toolOrigin = recordValue(input.source)?.type === "tool";
 
   const details = permissionDetails(action, resources, metadata, options.toolRegistered === true && toolOrigin);
+  details.confirmation ??= stringValue(metadata.confirmation) || stringValue(metadata.confirm);
   const allowUnbound = ["question", "list", "todowrite", "todoread"].includes(action.toLowerCase());
   const scope = await resolveEvaluationScope(
     input, options, details.cwd, details.targetPaths, details.resourceKind, allowUnbound,
@@ -95,6 +104,9 @@ export async function evaluatePermission(
     command: details.command,
     resourceKind: details.resourceKind,
     targetPaths: details.targetPaths,
+    confirmation: details.confirmation,
+    approval: details.approval,
+    gitIntent: details.gitIntent,
     metadata: {
       ...metadata,
       ...details.metadata,
@@ -104,6 +116,7 @@ export async function evaluatePermission(
     },
   }, scope.project);
 
+  if (built?.context) applyRegisteredGitIntent(built.context, options, options.shellRegistered !== true);
   const result = built?.context
     ? evaluate(built.context)
     : policyFailure(details.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
@@ -137,6 +150,9 @@ export async function evaluateToolHook(
     command: mapped.command,
     resourceKind: mapped.resourceKind,
     targetPaths: mapped.targetPaths,
+    confirmation: mapped.confirmation,
+    approval: mapped.approval,
+    gitIntent: mapped.gitIntent,
     metadata: {
       ...mapped.metadata,
       origin: "opencode-v2",
@@ -144,9 +160,13 @@ export async function evaluateToolHook(
     },
   }, scope.project);
 
-  return built?.context
+  const result = built?.context
     ? evaluate(built.context)
     : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
+  if (built?.context && mapped.gitIntent && mapped.command && (result.decision === "allow" || result.decision === "warn")) {
+    registerGitIntent(built.context, mapped.gitIntent, options);
+  }
+  return result;
 }
 
 export async function evaluateShellHook(
@@ -210,6 +230,7 @@ export async function evaluateShellHook(
     }
   }
 
+  applyRegisteredGitIntent(built.context, options, true);
   let result = runHooks(built.context);
   if (envChanged) {
     result = appendViolation(result, {
@@ -284,6 +305,86 @@ export function formatPluginBlock(result: HookResult): string {
 
 function evaluate(context: HookContext): HookResult {
   return auditHookResult(context, runHooks(context));
+}
+
+function registerGitIntent(
+  context: HookContext,
+  intent: GitIntent,
+  options: PluginAdapterOptions,
+): void {
+  if (!options.gitIntentRegistry || !context.project || !context.command) return;
+  const classification = classifyGitCommand(context.command, { aliases: loadGitAliases(context.projectRoot) });
+  if (!classification.hasGitCommand || classification.remote) return;
+  options.gitIntentRegistry.register({
+    project: context.project,
+    intent,
+    command: context.command,
+    paths: gitIntentPaths(context, classification.operations, classification.targets),
+  });
+}
+
+function applyRegisteredGitIntent(
+  context: HookContext,
+  options: PluginAdapterOptions,
+  consume: boolean,
+): void {
+  if (context.gitIntent || !options.gitIntentRegistry || !context.project || !context.command) return;
+  const classification = classifyGitCommand(context.command, { aliases: loadGitAliases(context.projectRoot) });
+  if (!classification.hasGitCommand || classification.remote) return;
+  const paths = gitIntentPaths(context, classification.operations, classification.targets);
+  const lookup = consume
+    ? options.gitIntentRegistry.consume.bind(options.gitIntentRegistry)
+    : options.gitIntentRegistry.match.bind(options.gitIntentRegistry);
+
+  for (const operation of classification.operations) {
+    if (!requiresRegisteredIntent(operation)) continue;
+    const evidence = lookup({
+      project: context.project,
+      operation,
+      command: context.command,
+      paths,
+    });
+    if (!evidence) continue;
+    context.gitIntent = evidence.intent;
+    context.gitIntentVerified = true;
+    return;
+  }
+}
+
+function gitIntentPaths(
+  context: HookContext,
+  operations: GitOperation[],
+  classifiedTargets: string[],
+): string[] {
+  const explicit = context.targetPaths?.length ? context.targetPaths : undefined;
+  const paths = explicit
+    ?? (operations.some((operation) => operation === "commit" || operation === "amend")
+      ? stagedGitPaths(context.projectRoot)
+      : classifiedTargets);
+  return [...new Set(paths.map((value) => {
+    const absolute = path.resolve(context.cwd, value);
+    const relative = path.relative(context.projectRoot, absolute);
+    return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : value;
+  }))].sort();
+}
+
+function stagedGitPaths(cwd: string): string[] {
+  try {
+    return execFileSync("git", ["diff", "--cached", "--name-only", "-z"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).split("\0").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function requiresRegisteredIntent(operation: GitOperation): boolean {
+  return [
+    "stage", "commit", "amend", "reset", "rebase", "cherry-pick", "merge",
+    "branch-create", "branch-switch",
+  ].includes(operation);
 }
 
 async function resolveEvaluationScope(
@@ -396,6 +497,9 @@ function buildContext(
       command: details.command,
       resourceKind: details.resourceKind,
       targetPaths: details.targetPaths,
+      confirmation: details.confirmation,
+      approval: details.approval,
+      gitIntent: details.gitIntent,
       destructive: details.destructive,
       audit: {
         enabled: true,
@@ -583,6 +687,28 @@ function toolDetails(tool: string, input: unknown, options: PluginAdapterOptions
   const normalized = tool.toLowerCase();
   const args = recordValue(input) ?? {};
 
+  if (normalized === "malahor_hook_check" || normalized.endsWith("_malahor_hook_check")) {
+    const event = hookEventValue(args.event);
+    const metadata = recordValue(args.metadata) ?? {};
+    if (!event) {
+      return {
+        event: "tool.execute.before",
+        command: tool.replace(/[_.:/-]+/g, " "),
+        metadata: { tool, invalidHookEvent: true },
+      };
+    }
+    return {
+      event,
+      command: stringValue(args.command),
+      resourceKind: args.resourceKind === "filesystem" ? "filesystem" : undefined,
+      targetPaths: stringArray(args.paths),
+      confirmation: stringValue(args.confirm),
+      approval: stringValue(args.approval),
+      gitIntent: parseGitIntent(args.intent),
+      metadata: { ...metadata, tool },
+    };
+  }
+
   if (normalized === "bash") {
     if (options.shellRegistered) {
       return { event: "tool.execute.before", metadata: { tool } };
@@ -641,6 +767,12 @@ const KNOWN_TOOLS = new Set([
   "question",
   "invalid",
 ]);
+
+function hookEventValue(value: unknown): HookEvent | undefined {
+  return typeof value === "string" && HOOK_EVENTS.includes(value as HookEvent)
+    ? value as HookEvent
+    : undefined;
+}
 
 function pathValues(value: unknown): string[] {
   const record = recordValue(value);

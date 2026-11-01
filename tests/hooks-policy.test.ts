@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { hookDefaultPolicyPath, hookProjectPolicyPath, loadHookPolicy, saveHookProfile } from "../src/cli/core/hooks/policy-loader";
 import { mergeSecurityLayers, unenforcedControlPaths, validateSecurityLayer } from "../src/cli/core/hooks/security-policy";
-import type { SecurityLayer } from "../src/cli/core/hooks/types";
+import { runHooks } from "../src/cli/core/hooks/engine";
+import type { HookContext, SecurityLayer } from "../src/cli/core/hooks/types";
 import { resolvePaths } from "../src/cli/core/paths";
 
 const NO_CORPORATE = { corporatePath: null } as const;
@@ -54,7 +55,7 @@ describe("hook policy loader", () => {
     expect(loaded.sources).toEqual([]);
   });
 
-  test("perfil release default exige checks antes de push", () => {
+  test("conserva el campo legacy de checks sin convertirlo en permiso remoto", () => {
     const paths = fixturePaths();
     saveHookProfile(paths, "release");
     const loaded = loadHookPolicy(paths, "malahor", undefined, NO_CORPORATE);
@@ -84,6 +85,30 @@ describe("hook policy loader", () => {
     expect(loaded.policy.git.blockDestructiveCommands).toBe(true);
     expect(loaded.policy.secrets.scanBeforeCommit).toBe(true);
     expect(loaded.policy.memory.destructiveRequiresPreview).toBe(true);
+  });
+
+  test("ningun perfil ni campo legacy rebaja el hard DENY remoto", () => {
+    const paths = fixturePaths();
+    const loaded = loadHookPolicy(paths, "malahor", "off", NO_CORPORATE);
+    const context: HookContext = {
+      event: "git.push.before",
+      harness: "cli",
+      profile: loaded.policy.profile,
+      cwd: paths.cwd,
+      projectRoot: paths.cwd,
+      malahorHome: paths.malahorHome,
+      project: "malahor",
+      policy: { ...loaded.policy, git: { ...loaded.policy.git, requireChecksBeforePush: false } },
+      security: { git: { requirePushApproval: false, requireChecksBeforePush: false } },
+      policyMeta: loaded.policyMeta,
+      command: "git push --dry-run origin dev",
+      confirmation: "APPROVE",
+      metadata: { checksVerified: true },
+    };
+
+    const result = runHooks(context);
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
   });
 
   test("v1 sin schemaVersion no se confunde con v0", () => {

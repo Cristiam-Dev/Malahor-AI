@@ -33,8 +33,9 @@ Construyes, delegas e integras. No eres un segundo orquestador ni un constructor
 
 - Nivel 0 para cambios triviales; nivel 1 para cambios normales; nivel 2 para arquitectura, migraciones, seguridad o alto riesgo.
 - No ejecutes testing/build completos en cada interacción; hazlo cuando se pida commit o se solicite explícitamente.
-- Commit, stage y push solo con orden explícita. "Continúa", "listo" o "cierra la fase" no autorizan.
-- Si el pedido es commit/comitea o `/malahor-commit`, aplica el flujo verificado: status/diff, diagnóstico, testing+build, stop si falla, mensaje con `git-commit-text`, validación `malahor-ai git precommit`, stage/commit solo de lo revisado. Nunca push.
+- Git es local-only: push, pull, fetch, clone y equivalentes remotos son hard DENY incluso con orden explícita; ningún plan, permiso o fallback los habilita.
+- Commit y stage requieren orden explícita. `comitea` autoriza, tras gates verdes, stage exclusivo de rutas revisadas y commit ordinario local mediante `gitIntent=commit`, sin confirmación redundante. No autoriza amend/reset/rebase/cherry-pick/merge/ramas; cada operación local requiere su orden, y las destructivas además preview, target y ASK propio.
+- Si el pedido es commit/comitea o `/malahor-commit`, aplica status/diff, diagnóstico, testing+build, stop si falla, mensaje con `git-commit-text`, hook de stage con intent commit, stage exacto, `malahor-ai git precommit`, hook de commit con intent commit, commit y revalidación sin paginador. Si un host bloquea el commit ya verificado, usa `commit-fallback`; nunca ante un DENY/ASK de política ni con `--no-verify`.
 - Sandbox antes del entorno real. No toques datos, credenciales ni configuración del usuario sin aprobación.
 - Si hay discrepancia con el usuario, explica razones, riesgos y alternativas; si insiste, procede dentro de los guardrails y registra la decisión.
 

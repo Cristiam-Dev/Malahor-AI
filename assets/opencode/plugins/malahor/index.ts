@@ -1585,6 +1585,95 @@ function uniqueStrings2(values) {
   return [...new Set(values)];
 }
 
+// src/cli/core/git-intent.ts
+import { createHash as createHash4, randomUUID } from "node:crypto";
+var GIT_INTENTS = [
+  "stage",
+  "commit",
+  "amend",
+  "reset",
+  "rebase",
+  "cherry-pick",
+  "merge",
+  "branch-create",
+  "branch-switch"
+];
+function parseGitIntent(value) {
+  return typeof value === "string" && GIT_INTENTS.includes(value) ? value : undefined;
+}
+function intentAuthorizes(intent, operation) {
+  if (intent === "commit")
+    return operation === "stage" || operation === "commit";
+  if (intent === "branch-create")
+    return operation === "branch-create" || operation === "branch-switch";
+  return intent === operation;
+}
+function createGitIntentRegistry(options = {}) {
+  const ttlMs = options.ttlMs ?? 120000;
+  const records = new Map;
+  return {
+    register(input) {
+      const now = input.now ?? Date.now();
+      const evidence = {
+        ...input,
+        id: randomUUID(),
+        commandHash: commandHash(input.command),
+        paths: normalizedPaths(input.paths),
+        createdAt: now,
+        expiresAt: now + ttlMs
+      };
+      records.set(evidence.id, evidence);
+      return evidence;
+    },
+    match(input) {
+      return findEvidence(records, input, false);
+    },
+    consume(input) {
+      return findEvidence(records, input, true);
+    },
+    clearExpired(now = Date.now()) {
+      let removed = 0;
+      for (const [id, evidence] of records) {
+        if (evidence.expiresAt >= now)
+          continue;
+        records.delete(id);
+        removed += 1;
+      }
+      return removed;
+    }
+  };
+}
+function findEvidence(records, input, consume) {
+  const now = input.now ?? Date.now();
+  for (const [id, evidence] of records) {
+    if (evidence.expiresAt < now) {
+      records.delete(id);
+      continue;
+    }
+    if (evidence.project !== input.project)
+      continue;
+    if (!intentAuthorizes(evidence.intent, input.operation))
+      continue;
+    if (evidence.commandHash !== commandHash(input.command))
+      continue;
+    if (!samePaths(evidence.paths, normalizedPaths(input.paths)))
+      continue;
+    if (consume)
+      records.delete(id);
+    return evidence;
+  }
+  return;
+}
+function commandHash(command) {
+  return createHash4("sha256").update(command.trim()).digest("hex");
+}
+function normalizedPaths(paths) {
+  return [...new Set((paths ?? []).filter((value) => value.length > 0))].sort();
+}
+function samePaths(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 // src/plugin/compaction.ts
 var MALAHOR_COMPACTION_MARKER = "<!-- malahor-compaction-protocol:v1 -->";
 async function checkpointBeforeCompaction(input, storage, options) {
@@ -1921,6 +2010,7 @@ function recordValue2(value) {
 }
 
 // src/cli/core/hooks/plugin-adapter.ts
+import { execFileSync as execFileSync4 } from "node:child_process";
 import path15 from "node:path";
 
 // src/cli/core/hooks/approvals.ts
@@ -1937,6 +2027,50 @@ import path9 from "node:path";
 
 // src/cli/core/hooks/types.ts
 var HOOK_RESOURCE_KINDS = ["filesystem"];
+var HOOK_EVENTS = [
+  "project.resolve.before",
+  "context.recover.before",
+  "context.save.before",
+  "memory.write.before",
+  "memory.delete.preview",
+  "memory.delete.apply",
+  "memory.move.preview",
+  "memory.move.apply",
+  "memory.restore.preview",
+  "memory.restore.apply",
+  "codegraph.index.before",
+  "install.preflight",
+  "install.beforePolicy",
+  "update.preflight",
+  "uninstall.beforeRemove",
+  "git.commit.before",
+  "git.push.before",
+  "git.remote.before",
+  "git.reset.before",
+  "git.checkout.before",
+  "git.rebase.before",
+  "git.cherry-pick.before",
+  "git.merge.before",
+  "git.branch.before",
+  "file.stage.before",
+  "shell.exec.before",
+  "file.read.before",
+  "file.write.before",
+  "tool.execute.before",
+  "session.prompt.before",
+  "session.context.before",
+  "session.compaction.before",
+  "session.generate.before",
+  "session.title.before",
+  "session.model-request.before",
+  "session.http-request.before",
+  "session.http-response.after",
+  "plugin.permission.before",
+  "dependency.add.before",
+  "api.change.before",
+  "database.change.before",
+  "quality.check.before"
+];
 var CODE_MODE_TOOL_NAMES = new Set([
   "code",
   "code_mode",
@@ -2140,9 +2274,896 @@ function secureChmod2(target, mode) {
   }
 }
 
+// src/cli/core/git-command-policy.ts
+import { execFileSync as execFileSync2 } from "node:child_process";
+var REMOTE_COMMANDS = new Set([
+  "clone",
+  "fetch",
+  "fetch-pack",
+  "http-fetch",
+  "http-push",
+  "ls-remote",
+  "pull",
+  "push",
+  "remote-ext",
+  "remote-fd",
+  "remote-ftp",
+  "remote-ftps",
+  "remote-http",
+  "remote-https",
+  "send-pack"
+]);
+var READ_COMMANDS = new Set([
+  "annotate",
+  "blame",
+  "cat-file",
+  "count-objects",
+  "describe",
+  "diff",
+  "diff-files",
+  "diff-index",
+  "diff-tree",
+  "difftool",
+  "for-each-ref",
+  "fsck",
+  "grep",
+  "help",
+  "log",
+  "merge-base",
+  "name-rev",
+  "notes",
+  "range-diff",
+  "reflog",
+  "rev-list",
+  "rev-parse",
+  "shortlog",
+  "show",
+  "show-branch",
+  "show-ref",
+  "status",
+  "tag",
+  "verify-commit",
+  "verify-tag",
+  "version",
+  "whatchanged"
+]);
+var KNOWN_LOCAL_COMMANDS = new Set([
+  ...READ_COMMANDS,
+  "add",
+  "am",
+  "apply",
+  "archive",
+  "bisect",
+  "branch",
+  "bundle",
+  "checkout",
+  "cherry",
+  "cherry-pick",
+  "clean",
+  "commit",
+  "commit-tree",
+  "config",
+  "fast-export",
+  "fast-import",
+  "filter-branch",
+  "format-patch",
+  "gc",
+  "hash-object",
+  "index-pack",
+  "init",
+  "interpret-trailers",
+  "maintenance",
+  "merge",
+  "merge-file",
+  "merge-index",
+  "merge-tree",
+  "mergetool",
+  "mktag",
+  "mktree",
+  "mv",
+  "pack-objects",
+  "prune",
+  "prune-packed",
+  "read-tree",
+  "rebase",
+  "replace",
+  "reset",
+  "restore",
+  "revert",
+  "rm",
+  "show-index",
+  "sparse-checkout",
+  "stash",
+  "stripspace",
+  "submodule",
+  "switch",
+  "symbolic-ref",
+  "unpack-file",
+  "unpack-objects",
+  "update-index",
+  "update-ref",
+  "var",
+  "worktree",
+  "write-tree"
+]);
+var GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "-C",
+  "-c",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--super-prefix",
+  "--work-tree"
+]);
+var POSIX_SHELL_EXECUTORS = new Set(["bash", "dash", "fish", "ksh", "sh", "zsh"]);
+var WINDOWS_SHELL_EXECUTORS = new Set(["cmd", "cmd.exe"]);
+var POWERSHELL_EXECUTORS = new Set(["powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
+function classifyGitCommand(command, options = {}) {
+  const combined = {
+    hasGitCommand: false,
+    remote: false,
+    failClosed: false,
+    operations: [],
+    destructive: false,
+    targets: [],
+    remoteReasons: []
+  };
+  for (const nestedCommand of commandSubstitutions(command)) {
+    const nested = classifyGitCommand(nestedCommand, options);
+    if (nested.hasGitCommand)
+      nested.failClosed = true;
+    mergeClassification(combined, nested);
+  }
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellTokens(segment);
+    const executableIndexes = shellExecutableIndexes(tokens);
+    classifyNestedShell(tokens, executableIndexes, options, combined);
+    for (const index of executableIndexes) {
+      const executable = tokens[index] ?? "";
+      const remoteHelper = remoteGitExecutableReason(executable);
+      if (remoteHelper) {
+        combined.hasGitCommand = true;
+        mergeClassification(combined, remote(remoteHelper));
+        continue;
+      }
+      if (!isGitExecutable(executable))
+        continue;
+      combined.hasGitCommand = true;
+      mergeClassification(combined, classifyInvocation(tokens, index, options, [], 0));
+    }
+  }
+  return combined;
+}
+function loadGitAliases(cwd) {
+  try {
+    const output = execFileSync2("git", ["config", "--get-regexp", "^alias\\."], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const aliases = {};
+    for (const line of output.split(`
+`)) {
+      const match = /^alias\.([^\s]+)\s+([\s\S]+)$/.exec(line.trim());
+      if (match?.[1] && match[2] !== undefined)
+        aliases[match[1]] = match[2];
+    }
+    return aliases;
+  } catch {
+    return {};
+  }
+}
+function classifyNestedShell(tokens, executableIndexes, options, combined) {
+  for (const index of executableIndexes) {
+    const executable = executableName(tokens[index] ?? "");
+    let commandIndex = -1;
+    if (POSIX_SHELL_EXECUTORS.has(executable)) {
+      commandIndex = tokens.findIndex((token, candidate) => candidate > index && (token === "--command" || /^-[^-]*c[^-]*$/.test(token)));
+    } else if (WINDOWS_SHELL_EXECUTORS.has(executable)) {
+      commandIndex = tokens.findIndex((token, candidate) => candidate > index && ["/c", "/k"].includes(token.toLowerCase()));
+    } else if (POWERSHELL_EXECUTORS.has(executable)) {
+      commandIndex = tokens.findIndex((token, candidate) => candidate > index && ["-c", "-command", "-encodedcommand"].includes(token.toLowerCase()));
+    }
+    const nested = commandIndex >= 0 ? tokens[commandIndex + 1] : undefined;
+    if (nested)
+      mergeClassification(combined, classifyGitCommand(nested, options));
+  }
+}
+function classifyInvocation(tokens, gitIndex, options, aliasStack, depth) {
+  const inlineAliases = {};
+  let index = gitIndex + 1;
+  while (index < tokens.length) {
+    const token = tokens[index] ?? "";
+    if (token === "--") {
+      index += 1;
+      break;
+    }
+    if (!token.startsWith("-"))
+      break;
+    if (token === "-c") {
+      const value = tokens[index + 1] ?? "";
+      recordInlineAlias(value, inlineAliases);
+      index += 2;
+      continue;
+    }
+    if (token.startsWith("-c") && token.length > 2) {
+      recordInlineAlias(token.slice(2), inlineAliases);
+      index += 1;
+      continue;
+    }
+    if (GLOBAL_OPTIONS_WITH_VALUE.has(token) && token !== "-c") {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  const subcommand = tokens[index]?.toLowerCase();
+  if (!subcommand)
+    return local(["unknown"], false, [], false);
+  const args = tokens.slice(index + 1);
+  const aliases = { ...options.aliases ?? {}, ...inlineAliases };
+  const alias = aliases[subcommand];
+  const maxDepth = options.maxAliasDepth ?? 8;
+  if (alias !== undefined && !KNOWN_LOCAL_COMMANDS.has(subcommand) && !REMOTE_COMMANDS.has(subcommand)) {
+    if (aliasStack.includes(subcommand) || depth >= maxDepth) {
+      return remote("alias-recursivo-o-profundo", true);
+    }
+    if (alias.trimStart().startsWith("!")) {
+      return remote(`alias-shell:${subcommand}`, true);
+    }
+    const expanded = shellTokens(`git ${alias} ${args.join(" ")}`);
+    return classifyInvocation(expanded, 0, options, [...aliasStack, subcommand], depth + 1);
+  }
+  if (REMOTE_COMMANDS.has(subcommand))
+    return remote(`git-${subcommand}`);
+  if (subcommand === "archive" && args.some((arg) => arg === "--remote" || arg.startsWith("--remote="))) {
+    return remote("git-archive-remote");
+  }
+  if (subcommand === "remote")
+    return classifyRemoteCommand(args);
+  if (subcommand === "submodule")
+    return classifySubmoduleCommand(args);
+  if (subcommand === "svn" || subcommand === "p4")
+    return remote(`git-${subcommand}`, true);
+  switch (subcommand) {
+    case "add":
+      return local(["stage"], false, pathArguments(args));
+    case "commit":
+      return classifyCommit(args);
+    case "reset":
+      return local(["reset"], true, targetArguments(args, ["--pathspec-from-file"]));
+    case "rebase":
+      return local(["rebase"], true, targetArguments(args, ["--onto", "--exec", "-x"]));
+    case "cherry-pick":
+      return local(["cherry-pick"], args.some(isConflictStateFlag), targetArguments(args));
+    case "merge":
+      return local(["merge"], args.some(isConflictStateFlag), targetArguments(args, ["-m", "--message", "-S", "--gpg-sign"]));
+    case "branch":
+      return classifyBranch(args);
+    case "switch":
+      return classifySwitch(args);
+    case "checkout":
+      return classifyCheckout(args);
+    case "clean":
+      return local(["clean"], true, pathArguments(args));
+    case "restore":
+      return local(["discard"], true, pathArguments(args));
+    case "tag":
+      return classifyTagCommand(args);
+    case "notes":
+      return classifyNotesCommand(args);
+    case "reflog":
+      return classifyReflogCommand(args);
+    default:
+      if (READ_COMMANDS.has(subcommand))
+        return local(["read"], false, []);
+      if (KNOWN_LOCAL_COMMANDS.has(subcommand))
+        return unsupportedLocalMutation(args);
+      return remote(`comando-o-alias-no-resuelto:${subcommand}`, true);
+  }
+}
+function classifyRemoteCommand(args) {
+  const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+  if (!subcommand)
+    return local(["read"], false, []);
+  if (["update", "prune"].includes(subcommand))
+    return remote(`git-remote-${subcommand}`);
+  if (subcommand === "show" && !args.includes("-n") && !args.includes("--no-query")) {
+    return remote("git-remote-show");
+  }
+  if (subcommand === "set-head" && (args.includes("-a") || args.includes("--auto"))) {
+    return remote("git-remote-set-head-auto");
+  }
+  if (["add", "remove", "rename", "set-branches", "set-head", "set-url"].includes(subcommand)) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, targetArguments(args));
+}
+function classifySubmoduleCommand(args) {
+  const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+  if (["add", "update", "foreach"].includes(subcommand ?? "")) {
+    return remote(`git-submodule-${subcommand}`, true);
+  }
+  if (["absorbgitdirs", "deinit", "init", "set-branch", "set-url", "sync"].includes(subcommand ?? "")) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, targetArguments(args));
+}
+function classifyTagCommand(args) {
+  const mutatingFlag = args.some((arg) => arg === "-d" || arg === "--delete" || arg === "-f" || arg === "--force" || arg === "-a" || arg === "--annotate" || arg === "-s" || arg === "--sign" || arg === "-u" || arg === "--local-user" || arg === "--create-reflog" || arg.startsWith("--local-user="));
+  const readMode = args.some((arg) => arg === "-l" || arg === "--list" || arg === "-v" || arg === "--verify" || arg.startsWith("--contains") || arg.startsWith("--no-contains") || arg.startsWith("--points-at") || arg.startsWith("--merged") || arg.startsWith("--no-merged"));
+  const positionals = targetArguments(args, [
+    "-m",
+    "--message",
+    "-F",
+    "--file",
+    "-u",
+    "--local-user",
+    "--format",
+    "--sort",
+    "--color",
+    "--column",
+    "--contains",
+    "--no-contains",
+    "--points-at",
+    "--merged",
+    "--no-merged"
+  ]);
+  if (mutatingFlag || !readMode && positionals.length > 0)
+    return unsupportedLocalMutation(args);
+  return local(["read"], false, []);
+}
+function classifyNotesCommand(args) {
+  if (args.some((arg) => ["add", "append", "copy", "edit", "merge", "prune", "remove"].includes(arg.toLowerCase()))) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, []);
+}
+function classifyReflogCommand(args) {
+  if (args.some((arg) => ["delete", "expire", "write"].includes(arg.toLowerCase()))) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, []);
+}
+function unsupportedLocalMutation(args) {
+  return local(["unknown"], true, targetArguments(args), true);
+}
+function classifyBranch(args) {
+  if (args.some((arg) => arg === "--delete" || arg.startsWith("--delete=")) || hasShortOption(args, "d") || hasShortOption(args, "D")) {
+    return local(["branch-delete"], true, [
+      ...targetArguments(args),
+      ...attachedOptionValues(args, ["d", "D"], ["delete"])
+    ]);
+  }
+  const targets = [...new Set([
+    ...targetArguments(args, ["-m", "-M", "--move", "-c", "-C", "--copy"]),
+    ...attachedOptionValues(args, ["m", "M", "c", "C"], ["move", "copy"])
+  ])];
+  const destructive = hasShortOption(args, "f") || hasShortOption(args, "M") || hasShortOption(args, "C") || args.includes("--force");
+  return targets.length > 0 ? local(["branch-create"], destructive, targets) : local(["read"], false, []);
+}
+function classifySwitch(args) {
+  const create = hasShortOption(args, "c") || hasShortOption(args, "C") || args.some((arg) => arg === "--create" || arg.startsWith("--create=") || arg === "--force-create" || arg.startsWith("--force-create="));
+  const destructive = hasShortOption(args, "C") || hasShortOption(args, "f") || args.some((arg) => ["--force", "--force-create", "--discard-changes"].includes(arg) || arg.startsWith("--force-create="));
+  const targets = [...new Set([
+    ...targetArguments(args, ["-c", "-C", "--create", "--force-create"]),
+    ...attachedOptionValues(args, ["c", "C"], ["create", "force-create"])
+  ])];
+  return local(create ? ["branch-create", "branch-switch"] : ["branch-switch"], destructive, targets);
+}
+function classifyCheckout(args) {
+  const create = hasShortOption(args, "b") || hasShortOption(args, "B") || args.some((arg) => arg === "--orphan" || arg.startsWith("--orphan="));
+  const discard = args.includes("--") || args.some((arg) => arg === "." || arg === "--patch") || hasShortOption(args, "p");
+  if (discard)
+    return local(["discard"], true, pathArguments(args));
+  const destructive = hasShortOption(args, "B") || hasShortOption(args, "f") || args.includes("--force");
+  const targets = [...new Set([
+    ...targetArguments(args, ["-b", "-B", "--orphan"]),
+    ...attachedOptionValues(args, ["b", "B"], ["orphan"])
+  ])];
+  return local(create ? ["branch-create", "branch-switch"] : ["branch-switch"], destructive, targets);
+}
+var COMMIT_IMPLICIT_LONG_OPTIONS = new Set([
+  "--all",
+  "--include",
+  "--interactive",
+  "--only",
+  "--patch",
+  "--pathspec-from-file"
+]);
+var COMMIT_IMPLICIT_SHORT_OPTIONS = new Set(["a", "i", "o", "p"]);
+var COMMIT_LONG_OPTIONS_WITH_VALUE = new Set([
+  "--message",
+  "--file",
+  "--reuse-message",
+  "--reedit-message",
+  "--template",
+  "--author",
+  "--date",
+  "--cleanup",
+  "--fixup",
+  "--squash",
+  "--trailer",
+  "--pathspec-from-file"
+]);
+var COMMIT_SHORT_OPTIONS_WITH_VALUE = new Set(["m", "F", "C", "c", "t"]);
+var COMMIT_SHORT_OPTIONS_WITH_OPTIONAL_ATTACHED_VALUE = new Set(["S", "u"]);
+function classifyCommit(args) {
+  const amend = args.includes("--amend");
+  const parsed = parseCommitArguments(args);
+  const operations = [
+    ...parsed.implicitStage ? ["implicit-stage"] : [],
+    amend ? "amend" : "commit"
+  ];
+  return local(operations, amend, amend ? ["HEAD", ...parsed.targets] : parsed.targets);
+}
+function parseCommitArguments(args) {
+  let implicitStage = false;
+  const targets = [];
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      targets.push(...args.slice(index + 1));
+      implicitStage ||= targets.length > 0;
+      break;
+    }
+    if (COMMIT_IMPLICIT_LONG_OPTIONS.has(arg) || [...COMMIT_IMPLICIT_LONG_OPTIONS].some((option) => arg.startsWith(`${option}=`))) {
+      implicitStage = true;
+    }
+    if (COMMIT_LONG_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if ([...COMMIT_LONG_OPTIONS_WITH_VALUE].some((option) => arg.startsWith(`${option}=`)))
+      continue;
+    if (/^-[^-]/.test(arg)) {
+      const short = parseCommitShortOptions(arg);
+      implicitStage ||= short.implicitStage;
+      if (short.consumesNext)
+        index += 1;
+      continue;
+    }
+    if (arg.startsWith("-"))
+      continue;
+    targets.push(arg);
+    implicitStage = true;
+  }
+  return { implicitStage, targets };
+}
+function parseCommitShortOptions(arg) {
+  let implicitStage = false;
+  for (let index = 1;index < arg.length; index += 1) {
+    const option = arg[index] ?? "";
+    if (COMMIT_IMPLICIT_SHORT_OPTIONS.has(option))
+      implicitStage = true;
+    if (COMMIT_SHORT_OPTIONS_WITH_VALUE.has(option)) {
+      return { implicitStage, consumesNext: index === arg.length - 1 };
+    }
+    if (COMMIT_SHORT_OPTIONS_WITH_OPTIONAL_ATTACHED_VALUE.has(option)) {
+      return { implicitStage, consumesNext: false };
+    }
+  }
+  return { implicitStage, consumesNext: false };
+}
+function targetArguments(args, valueFlags = []) {
+  const values = [];
+  const consumes = new Set(valueFlags);
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      values.push(...args.slice(index + 1));
+      break;
+    }
+    if (consumes.has(arg)) {
+      index += 1;
+      const value = args[index];
+      if (value)
+        values.push(value);
+      continue;
+    }
+    if (!arg.startsWith("-"))
+      values.push(arg);
+  }
+  return values;
+}
+function hasShortOption(args, option) {
+  return args.some((arg) => /^-[^-]/.test(arg) && arg.slice(1).includes(option));
+}
+function attachedOptionValues(args, short, long) {
+  const values = [];
+  for (const arg of args) {
+    if (/^-[^-]/.test(arg)) {
+      for (const option of short) {
+        const index = arg.indexOf(option, 1);
+        if (index >= 1 && index < arg.length - 1) {
+          values.push(arg.slice(index + 1));
+          break;
+        }
+      }
+    }
+    for (const option of long) {
+      const prefix = `--${option}=`;
+      if (arg.startsWith(prefix) && arg.length > prefix.length)
+        values.push(arg.slice(prefix.length));
+    }
+  }
+  return values;
+}
+function pathArguments(args) {
+  const separator = args.indexOf("--");
+  if (separator >= 0)
+    return args.slice(separator + 1);
+  return args.filter((arg) => !arg.startsWith("-"));
+}
+function isConflictStateFlag(value) {
+  return ["--abort", "--continue", "--quit", "--skip"].includes(value);
+}
+function local(operations, destructive, targets, failClosed = false) {
+  return { remote: false, failClosed, operations, destructive, targets, remoteReasons: [] };
+}
+function remote(reason, failClosed = false) {
+  return {
+    remote: true,
+    failClosed,
+    operations: ["remote"],
+    destructive: false,
+    targets: [],
+    remoteReasons: [reason]
+  };
+}
+function mergeClassification(combined, current) {
+  if ("hasGitCommand" in current && current.hasGitCommand)
+    combined.hasGitCommand = true;
+  combined.remote ||= current.remote;
+  combined.failClosed ||= current.failClosed;
+  combined.destructive ||= current.destructive;
+  appendUnique(combined.operations, current.operations);
+  appendUnique(combined.targets, current.targets);
+  appendUnique(combined.remoteReasons, current.remoteReasons);
+}
+function appendUnique(target, values) {
+  for (const value of values)
+    if (!target.includes(value))
+      target.push(value);
+}
+function recordInlineAlias(value, aliases) {
+  const match = /^alias\.([^=]+)=([\s\S]*)$/i.exec(value);
+  if (match?.[1] && match[2] !== undefined)
+    aliases[match[1].toLowerCase()] = match[2];
+}
+function isGitExecutable(value) {
+  const executable = executableName(value);
+  return executable === "git" || executable === "git.exe";
+}
+function remoteGitExecutableReason(value) {
+  const executable = executableName(value).replace(/\.exe$/, "");
+  if (/^git-remote-.+/.test(executable))
+    return `helper-${executable}`;
+  if (["git-fetch-pack", "git-http-fetch", "git-http-push", "git-ls-remote", "git-send-pack"].includes(executable)) {
+    return `helper-${executable}`;
+  }
+  return;
+}
+function executableName(value) {
+  return value.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
+}
+function shellExecutableIndexes(tokens) {
+  const indexes = new Set;
+  const primary = unwrapCommandIndex(tokens, 0);
+  if (primary >= 0)
+    indexes.add(primary);
+  for (let index = 0;index < tokens.length; index += 1) {
+    if (tokens[index] !== "-exec" && tokens[index] !== "-execdir")
+      continue;
+    const nested = unwrapCommandIndex(tokens, index + 1);
+    if (nested >= 0)
+      indexes.add(nested);
+  }
+  return [...indexes].sort((left, right) => left - right);
+}
+function unwrapCommandIndex(tokens, start) {
+  let index = skipCommandAssignments(tokens, start);
+  const visited = new Set;
+  while (index >= 0 && index < tokens.length && !visited.has(index)) {
+    visited.add(index);
+    const executable = executableName(tokens[index] ?? "");
+    const nested = wrappedCommandIndex(executable, tokens, index);
+    if (nested === undefined)
+      return index;
+    if (nested < 0)
+      return -1;
+    index = skipCommandAssignments(tokens, nested);
+  }
+  return -1;
+}
+function wrappedCommandIndex(executable, tokens, index) {
+  switch (executable) {
+    case "env":
+      return firstWrapperOperand(tokens, index + 1, new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]), true);
+    case "command":
+      return commandBuiltinTarget(tokens, index + 1);
+    case "exec":
+      return firstWrapperOperand(tokens, index + 1, new Set(["-a"]));
+    case "nohup":
+      return firstWrapperOperand(tokens, index + 1, new Set);
+    case "sudo":
+    case "sudo.exe":
+      return firstWrapperOperand(tokens, index + 1, new Set([
+        "-C",
+        "--close-from",
+        "-D",
+        "--chdir",
+        "-g",
+        "--group",
+        "-h",
+        "--host",
+        "-p",
+        "--prompt",
+        "-R",
+        "--chroot",
+        "-r",
+        "--role",
+        "-T",
+        "--command-timeout",
+        "-t",
+        "--type",
+        "-U",
+        "--other-user",
+        "-u",
+        "--user"
+      ]));
+    case "xargs":
+      return firstWrapperOperand(tokens, index + 1, new Set([
+        "-a",
+        "--arg-file",
+        "-d",
+        "--delimiter",
+        "-E",
+        "-e",
+        "--eof",
+        "-I",
+        "--replace",
+        "-L",
+        "-l",
+        "--max-lines",
+        "-n",
+        "--max-args",
+        "-P",
+        "--max-procs",
+        "-s",
+        "--max-chars"
+      ]));
+    case "timeout": {
+      const duration = firstWrapperOperand(tokens, index + 1, new Set(["-k", "--kill-after", "-s", "--signal"]));
+      return duration >= 0 ? duration + 1 : -1;
+    }
+    default:
+      return;
+  }
+}
+function commandBuiltinTarget(tokens, start) {
+  for (let index = start;index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    if (token === "--")
+      return index + 1 < tokens.length ? index + 1 : -1;
+    if (token === "-v" || token === "-V")
+      return -1;
+    if (token === "-p")
+      continue;
+    return index;
+  }
+  return -1;
+}
+function firstWrapperOperand(tokens, start, optionsWithValue, skipAssignments = false) {
+  for (let index = start;index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    if (token === "--")
+      return index + 1 < tokens.length ? index + 1 : -1;
+    if (skipAssignments && isEnvironmentAssignment(token))
+      continue;
+    if (!token.startsWith("-") || token === "-")
+      return index;
+    if (optionsWithValue.has(token))
+      index += 1;
+  }
+  return -1;
+}
+function skipCommandAssignments(tokens, start) {
+  let index = start;
+  while (index < tokens.length && isEnvironmentAssignment(tokens[index] ?? ""))
+    index += 1;
+  return index;
+}
+function isEnvironmentAssignment(value) {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(value);
+}
+function commandSubstitutions(command) {
+  const substitutions = [];
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index] ?? "";
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'")
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" && quote === undefined) {
+      quote = "'";
+      continue;
+    }
+    if (character === '"') {
+      if (quote === '"')
+        quote = undefined;
+      else if (quote === undefined)
+        quote = '"';
+      continue;
+    }
+    if (character === "$" && command[index + 1] === "(") {
+      const nested = readParenthesizedSubstitution(command, index + 2);
+      if (nested) {
+        substitutions.push(nested.command);
+        index = nested.end;
+      }
+      continue;
+    }
+    if (character === "`") {
+      const nested = readBacktickSubstitution(command, index + 1);
+      if (nested) {
+        substitutions.push(nested.command);
+        index = nested.end;
+      }
+    }
+  }
+  return substitutions;
+}
+function readParenthesizedSubstitution(source, start) {
+  let depth = 1;
+  let quote;
+  let escaped = false;
+  for (let index = start;index < source.length; index += 1) {
+    const character = source[index] ?? "";
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "(")
+      depth += 1;
+    if (character !== ")")
+      continue;
+    depth -= 1;
+    if (depth === 0)
+      return { command: source.slice(start, index), end: index };
+  }
+  return;
+}
+function readBacktickSubstitution(source, start) {
+  let escaped = false;
+  for (let index = start;index < source.length; index += 1) {
+    const character = source[index] ?? "";
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "`")
+      return { command: source.slice(start, index), end: index };
+  }
+  return;
+}
+function splitShellSegments(command) {
+  const segments = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index] ?? "";
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === `
+` || character === ";" || character === "|" || character === "&") {
+      if (current.trim())
+        segments.push(current.trim());
+      current = "";
+      if ((character === "|" || character === "&") && command[index + 1] === character)
+        index += 1;
+      continue;
+    }
+    current += character;
+  }
+  if (current.trim())
+    segments.push(current.trim());
+  return segments;
+}
+function shellTokens(command) {
+  const tokens = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (current)
+        tokens.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (current)
+    tokens.push(current);
+  return tokens;
+}
+
 // src/cli/core/hooks/approvals.ts
 var TRUSTED_CHANNELS = new Set(["cli-tty", "opencode-ui", "host-ui"]);
 function consumeApproval(nonce, context, options = {}) {
+  if (isRemoteGitContext(context)) {
+    return { ok: false, reason: "las operaciones Git remotas no admiten aprobaciones" };
+  }
   if (!/^[a-f0-9]{64}$/.test(nonce)) {
     return { ok: false, reason: "nonce de aprobacion invalido" };
   }
@@ -2205,6 +3226,15 @@ function consumeApproval(nonce, context, options = {}) {
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : "ledger de aprobaciones no disponible" };
   }
+}
+function isRemoteGitContext(context) {
+  if (context.event === "git.push.before" || context.event === "git.remote.before")
+    return true;
+  if (!context.command?.trim())
+    return false;
+  return classifyGitCommand(context.command, {
+    aliases: loadGitAliases(context.projectRoot)
+  }).remote;
 }
 function approvalsDirectory(malahorHome) {
   return path11.join(malahorHome, "approvals");
@@ -2295,7 +3325,7 @@ function isRecord3(value) {
 }
 
 // src/cli/core/hooks/rules.ts
-import { execFileSync as execFileSync2 } from "node:child_process";
+import { execFileSync as execFileSync3 } from "node:child_process";
 import fs10 from "node:fs";
 import path14 from "node:path";
 
@@ -2677,11 +3707,12 @@ var builtInHookRules = [
   { id: "documentation-boundary", run: documentationBoundaryGuard },
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
+  { id: "git-remote", run: remoteGitGuard },
+  { id: "git-intent-scope", run: gitIntentScopeGuard },
   { id: "dangerous-git", run: dangerousGitGuard },
   { id: "git-consent", run: gitConsentGuard },
   { id: "commit-message", run: commitMessageGuard },
   { id: "secret-scan", run: secretScanGuard },
-  { id: "push-checks", run: pushChecksGuard },
   { id: "shell-policy", run: shellPolicyGuard },
   { id: "file-boundary", run: fileBoundaryGuard },
   { id: "tool-policy", run: toolPolicyGuard },
@@ -2770,8 +3801,8 @@ function infrastructureTargetPaths(context, command) {
     return gitResolution(changedPaths(context.projectRoot));
   if (context.event === "git.commit.before")
     return gitResolution(stagedPaths(context.projectRoot));
-  if (context.event === "git.push.before")
-    return gitResolution(outgoingPaths(context.projectRoot));
+  if (context.event === "git.push.before" || context.event === "git.remote.before")
+    return { paths: [], unresolved: false };
   if (context.event === "tool.execute.before")
     return { paths: [], unresolved: false };
   if (context.event !== "shell.exec.before" || !command)
@@ -2780,11 +3811,8 @@ function infrastructureTargetPaths(context, command) {
     return gitAddResolution(context, command);
   if (isGitCommandOperation(command, "commit"))
     return gitResolution(stagedPaths(context.projectRoot));
-  if (isGitCommandOperation(command, "push")) {
-    if (/(?:^|\s)--dry-run(?:\s|$)/.test(command))
-      return { paths: [], unresolved: false };
-    return gitResolution(outgoingPaths(context.projectRoot));
-  }
+  if (isGitCommandOperation(command, "push"))
+    return { paths: [], unresolved: false };
   if (isPotentialFilesystemMutation(command)) {
     return { paths: shellPathCandidates(command), unresolved: false };
   }
@@ -2795,7 +3823,7 @@ function gitAddResolution(context, command) {
   if (!segment || /\bgit\s+-c\b|\bgit\s+-C\b|--pathspec-from-file|(?:^|\s)-(?:p|i)(?:\s|$)/.test(segment)) {
     return { paths: [], unresolved: true };
   }
-  const tokens = shellTokens(segment);
+  const tokens = shellTokens2(segment);
   const git = tokens.findIndex((token) => token === "git");
   const add = tokens.findIndex((token, index) => index > git && token === "add");
   if (git < 0 || add < 0)
@@ -2810,9 +3838,15 @@ function gitAddResolution(context, command) {
   return { paths: targets, unresolved: targets.length === 0 };
 }
 function isGitCommandOperation(command, operation) {
-  return command.split(/(?:&&|\|\||[;|\n])/).some((segment) => new RegExp(`\\bgit\\b[^;&|\\n]*\\b${operation}\\b`).test(segment));
+  const classification = classifyGitCommand(command);
+  if (operation === "add")
+    return classification.operations.includes("stage");
+  if (operation === "commit") {
+    return classification.operations.includes("commit") || classification.operations.includes("amend");
+  }
+  return classification.remoteReasons.some((reason) => reason === "git-push");
 }
-function shellTokens(command) {
+function shellTokens2(command) {
   const tokens = [];
   let current = "";
   let quote;
@@ -2857,13 +3891,13 @@ function isPotentialFilesystemMutation(command) {
 }
 function shellPathCandidates(command) {
   const expanded = command.replace(/(>>?|<)/g, " $1 ");
-  return shellTokens(expanded).filter((token) => ![">", ">>", "<"].includes(token) && !token.startsWith("-")).map((token) => token.includes("=") ? token.slice(token.indexOf("=") + 1) : token).map((token) => token.replace(/^[([{]+|[\])},]+$/g, "")).filter((token) => token.length > 0 && !token.includes("://"));
+  return shellTokens2(expanded).filter((token) => ![">", ">>", "<"].includes(token) && !token.startsWith("-")).map((token) => token.includes("=") ? token.slice(token.indexOf("=") + 1) : token).map((token) => token.replace(/^[([{]+|[\])},]+$/g, "")).filter((token) => token.length > 0 && !token.includes("://"));
 }
 function gitResolution(paths) {
   return paths === null ? { paths: [], unresolved: true } : { paths, unresolved: false };
 }
 function documentationBoundaryGuard(context) {
-  const commit = context.event === "git.commit.before" || context.event === "shell.exec.before" && /\bgit\s+commit\b/.test(context.command ?? "");
+  const commit = context.event === "git.commit.before" || context.event === "shell.exec.before" && gitClassification(context).operations.some((operation) => operation === "commit" || operation === "amend");
   const relevant = context.event === "file.write.before" || context.event === "file.stage.before" || commit;
   if (!relevant)
     return [];
@@ -2975,18 +4009,9 @@ function changedPaths(cwd) {
     return null;
   return [...new Set(available.flat())];
 }
-function outgoingPaths(cwd) {
-  const upstream = gitPathQuery(cwd, ["diff", "--name-only", "--diff-filter=ACMRD", "-z", "@{u}...HEAD"]);
-  if (upstream !== null)
-    return upstream;
-  const initialPush = gitPathQuery(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]);
-  if (initialPush !== null)
-    return initialPush;
-  return changedPaths(cwd);
-}
 function gitPathQuery(cwd, args) {
   try {
-    return execFileSync2("git", args, {
+    return execFileSync3("git", args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
@@ -3008,7 +4033,7 @@ function isExactGitRemoval(context, targetPath, cached) {
     return false;
   const relativeTarget = path14.relative(projectRoot, absoluteTarget);
   try {
-    const output = execFileSync2("git", [
+    const output = execFileSync3("git", [
       "diff",
       ...cached ? ["--cached"] : [],
       "--no-ext-diff",
@@ -3079,44 +4104,94 @@ function policySafetyGuard(context) {
   }
   return violations;
 }
+function remoteGitGuard(context) {
+  const classification = gitClassification(context);
+  const remoteEvent = context.event === "git.push.before" || context.event === "git.remote.before";
+  if (!remoteEvent && !classification.remote)
+    return [];
+  const detail = classification.remoteReasons.length > 0 ? classification.remoteReasons.join(", ") : context.event;
+  return [{
+    id: "MAL-HOOK-GIT-REMOTE-DENY",
+    decision: "deny",
+    message: `Operacion Git remota prohibida permanentemente (${detail}). Malahor solo opera Git local.`,
+    fix: "No hay aprobacion, perfil, plan, token ni fallback que habilite red. Ejecuta fuera de Malahor bajo tu propia responsabilidad."
+  }];
+}
 function dangerousGitGuard(context) {
-  const blockDestructive = context.security?.git?.blockDestructive ?? context.policy?.git.blockDestructiveCommands;
-  if (blockDestructive === false)
+  const classification = gitClassification(context);
+  if (!classification.hasGitCommand || classification.remote)
     return [];
-  const command = (context.command ?? "").trim();
-  if (!command && !context.event.startsWith("git."))
+  const unsupported = classification.operations.filter((operation) => operation === "clean" || operation === "discard" || operation === "branch-delete" || operation === "implicit-stage" || operation === "unknown");
+  if (classification.failClosed || unsupported.length > 0) {
+    const detail = unsupported.length > 0 ? unsupported.join(", ") : "ejecucion indirecta no evaluable";
+    return [{
+      id: "MAL-HOOK-GIT-DESTRUCTIVE-DENY",
+      decision: "deny",
+      message: `Operacion local destructiva fuera del alcance permitido: ${detail}.`,
+      fix: "No descartes, borres ni stages implicitamente con commit. Usa paths exactos y el flujo local especifico para cada efecto."
+    }];
+  }
+  if (!classification.destructive)
     return [];
-  const checks = [
-    [/\bgit\s+reset\s+--hard\b/, "git reset --hard descarta trabajo local.", "Pide confirmacion fuerte y respaldo; preferir reset no destructivo."],
-    [/\bgit\s+clean\s+-[^\n]*[fd]/, "git clean -fd borra archivos no rastreados.", "Usa dry-run `git clean -nd` y confirmacion explicita antes."],
-    [/\bgit\s+checkout\s+(--\s*)?\.\b/, "git checkout -- . descarta cambios del usuario.", "No revertir trabajo ajeno; limita el path y pide confirmacion fuerte."],
-    [/\bgit\s+push\b[^\n]*(--force|-f)\b/, "push --force puede sobrescribir historia remota.", "Usa --force-with-lease solo con confirmacion fuerte y razon documentada."],
-    [/\bgit\s+commit\b[^\n]*--amend\b/, "commit --amend reescribe historia local.", "Evitalo salvo pedido explicito del usuario."]
-  ];
-  return checks.filter(([pattern]) => pattern.test(command)).map(([, message, fix]) => ({ id: "MAL-HOOK-GIT-DESTRUCTIVE", decision: "deny", message, fix }));
+  const target = classification.targets.length > 0 ? classification.targets.join(", ") : inferredGitTarget(classification.operations);
+  return [{
+    id: "MAL-HOOK-GIT-DESTRUCTIVE",
+    decision: "ask",
+    message: `Operacion Git local destructiva: ${classification.operations.join(", ")}; target: ${target}.`,
+    fix: "Muestra este preview y solicita una aprobacion humana de un solo uso vinculada al comando, proyecto, target y policy hash."
+  }];
+}
+function gitIntentScopeGuard(context) {
+  if (context.metadata?.validationOnly === true)
+    return [];
+  const classification = gitClassification(context);
+  if (!classification.hasGitCommand || classification.remote || context.gitIntentVerified === true)
+    return [];
+  const intent = contextGitIntent(context);
+  if (!intent)
+    return [];
+  if (classification.operations.includes("stage") && intentAuthorizes(intent, "stage")) {
+    const declared = normalizedGitPaths(context, filesystemTargetPaths(context));
+    const commandPaths = normalizedGitPaths(context, classification.targets);
+    const unsafe = declared.length === 0 || commandPaths.length === 0 || !sameStringSet(declared, commandPaths) || classification.targets.some(unsafeGitPathspec) || commandPaths.some((target) => unsafeStageTarget(context, target)) || /(?:^|\s)(?:-[^-]*[Aipux][^-]*|--all|--interactive|--patch|--pathspec-from-file(?:=|\s)|--renormalize|--update)(?:\s|$)/.test(context.command ?? "");
+    if (unsafe) {
+      return [{
+        id: "MAL-HOOK-GIT-INTENT-SCOPE",
+        decision: "deny",
+        message: "La intencion de stage/commit no esta vinculada a una lista exacta de archivos revisados.",
+        fix: "Usa `git add -- <archivos exactos>` y declara esos mismos paths; no uses -A, directorios, globs, modo interactivo ni pathspecs indirectos."
+      }];
+    }
+  }
+  if ((classification.operations.includes("commit") || classification.operations.includes("amend")) && (intentAuthorizes(intent, "commit") || intentAuthorizes(intent, "amend")) && filesystemTargetPaths(context).length === 0) {
+    return [{
+      id: "MAL-HOOK-GIT-INTENT-SCOPE",
+      decision: "deny",
+      message: "La intencion de commit no declara el staged exacto revisado.",
+      fix: "Declara los paths staged verificados o usa la evidencia one-shot emitida por malahor_hook_check."
+    }];
+  }
+  return [];
 }
 function gitConsentGuard(context) {
   const command = (context.command ?? "").trim();
   if (!command || context.metadata?.validationOnly === true)
     return [];
-  const shell = context.event === "shell.exec.before";
-  if ((context.event === "git.commit.before" || shell) && /\bgit\s+commit\b/.test(command) && !hasConsent(context, "USER_REQUESTED_COMMIT", "userExplicitlyRequestedCommit")) {
-    return [{
-      id: "MAL-HOOK-GIT-CONSENT",
-      decision: shell ? "ask" : "deny",
-      message: "git commit requiere pedido explicito del usuario; 'continuar', 'cerrar fase' o 'implementar' no autorizan commitear.",
-      fix: "No ejecutes el commit. Pide confirmacion explicita o valida con confirmacion USER_REQUESTED_COMMIT si el usuario pidio commitear."
-    }];
-  }
-  if ((context.event === "file.stage.before" || shell) && /\bgit\s+add\b/.test(command) && !hasConsent(context, "USER_REQUESTED_STAGE", "userExplicitlyRequestedStage")) {
-    return [{
-      id: "MAL-HOOK-GIT-STAGE-CONSENT",
-      decision: shell ? "ask" : "deny",
-      message: "git add/stage requiere pedido explicito del usuario; preparar cambios no equivale a staging.",
-      fix: "No ejecutes git add. Pide confirmacion explicita o valida con confirmacion USER_REQUESTED_STAGE si el usuario pidio stagear."
-    }];
-  }
-  return [];
+  const classification = gitClassification(context);
+  if (!classification.hasGitCommand || classification.remote)
+    return [];
+  const protectedOperations = classification.operations.filter(requiresGitIntent);
+  if (protectedOperations.length === 0)
+    return [];
+  const intent = contextGitIntent(context);
+  if (intent && protectedOperations.every((operation) => intentAuthorizes(intent, operation)))
+    return [];
+  return [{
+    id: protectedOperations.includes("stage") ? "MAL-HOOK-GIT-STAGE-CONSENT" : "MAL-HOOK-GIT-CONSENT",
+    decision: "ask",
+    message: `Git local requiere intencion explicita para: ${protectedOperations.join(", ")}. Un pedido de commit solo autoriza stage exacto y commit ordinario.`,
+    fix: "Propaga `gitIntent` desde el pedido explicito. No uses tokens humanos ni reutilices intenciones para otra operacion."
+  }];
 }
 function commitMessageGuard(context) {
   if (context.policy?.git.validateCommitMessage === false)
@@ -3149,17 +4224,6 @@ function secretScanGuard(context) {
     decision: "deny",
     message: `Posibles secretos detectados: ${leaks.slice(0, 5).join(", ")}`,
     fix: "Remueve secretos, usa variables de entorno/secret manager y rota credenciales si fueron expuestas."
-  }];
-}
-function pushChecksGuard(context) {
-  const requireChecks = context.security?.git?.requireChecksBeforePush ?? context.policy?.git.requireChecksBeforePush;
-  if (requireChecks === false || context.event !== "git.push.before")
-    return [];
-  return [{
-    id: "MAL-HOOK-PUSH-CHECKS",
-    decision: strictness(context.profile, "ask"),
-    message: "Push sin evidencia de checks vinculada a la revision.",
-    fix: "Corre tests/build y registra evidencia verificable; CHECKS_OK no autoriza por si solo."
   }];
 }
 function shellPolicyGuard(context) {
@@ -3218,15 +4282,8 @@ function shellPolicyGuard(context) {
       }
     }
   }
-  if (/\bgit\s+push\b/.test(command) && context.metadata?.checksVerified !== true) {
-    violations.push({
-      id: "MAL-HOOK-PUSH-CLI-EVIDENCE",
-      decision: "ask",
-      message: "Push desde el plugin sin evidencia de checks vinculada a la revision.",
-      fix: "Ejecuta prepush por CLI con evidencia verificable; la aprobacion de UI no sustituye checks."
-    });
-  }
-  if (/\bgit\s+commit\b/.test(command) && context.security?.git?.scanStagedContent !== false) {
+  const git = gitClassification(context);
+  if ((git.operations.includes("commit") || git.operations.includes("amend")) && context.security?.git?.scanStagedContent !== false) {
     const staged = scanStagedSecrets(context.cwd, /\s(?:-a|--all)\b/.test(command));
     if (staged === null) {
       violations.push({
@@ -3563,7 +4620,7 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
   for (const args of commands) {
     let output;
     try {
-      output = execFileSync2("git", args, {
+      output = execFileSync3("git", args, {
         cwd,
         encoding: "utf8",
         timeout: 2000,
@@ -3604,8 +4661,63 @@ function extractCommitMessage(command) {
   const match = /\s-m\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(command);
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
 }
-function hasConsent(context, confirmation, metadataKey) {
-  return context.confirmation === confirmation || context.metadata?.[metadataKey] === true;
+var GIT_CLASSIFICATIONS = new WeakMap;
+function gitClassification(context) {
+  const cached = GIT_CLASSIFICATIONS.get(context);
+  if (cached)
+    return cached;
+  const classification = classifyGitCommand(context.command ?? "", {
+    aliases: loadGitAliases(context.projectRoot)
+  });
+  GIT_CLASSIFICATIONS.set(context, classification);
+  return classification;
+}
+function requiresGitIntent(operation) {
+  return [
+    "stage",
+    "commit",
+    "amend",
+    "reset",
+    "rebase",
+    "cherry-pick",
+    "merge",
+    "branch-create",
+    "branch-switch"
+  ].includes(operation);
+}
+function contextGitIntent(context) {
+  return context.gitIntent;
+}
+function inferredGitTarget(operations) {
+  if (operations.includes("amend"))
+    return "HEAD";
+  if (operations.includes("reset"))
+    return "HEAD (por defecto)";
+  if (operations.includes("rebase"))
+    return "rebase en curso o upstream indicado";
+  return "estado local actual";
+}
+function normalizedGitPaths(context, values) {
+  return [...new Set(values.map((value) => {
+    const absolute = path14.resolve(context.cwd, value);
+    const relative = path14.relative(context.projectRoot, absolute);
+    return (relative || ".").replaceAll("\\", "/");
+  }))].sort();
+}
+function sameStringSet(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+function unsafeStageTarget(context, target) {
+  if (target === "." || target === ":/" || /[*?\[\]$`]/.test(target))
+    return true;
+  try {
+    return fs10.statSync(path14.resolve(context.projectRoot, target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+function unsafeGitPathspec(target) {
+  return target === "." || target.startsWith(":") || /[*?\[\]$`]/.test(target);
 }
 function strictness(profile, fallback) {
   if (profile === "strict" || profile === "release")
@@ -3781,12 +4893,16 @@ async function evaluatePermission(input, options) {
   const generic = action === "*";
   const toolOrigin = recordValue3(input.source)?.type === "tool";
   const details = permissionDetails(action, resources, metadata, options.toolRegistered === true && toolOrigin);
+  details.confirmation ??= stringValue4(metadata.confirmation) || stringValue4(metadata.confirm);
   const allowUnbound = ["question", "list", "todowrite", "todoread"].includes(action.toLowerCase());
   const scope = await resolveEvaluationScope(input, options, details.cwd, details.targetPaths, details.resourceKind, allowUnbound);
   const built = scope.error ? undefined : buildContext(details.event, scope.options, {
     command: details.command,
     resourceKind: details.resourceKind,
     targetPaths: details.targetPaths,
+    confirmation: details.confirmation,
+    approval: details.approval,
+    gitIntent: details.gitIntent,
     metadata: {
       ...metadata,
       ...details.metadata,
@@ -3795,6 +4911,8 @@ async function evaluatePermission(input, options) {
       ...generic ? { genericPermission: true } : {}
     }
   }, scope.project);
+  if (built?.context)
+    applyRegisteredGitIntent(built.context, options, options.shellRegistered !== true);
   const result = built?.context ? evaluate(built.context) : policyFailure(details.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
   const hostEffect = permissionEffect(input.effect);
   const effect = strongerEffect(hostEffect, decisionEffect(result.decision));
@@ -3817,13 +4935,20 @@ async function evaluateToolHook(input, options) {
     command: mapped.command,
     resourceKind: mapped.resourceKind,
     targetPaths: mapped.targetPaths,
+    confirmation: mapped.confirmation,
+    approval: mapped.approval,
+    gitIntent: mapped.gitIntent,
     metadata: {
       ...mapped.metadata,
       origin: "opencode-v2",
       tool
     }
   }, scope.project);
-  return built?.context ? evaluate(built.context) : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
+  const result = built?.context ? evaluate(built.context) : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
+  if (built?.context && mapped.gitIntent && mapped.command && (result.decision === "allow" || result.decision === "warn")) {
+    registerGitIntent(built.context, mapped.gitIntent, options);
+  }
+  return result;
 }
 async function evaluateShellHook(input, options) {
   const command = stringValue4(input.command) || "";
@@ -3880,6 +5005,7 @@ async function evaluateShellHook(input, options) {
       built.context.metadata = { ...built.context.metadata, timeoutSeconds: timeout };
     }
   }
+  applyRegisteredGitIntent(built.context, options, true);
   let result = runHooks(built.context);
   if (envChanged) {
     result = appendViolation(result, {
@@ -3942,6 +5068,76 @@ function formatPluginBlock(result) {
 }
 function evaluate(context) {
   return auditHookResult(context, runHooks(context));
+}
+function registerGitIntent(context, intent, options) {
+  if (!options.gitIntentRegistry || !context.project || !context.command)
+    return;
+  const classification = classifyGitCommand(context.command, { aliases: loadGitAliases(context.projectRoot) });
+  if (!classification.hasGitCommand || classification.remote)
+    return;
+  options.gitIntentRegistry.register({
+    project: context.project,
+    intent,
+    command: context.command,
+    paths: gitIntentPaths(context, classification.operations, classification.targets)
+  });
+}
+function applyRegisteredGitIntent(context, options, consume) {
+  if (context.gitIntent || !options.gitIntentRegistry || !context.project || !context.command)
+    return;
+  const classification = classifyGitCommand(context.command, { aliases: loadGitAliases(context.projectRoot) });
+  if (!classification.hasGitCommand || classification.remote)
+    return;
+  const paths = gitIntentPaths(context, classification.operations, classification.targets);
+  const lookup = consume ? options.gitIntentRegistry.consume.bind(options.gitIntentRegistry) : options.gitIntentRegistry.match.bind(options.gitIntentRegistry);
+  for (const operation of classification.operations) {
+    if (!requiresRegisteredIntent(operation))
+      continue;
+    const evidence = lookup({
+      project: context.project,
+      operation,
+      command: context.command,
+      paths
+    });
+    if (!evidence)
+      continue;
+    context.gitIntent = evidence.intent;
+    context.gitIntentVerified = true;
+    return;
+  }
+}
+function gitIntentPaths(context, operations, classifiedTargets) {
+  const explicit = context.targetPaths?.length ? context.targetPaths : undefined;
+  const paths = explicit ?? (operations.some((operation) => operation === "commit" || operation === "amend") ? stagedGitPaths(context.projectRoot) : classifiedTargets);
+  return [...new Set(paths.map((value) => {
+    const absolute = path15.resolve(context.cwd, value);
+    const relative = path15.relative(context.projectRoot, absolute);
+    return relative && !relative.startsWith("..") && !path15.isAbsolute(relative) ? relative : value;
+  }))].sort();
+}
+function stagedGitPaths(cwd) {
+  try {
+    return execFileSync4("git", ["diff", "--cached", "--name-only", "-z"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).split("\x00").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+function requiresRegisteredIntent(operation) {
+  return [
+    "stage",
+    "commit",
+    "amend",
+    "reset",
+    "rebase",
+    "cherry-pick",
+    "merge",
+    "branch-create",
+    "branch-switch"
+  ].includes(operation);
 }
 async function resolveEvaluationScope(input, options, operationCwd, targetPaths, resourceKind, allowUnbound = false) {
   const fallback = path15.resolve(options.cwd);
@@ -4035,6 +5231,9 @@ function buildContext(event, options, details, boundProject) {
       command: details.command,
       resourceKind: details.resourceKind,
       targetPaths: details.targetPaths,
+      confirmation: details.confirmation,
+      approval: details.approval,
+      gitIntent: details.gitIntent,
       destructive: details.destructive,
       audit: {
         enabled: true,
@@ -4169,6 +5368,27 @@ function permissionDetails(action, resources, metadata, deferToolWrite) {
 function toolDetails(tool, input, options) {
   const normalized = tool.toLowerCase();
   const args = recordValue3(input) ?? {};
+  if (normalized === "malahor_hook_check" || normalized.endsWith("_malahor_hook_check")) {
+    const event = hookEventValue(args.event);
+    const metadata = recordValue3(args.metadata) ?? {};
+    if (!event) {
+      return {
+        event: "tool.execute.before",
+        command: tool.replace(/[_.:/-]+/g, " "),
+        metadata: { tool, invalidHookEvent: true }
+      };
+    }
+    return {
+      event,
+      command: stringValue4(args.command),
+      resourceKind: args.resourceKind === "filesystem" ? "filesystem" : undefined,
+      targetPaths: stringArray(args.paths),
+      confirmation: stringValue4(args.confirm),
+      approval: stringValue4(args.approval),
+      gitIntent: parseGitIntent(args.intent),
+      metadata: { ...metadata, tool }
+    };
+  }
   if (normalized === "bash") {
     if (options.shellRegistered) {
       return { event: "tool.execute.before", metadata: { tool } };
@@ -4221,6 +5441,9 @@ var KNOWN_TOOLS = new Set([
   "question",
   "invalid"
 ]);
+function hookEventValue(value) {
+  return typeof value === "string" && HOOK_EVENTS.includes(value) ? value : undefined;
+}
 function pathValues(value) {
   const record = recordValue3(value);
   if (!record)
@@ -4324,8 +5547,9 @@ function recordValue3(value) {
 }
 
 // src/plugin/protocol.ts
-var MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v3 -->";
+var MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v4 -->";
 var LEGACY_PROTOCOL_MARKERS = [
+  "<!-- malahor-runtime-protocol:v3 -->",
   "<!-- malahor-runtime-protocol:v2 -->",
   "<!-- malahor-runtime-protocol:v1 -->"
 ];
@@ -4393,9 +5617,9 @@ Construcción y SDD
 
 Infraestructura, entrega y despliegue
 - CI/CD, IaC, publicación y despliegue son superficies protegidas y solo lectura por defecto en todo repositorio gestionado, incluido Malahor.
-- Una aprobación de plan, implementación, stage, commit o push no autoriza modificar esas superficies ni ejecutar publicación o despliegue. Tampoco lo hacen perfiles, metadata del agente, confirmaciones Git ni Allow always.
-- Cada escritura, stage, commit o push que las afecte y cada comando mutante de publicación/despliegue requiere un ASK humano separado, específico y vinculado a operación, proyecto, recursos o comando y policy hash.
-- Un preflight de solo lectura puede informar MAL-HOOK-INFRA-APPROVAL como diferido y completar la validación; no consume ni sustituye el ASK nativo del stage, commit, push, publicación o despliegue real.
+- Una aprobación de plan, implementación, stage o commit no autoriza modificar esas superficies ni ejecutar publicación o despliegue. Tampoco lo hacen perfiles, metadata del agente, confirmaciones Git ni Allow always.
+- Cada escritura, stage o commit que las afecte y cada comando mutante de publicación/despliegue requiere un ASK humano separado, específico y vinculado a operación, proyecto, recursos o comando y policy hash.
+- Un preflight de solo lectura puede informar MAL-HOOK-INFRA-APPROVAL como diferido y completar la validación; no consume ni sustituye el ASK nativo del stage, commit, publicación o despliegue real.
 - Sin esa aprobación verificable, limita la actuación a leer, analizar y proponer; no edites archivos protegidos ni ejecutes la operación.
 
 Principio de socio
@@ -4403,7 +5627,12 @@ Principio de socio
 - Si el usuario insiste después de una discrepancia informada, procede dentro de los guardrails y registra la decisión/discrepancia cuando sea relevante.
 
 Git y delegación
-- Stage y commit requieren una orden explícita del usuario; “continúa”, “listo” o “cierra la fase” no autorizan esas acciones.
+- Git es local-only. Nunca ejecutes push, pull, fetch, clone, ls-remote, remote update, submódulos remotos ni equivalentes que contacten un remoto. Son hard DENY incluso si el usuario los pide; ningún plan, perfil, token, aprobación, metadata o fallback los habilita.
+- Stage y commit requieren una orden explícita del usuario; “continúa”, “listo” o “cierra la fase” no autorizan esas acciones. Un pedido inequívoco de commit o /malahor-commit autoriza, tras gates verdes, el stage exclusivo de las rutas revisadas y un commit ordinario local, sin pedir otra confirmación humana.
+- Propaga esa orden mediante la intención estructurada commit de malahor_hook_check. Esa intención solo cubre el stage exacto revisado y el commit ordinario; no autoriza amend, reset, rebase, cherry-pick, merge ni ramas.
+- Amend, reset, rebase, cherry-pick, merge y creación/cambio de ramas son locales y permitidos solo con una orden específica para esa operación. Las variantes destructivas exigen preview con target visible y un ASK/aprobación de un solo uso.
+- Al pedir commit/comitea o /malahor-commit: revisa status/diff; ejecuta diagnóstico, testing y build; detente si falla; stagea solo las rutas revisadas con intent=commit; valida el staged y el mensaje con malahor-ai git precommit; vuelve a validar git.commit.before con intent=commit; ejecuta git commit sin --no-verify; relee status y git --no-pager log -1.
+- Si y solo si precommit quedó verde, el staged y su huella siguen exactos y el intento real de git commit fue bloqueado por el host/harness, genera el fallback con malahor-ai git commit-fallback. Declara que el agente no ejecutó el commit, conserva subject/cuerpo/cwd, nunca uses --no-verify y revalida status/log después de la ejecución humana. Un DENY/ASK de contenido o política no admite fallback.
 - Antes de operaciones sensibles usa el flujo de hooks de Malahor. Si recibes DENY, detente; si recibes ASK pendiente, solicita evidencia humana verificable.
 - Un único primario coordina y construye. Los especialistas gestionados son subagentes hermanos, con contexto, restricciones, permisos y criterios explícitos; no delegan entre sí.
 - Delegación secuencial por defecto; paralelo solo para tareas independientes, sin edición concurrente de los mismos archivos ni background autónomo.
@@ -4454,7 +5683,7 @@ import fs13 from "node:fs";
 import path17 from "node:path";
 
 // src/cli/core/config.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import fs11 from "node:fs";
 
 // src/docs/client.ts
@@ -4552,7 +5781,7 @@ function resolveExecutionPolicy(env, config, legacyMode) {
 }
 function readExecutionRevision(value, intervention) {
   if (value === undefined || value === null || value === "") {
-    return createHash4("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
+    return createHash5("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
   }
   if (typeof value === "string" && /^[a-f0-9]{32}$/.test(value))
     return value;
@@ -4620,7 +5849,7 @@ function readOptionalBoolean(value, key) {
 }
 
 // src/cli/core/mode.ts
-import { createHash as createHash5, randomBytes as randomBytes3 } from "node:crypto";
+import { createHash as createHash6, randomBytes as randomBytes3 } from "node:crypto";
 import fs12 from "node:fs";
 import path16 from "node:path";
 
@@ -6109,11 +7338,11 @@ function editExecution(raw, target, revision) {
 `;
 }
 function hash(input) {
-  return createHash5("sha256").update(input).digest("hex");
+  return createHash6("sha256").update(input).digest("hex");
 }
 
 // src/cli/core/planning.ts
-import { createHash as createHash6, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash7, randomBytes as randomBytes4 } from "node:crypto";
 
 // src/cli/core/plan-presentation.ts
 var MAX_STEPS = 30;
@@ -6598,7 +7827,7 @@ function statePayload(value) {
   return canonical(payload);
 }
 function digestPlan(scope, plan, planID, revision, presentationInteractionID) {
-  return createHash6("sha256").update(canonical({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
+  return createHash7("sha256").update(canonical({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
 }
 function sameRevision(value, expected, authority) {
   return validState(value, authority) && value.planID === expected.planID && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
@@ -7579,7 +8808,6 @@ var SESSION_HOOKS = [
   "session.http-request.before",
   "session.http-response.after"
 ];
-var BLOCKING_SHELL_ASK_IDS = ["MAL-HOOK-PUSH-CLI-EVIDENCE"];
 function detectHost(value) {
   if (!isRecord8(value))
     return "unknown";
@@ -7596,7 +8824,8 @@ async function setupV2(context) {
   const options = {
     cwd,
     permissionRegistered: false,
-    shellRegistered: false
+    shellRegistered: false,
+    gitIntentRegistry: createGitIntentRegistry()
   };
   const cleanups = [];
   const capabilities = {};
@@ -7690,7 +8919,7 @@ async function setupV2(context) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
-      if (shouldBlockPluginResult(evaluated.result, options, BLOCKING_SHELL_ASK_IDS)) {
+      if (shouldBlockPluginResult(evaluated.result, options)) {
         throw new Error(formatPluginBlock(evaluated.result));
       }
     }, cleanups);

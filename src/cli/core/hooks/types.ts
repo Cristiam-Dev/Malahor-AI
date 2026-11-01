@@ -1,3 +1,5 @@
+import type { GitIntent } from "../git-intent";
+
 export type HookDecision = "allow" | "warn" | "ask" | "deny";
 
 export type HookProfile = "off" | "light" | "standard" | "strict" | "release";
@@ -235,9 +237,13 @@ export const HOOK_EVENTS = [
   "uninstall.beforeRemove",
   "git.commit.before",
   "git.push.before",
+  "git.remote.before",
   "git.reset.before",
   "git.checkout.before",
   "git.rebase.before",
+  "git.cherry-pick.before",
+  "git.merge.before",
+  "git.branch.before",
   "file.stage.before",
   "shell.exec.before",
   "file.read.before",
@@ -306,6 +312,9 @@ export interface HookContext {
   resourceKind?: HookResourceKind;
   targetPaths?: string[];
   memoryScope?: string;
+  gitIntent?: GitIntent;
+  /** Evidencia interna vinculada y consumida por el adaptador; nunca viene de metadata del caller. */
+  gitIntentVerified?: boolean;
   confirmation?: string;
   approval?: string;
   audit?: {

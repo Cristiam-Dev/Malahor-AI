@@ -21,6 +21,7 @@ import {
 } from "../src/plugin/memory-nudge";
 import { startEventCapture } from "../src/plugin/events";
 import { MALAHOR_PROTOCOL_MARKER, injectMalahorProtocol } from "../src/plugin/protocol";
+import { createGitIntentRegistry } from "../src/cli/core/git-intent";
 
 let root: string;
 let repo: string;
@@ -196,7 +197,7 @@ describe("adaptador de plugin V2", () => {
     expect(values.has("session/events/demo/evt-child")).toBe(true);
     included.cleanup();
   });
-  test("permission.evaluate convierte git destructivo en deny y no lo rebaja", async () => {
+  test("permission.evaluate convierte Git local destructivo en ASK visible", async () => {
     const input: Record<string, unknown> = {
       action: "bash",
       resources: ["git reset --hard"],
@@ -205,9 +206,199 @@ describe("adaptador de plugin V2", () => {
 
     const result = await evaluatePermission(input, { cwd: repo, permissionRegistered: true, env });
 
-    expect(result.effect).toBe("deny");
-    expect(input.effect).toBe("deny");
+    expect(result.effect).toBe("ask");
+    expect(input.effect).toBe("ask");
     expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE")).toBe(true);
+  });
+
+  test("propaga y consume una intencion commit sin confirmacion redundante", async () => {
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src", "a.ts"), "export {};\n", "utf8");
+    const gitIntentRegistry = createGitIntentRegistry();
+    const options = {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: true,
+      env,
+      gitIntentRegistry,
+    };
+    const command = "git add -- src/a.ts";
+
+    const authorized = await evaluateToolHook({
+      tool: "mnemo_malahor_hook_check",
+      input: {
+        event: "file.stage.before",
+        command,
+        paths: ["src/a.ts"],
+        resourceKind: "filesystem",
+        intent: "commit",
+      },
+    }, options);
+    const permissionInput: Record<string, unknown> = {
+      action: "bash",
+      resources: [command],
+      metadata: { command },
+      effect: "allow",
+    };
+    const permission = await evaluatePermission(permissionInput, options);
+    const firstShell = await evaluateShellHook({ command, cwd: repo, timeout: 30 }, options);
+    const secondShell = await evaluateShellHook({ command, cwd: repo, timeout: 30 }, options);
+
+    expect(authorized.violations).toEqual([]);
+    expect(authorized.decision).toBe("allow");
+    expect(permission.effect).toBe("allow");
+    expect(firstShell.result.decision).toBe("allow");
+    expect(secondShell.result.decision).toBe("ask");
+    expect(secondShell.result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-STAGE-CONSENT")).toBe(true);
+  });
+
+  test("consume la intencion en permission cuando no existe shell hook", async () => {
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src", "a.ts"), "export {};\n", "utf8");
+    const gitIntentRegistry = createGitIntentRegistry();
+    const options = {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: false,
+      env,
+      gitIntentRegistry,
+    };
+    const command = "git add -- src/a.ts";
+    await evaluateToolHook({
+      tool: "mnemo_malahor_hook_check",
+      input: {
+        event: "file.stage.before",
+        command,
+        paths: ["src/a.ts"],
+        resourceKind: "filesystem",
+        intent: "commit",
+      },
+    }, options);
+
+    const first = await evaluatePermission({
+      action: "bash",
+      resources: [command],
+      metadata: { command },
+      effect: "allow",
+    }, options);
+    const second = await evaluatePermission({
+      action: "bash",
+      resources: [command],
+      metadata: { command },
+      effect: "allow",
+    }, options);
+
+    expect(first.effect).toBe("allow");
+    expect(second.effect).toBe("ask");
+  });
+
+  test("metadata gitIntent sin evidencia one-shot no autoriza Git local", async () => {
+    const command = "git add -- src/a.ts";
+    const permission = await evaluatePermission({
+      action: "bash",
+      resources: [command],
+      metadata: { command, gitIntent: "commit" },
+      effect: "allow",
+    }, { cwd: repo, permissionRegistered: true, shellRegistered: true, env });
+
+    expect(permission.effect).toBe("ask");
+    expect(permission.result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-STAGE-CONSENT")).toBe(true);
+  });
+
+  test("no registra intencion commit para un stage no delimitado", async () => {
+    const gitIntentRegistry = createGitIntentRegistry();
+    const options = {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: true,
+      env,
+      gitIntentRegistry,
+    };
+    const command = "git add -A";
+    const hook = await evaluateToolHook({
+      tool: "mnemo_malahor_hook_check",
+      input: {
+        event: "file.stage.before",
+        command,
+        paths: ["src/a.ts"],
+        resourceKind: "filesystem",
+        intent: "commit",
+      },
+    }, options);
+    const permission = await evaluatePermission({
+      action: "bash",
+      resources: [command],
+      metadata: { command },
+      effect: "allow",
+    }, options);
+
+    expect(hook.decision).toBe("deny");
+    expect(hook.violations.some((violation) => violation.id === "MAL-HOOK-GIT-INTENT-SCOPE")).toBe(true);
+    expect(permission.effect).toBe("ask");
+  });
+
+  test("remote Git permanece DENY en permission y shell", async () => {
+    const options = { cwd: repo, permissionRegistered: true, shellRegistered: true, env };
+    const permissionInput: Record<string, unknown> = {
+      action: "bash",
+      resources: ["git fetch origin"],
+      metadata: { command: "git fetch origin", gitIntent: "commit" },
+      effect: "allow",
+    };
+    const permission = await evaluatePermission(permissionInput, options);
+    const shell = await evaluateShellHook({ command: "git fetch origin", cwd: repo, timeout: 30 }, options);
+
+    expect(permission.effect).toBe("deny");
+    expect(shell.result.decision).toBe("deny");
+    expect(shell.result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
+  });
+
+  test("la evidencia de commit incluye cambios staged de tipo T", async () => {
+    const git = (args: string[]) => Bun.spawnSync(["git", ...args], {
+      cwd: repo,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "test",
+        GIT_AUTHOR_EMAIL: "test@example.com",
+        GIT_COMMITTER_NAME: "test",
+        GIT_COMMITTER_EMAIL: "test@example.com",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(git(["init", "-q"]).exitCode).toBe(0);
+    fs.writeFileSync(path.join(repo, "typed-entry"), "regular\n", "utf8");
+    expect(git(["add", "typed-entry"]).exitCode).toBe(0);
+    expect(git(["commit", "-qm", "initial"]).exitCode).toBe(0);
+    fs.writeFileSync(path.join(repo, "link-target"), "target\n", "utf8");
+    const blob = git(["hash-object", "-w", "link-target"]).stdout.toString().trim();
+    expect(blob).toMatch(/^[a-f0-9]{40,64}$/);
+    expect(git(["update-index", "--cacheinfo", "120000", blob, "typed-entry"]).exitCode).toBe(0);
+    expect(git(["diff", "--cached", "--name-status"]).stdout.toString()).toContain("T\ttyped-entry");
+
+    const gitIntentRegistry = createGitIntentRegistry();
+    const options = {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: true,
+      env,
+      gitIntentRegistry,
+    };
+    const command = "git commit -m '✅ test(git): preserva cambios de tipo'";
+    const authorized = await evaluateToolHook({
+      tool: "mnemo_malahor_hook_check",
+      input: {
+        event: "git.commit.before",
+        command,
+        paths: ["typed-entry"],
+        resourceKind: "filesystem",
+        intent: "commit",
+      },
+    }, options);
+    const shell = await evaluateShellHook({ command, cwd: repo, timeout: 30 }, options);
+
+    expect(authorized.decision).toBe("allow");
+    expect(shell.result.decision).toBe("allow");
   });
 
   test("autorizacion de archivos usa la raiz registrada aunque el cwd sea otro", async () => {

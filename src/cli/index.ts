@@ -78,6 +78,10 @@ async function main(argv: string[]): Promise<void> {
           project: parsed.options.project,
           confirm: parsed.options.confirm,
           message: parsed.options.message,
+          body: parsed.options.body,
+          paths: parsed.options.paths,
+          blockedBy: parsed.options["blocked-by"],
+          fingerprint: parsed.options.fingerprint,
           type: parsed.options.type,
           scope: parsed.options.scope,
           icon: parsed.options.icon,
@@ -94,6 +98,7 @@ async function main(argv: string[]): Promise<void> {
           profile: parsed.options.profile,
           project: parsed.options.project,
           scope: parsed.options.scope,
+          intent: parsed.options.intent,
           confirm: parsed.options.confirm,
           approval: parsed.options.approval,
           ttl: parsed.options.ttl,
@@ -170,7 +175,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       const key = arg.slice(2);
       flags.add(key);
 
-      if ((key === "command" || key === "confirm" || key === "paths" || key === "path" || key === "docs-path" || key === "app" || key === "resource-kind" || key === "profile" || key === "project" || key === "limit" || key === "policy-after" || key === "message" || key === "type" || key === "scope" || key === "icon" || key === "approval" || key === "ttl") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
+      if ((key === "command" || key === "confirm" || key === "paths" || key === "path" || key === "docs-path" || key === "app" || key === "resource-kind" || key === "profile" || key === "project" || key === "limit" || key === "policy-after" || key === "message" || key === "body" || key === "blocked-by" || key === "fingerprint" || key === "intent" || key === "type" || key === "scope" || key === "icon" || key === "approval" || key === "ttl") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
         options[key] = rest[index + 1];
         index += 1;
       }
@@ -203,8 +208,8 @@ Commands:
 
 Git commands:
   git precommit [--message <mensaje>] [--profile <perfil>]
-  git prepush [--profile release]
   git commit-message [resumen...] [--type <tipo>] [--scope <scope>] [--icon <emoji>]
+  git commit-fallback --message <subject> --paths <a,b> --fingerprint <sha256:...> --blocked-by <causa>
 
 Context commands:
   context status [--project <key>]

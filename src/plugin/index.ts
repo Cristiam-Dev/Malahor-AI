@@ -13,6 +13,7 @@ import { codegraphEnabled, levelForProject, registeredProjectRoots } from "../cl
 import { resolveProject } from "../cli/core/project";
 import { codegraphRoot, codegraphRuntime } from "../cli/core/codegraph-runtime";
 import { loadHookPolicy } from "../cli/core/hooks/policy-loader";
+import { createGitIntentRegistry } from "../cli/core/git-intent";
 import {
   checkpointBeforeCompaction,
   injectCompactionInstructions,
@@ -94,8 +95,6 @@ const SESSION_HOOKS: HookEvent[] = [
   "session.http-response.after",
 ];
 
-const BLOCKING_SHELL_ASK_IDS = ["MAL-HOOK-PUSH-CLI-EVIDENCE"];
-
 function detectHost(value: unknown): HostKind {
   if (!isRecord(value)) return "unknown";
 
@@ -120,6 +119,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     cwd,
     permissionRegistered: false,
     shellRegistered: false,
+    gitIntentRegistry: createGitIntentRegistry(),
   };
   const cleanups: Cleanup[] = [];
   const capabilities: Record<string, boolean> = {};
@@ -219,7 +219,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
         replaceRecord(input.env as Record<string, string | undefined>, evaluated.env);
       }
       input.timeout = evaluated.timeout;
-      if (shouldBlockPluginResult(evaluated.result, options, BLOCKING_SHELL_ASK_IDS)) {
+      if (shouldBlockPluginResult(evaluated.result, options)) {
         throw new Error(formatPluginBlock(evaluated.result));
       }
       // OpenCode V2 no atribuye shell.create.before a una sesion. La politica de

@@ -36,7 +36,7 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 |---|---|
 | `malahor-ai install` | Instala Malahor en OpenCode (`--bootstrap`, `--policy-after <nivel>`, `--docs-path <externa>`) |
 | `malahor-ai doctor` | Diagnostica la instalacion; `--self-heal` repara y migra permisos legacy |
-| `malahor-ai git` | Flujo git asistido: precommit, prepush y mensajes de commit seguros |
+| `malahor-ai git` | Flujo Git local-only: precommit, mensajes y fallback seguro de commit |
 | `malahor-ai hooks` | Guardrails cross-harness para git, secretos, memoria, instalacion y calidad |
 | `malahor-ai context` | Nivel por proyecto, deteccion de stack y migracion asistida de niveles legacy |
 | `malahor-ai codegraph` | Contexto estructural con symgraph e indice gestionado fuera del repo (`status`, `setup`, `index`, `guide`) |
@@ -60,10 +60,11 @@ Malahor se distribuye como CLI para uso manual/asistido con OpenCode. No expone 
 - **Cambio de modo**: `malahor-ai mode status`, `malahor-ai mode preview <asesor|asistente|ejecutor>` y `malahor-ai mode set <modo>`; la CLI pide confirmacion TTY o acepta `--yes`. En OpenCode V2, `/malahor-modo <modo>` muestra una confirmacion nativa; `status` y `preview <modo>` son informativos. No se copia ni se muestra ningun token: una version optimista interna detecta cambios concurrentes. La aplicacion revisa hooks, crea un respaldo si habia archivo, conserva las demas claves/comentarios JSONC y renueva `execution.revision`, por lo que invalida todos los planes anteriores aunque despues se vuelva al modo previo. El modo nuevo aplica desde el siguiente turno de la misma sesion.
 - **Limite de seguridad de la UI**: una respuesta de permiso de OpenCode es una decision del cliente que tambien puede emitirse mediante su API. Esta implementacion ofrece aprobaciones practicas visibles, **no atestacion criptografica del origen humano**. La autorizacion persistente se limita a la revision y acciones declaradas y no concede nuevos permisos del host. El recibo HMAC protege integridad local, no identidad. Las aprobaciones sensibles siguen siendo independientes, puntuales y sujetas a sus TTL/guardrails. No usar la UI como unico control cuando se exija identidad atestada.
 - **Bootstrap agent-safe**: `install --bootstrap` construye `dist/` automaticamente si falta y valida todo antes de tocar permisos.
-- **Hooks cross-harness**: reglas internas de Malahor independientes de OpenCode para bloquear secretos, git destructivo, memoria destructiva sin preview, politica insegura y pushes sin checks. Se invocan por CLI (`malahor-ai hooks check ...`) o MCP (`malahor_hook_check`).
+- **Hooks cross-harness**: reglas internas de Malahor independientes de OpenCode para bloquear secretos, Git remoto, destruccion local sin preview, memoria destructiva y politica insegura. Se invocan por CLI (`malahor-ai hooks check ...`) o MCP (`malahor_hook_check`).
 - **Perfiles de hooks**: `off`, `light`, `standard`, `strict`, `release`, configurables fuera del repo en `~/.malahor/policies/default.jsonc` y `~/.malahor/policies/projects/<proyecto>.jsonc`.
-- **Git asistido**: `malahor-ai git precommit`, `prepush` y `commit-message` ejecutan los guardrails y proponen el comando seguro sin hacer `git add`, `commit` ni `push` por ti.
-- **Consentimiento git**: `git add` y `git commit` quedan bloqueados por hooks si no hay una orden explicita de stage/commit; "continuar" o "cerrar fase" no cuentan como autorizacion.
+- **Git local-only**: `push`, `pull`, `fetch`, `clone`, `ls-remote`, `remote update`, submodulos remotos y equivalentes son hard DENY, incluso dentro de shells o sustituciones indirectas. Ningun perfil, plan, confirmacion, nonce o fallback los habilita; `prepush` ya no existe. Mutadores locales no modelados fallan cerrado.
+- **Consentimiento Git local**: `comitea` o `/malahor-commit` autorizan, tras gates verdes, stage exclusivo de rutas revisadas y commit ordinario mediante una intencion estructurada de un solo uso, sin tokens humanos ni confirmacion redundante. Metadata o confirmaciones legacy no sustituyen esa evidencia. Amend, reset, rebase, cherry-pick, merge y ramas requieren orden propia; si son destructivos, tambien preview, target visible y ASK puntual.
+- **Fallback de commit**: `malahor-ai git commit-fallback` recibe las rutas como array JSON exacto, preservando comas y espacios, y solo genera un comando externo cuando precommit esta verde, staged/rutas/huella coinciden y el host realmente bloqueo `git commit`. Emite sintaxis POSIX o PowerShell segun la plataforma, nunca usa `--no-verify`, nunca aplica a un DENY/ASK de politica y obliga a revalidar con `git --no-pager`.
 - **Skill canonica de commits**: `git-commit-text` es regla de oro para proponer mensajes: icono + Conventional Commit en espanol y cuerpo con viñetas siempre que aporte contexto.
 - **Skills first-party**: backend, frontend, devops, diseno, IA, mobile y calidad; incluye packs profundos de programacion para Angular, React, Java, Spring Boot, NestJS, arquitectura, testing, Docker, Kubernetes y cloud, endurecidos con referencias oficiales/canonicas.
 
@@ -141,18 +142,17 @@ malahor-ai memory inspect <proyecto>
 # Guardrails antes de acciones sensibles (portable a cualquier harness)
 malahor-ai hooks status
 malahor-ai hooks profile set release --project malahor
-malahor-ai hooks check git.commit.before
-malahor-ai hooks check git.push.before --profile release --confirm CHECKS_OK
-malahor-ai hooks check git.reset.before --command "git reset --hard"
+malahor-ai hooks check git.commit.before --command "git commit -m '✨ feat(hooks): agrega flujo local'" --intent commit
+malahor-ai hooks check git.push.before --command "git push" # siempre DENY
+malahor-ai hooks check git.reset.before --command "git reset --hard HEAD~1" --intent reset
 
-# Flujo git asistido (no ejecuta commit/push)
+# Flujo Git local asistido
 malahor-ai git commit-message agrega flujo git asistido --type feat --scope hooks
 malahor-ai git precommit --message "✨ feat(hooks): agrega flujo git asistido"
-malahor-ai git prepush --confirm CHECKS_OK
 
-# Validar acciones git reales solo con consentimiento explicito
-malahor-ai hooks check file.stage.before --command "git add README.md" --confirm USER_REQUESTED_STAGE
-malahor-ai hooks check git.commit.before --command "git commit -m '✨ feat(hooks): agrega flujo git asistido'" --confirm USER_REQUESTED_COMMIT
+# Propagar una orden explicita de commit sin pedir otra confirmacion
+malahor-ai hooks check file.stage.before --command "git add -- README.md" --paths README.md --intent commit
+malahor-ai hooks check git.commit.before --command "git commit -m '✨ feat(hooks): agrega flujo git asistido'" --paths README.md --intent commit
 
 ```
 
@@ -167,7 +167,7 @@ En OpenCode, Malahor instala comandos slash equivalentes:
 - `/malahor-reparar`
 - `/malahor-commit`
 
-Tambien puedes escribir “recuperar contexto”, “guardar contexto”, “commit” o “comitea” y el agente debe aplicar el mismo protocolo. “Commit” o “comitea” disparan el flujo verificado: status/diff, diagnostico, testing y build; si algo falla, no se commitea. `/malahor-commit` nunca hace push.
+Tambien puedes escribir “recuperar contexto”, “guardar contexto”, “commit” o “comitea” y el agente debe aplicar el mismo protocolo. “Commit” o “comitea” disparan status/diff, diagnostico, testing y build; si todo pasa, autorizan stage exacto y commit local sin otra pregunta. `/malahor-commit` nunca contacta un remoto. Si el host bloquea un commit ya verificado, entrega un fallback externo exacto y revalida despues.
 
 Para trabajar en una asignacion grande, describe el proyecto, la asignacion, la HU o el area en lenguaje natural; el agente consulta memoria y documentacion por MCP y no necesitas escribir scopes, rutas, versiones ni comandos CLI.
 

@@ -33,7 +33,7 @@ function context(home: string, overrides: Partial<HookContext> = {}): HookContex
   };
 
   return {
-    event: "git.push.before",
+    event: "git.reset.before",
     harness: "cli",
     profile: "release",
     cwd: home,
@@ -41,8 +41,9 @@ function context(home: string, overrides: Partial<HookContext> = {}): HookContex
     malahorHome: home,
     project: "proyecto-x",
     client: "cliente-a",
-    command: "git push",
-    targetPaths: ["src/a.ts"],
+    command: "git reset --hard HEAD~1",
+    targetPaths: ["HEAD~1"],
+    gitIntent: "reset",
     policyMeta: metadata(),
     security,
     audit: { enabled: false },
@@ -57,7 +58,7 @@ describe("approval ledger", () => {
     const ctx = context(home);
     const record = grantApproval(ctx, { channel: "cli-tty", ttlSeconds: 60 });
 
-    expect(record.operation).toBe("git.push.before");
+    expect(record.operation).toBe("git.reset.before");
     expect(record.resources).toHaveLength(1);
     expect(record.consumedAt).toBeNull();
     expect(fs.existsSync(approvalRecordPath(home, record.nonce))).toBe(true);
@@ -180,6 +181,18 @@ describe("approval ledger", () => {
 
     expect(Date.parse(record.expiresAt) - now.getTime()).toBe(10_000);
   });
+
+  test("no emite ni consume aprobaciones para Git remoto", () => {
+    const home = temporaryHome();
+    const remote = context(home, {
+      event: "git.push.before",
+      command: "git push origin dev",
+      gitIntent: "commit",
+    });
+
+    expect(() => grantApproval(remote, { channel: "cli-tty" })).toThrow(/hard DENY|remotas/i);
+    expect(consumeApproval("a".repeat(64), remote).reason).toMatch(/remotas/i);
+  });
 });
 
 describe("assert with approvals and audit", () => {
@@ -243,6 +256,7 @@ describe("assert with approvals and audit", () => {
   test("auditoria escribe JSONL sin payloads y con referencias hasheadas", () => {
     const home = temporaryHome();
     const ctx = context(home, {
+      event: "git.push.before",
       audit: { enabled: true },
       command: "git push --token SECRET_VALUE",
       targetPaths: ["src/a.ts"],
@@ -259,7 +273,7 @@ describe("assert with approvals and audit", () => {
     expect(entry.auditVersion).toBe(1);
     expect(entry.event).toBe("git.push.before");
     expect(entry.operation).toBe("push");
-    expect(entry.decision).toBe("ask");
+    expect(entry.decision).toBe("deny");
     expect(String(entry.policyHash).startsWith("sha256:")).toBe(true);
     expect((entry.ruleIds as string[]).length).toBeGreaterThan(0);
     expect(String((entry.resourceRefs as string[])[0]).startsWith("sha256:")).toBe(true);

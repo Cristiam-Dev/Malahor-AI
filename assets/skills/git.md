@@ -4,7 +4,12 @@ Guia base para trabajar con Git dentro de Malahor.
 
 ## Regla Principal
 
-No ejecutar `git add`, `git commit`, `git amend`, `git push`, `git reset`, `git checkout` ni operaciones equivalentes que modifiquen el estado del repositorio salvo orden explicita del usuario.
+Esta skill solo refleja la politica del programa; no la define ni puede rebajarla.
+
+- Git remoto/red (`push`, `pull`, `fetch`, `clone` y equivalentes) es hard DENY sin excepciones.
+- Las operaciones locales que mutan Git requieren una orden explicita y especifica.
+- `comitea` autoriza, tras gates verdes, stage exacto revisado y commit ordinario local; no autoriza amend/reset/rebase/cherry-pick/merge/ramas.
+- Las operaciones locales destructivas requieren preview, target visible y aprobacion propia.
 
 ## Regla De Oro Para Mensajes De Commit
 
@@ -24,10 +29,15 @@ Al proponer texto de commit, cargar y aplicar siempre `git-commit-text`. El form
 - Stagear archivos.
 - Crear commits.
 - Amend.
-- Push.
-- Force push.
+- Reset, rebase, cherry-pick, merge y operaciones de ramas.
 - Revertir cambios.
 - Borrar ramas.
+
+## Nunca Permitido
+
+- Push o force push.
+- Pull, fetch o clone.
+- `ls-remote`, `remote update`, submodulos remotos o equivalentes de red.
 
 ## Skills Relacionados
 
