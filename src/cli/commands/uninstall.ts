@@ -17,6 +17,7 @@ import {
 import { removeOpenCodeCommands } from "../core/opencode-commands";
 import { describeAgentRemoval, removeManagedAgents } from "../core/opencode-agents";
 import { describeSdkRemove, removeOpencodeSdk } from "../core/opencode-sdk";
+import { removeOpenCodeSkills } from "../core/opencode-skills";
 import { isSandbox } from "../core/paths";
 
 export interface UninstallOptions {
@@ -46,6 +47,7 @@ export function runUninstall(options: UninstallOptions): void {
   removeMalahorMcpConfig(paths, options.dryRun);
   const buildPolicy = removeBuildPolicyConfig(paths, options.dryRun);
   const removedCommands = removeOpenCodeCommands(paths, options.dryRun);
+  const removedSkills = removeOpenCodeSkills(paths, options.dryRun);
   const sdkRemoval = removeOpencodeSdk({
     opencodeDir: paths.opencodeDir,
     backupsDir: paths.backupsDir,
@@ -80,6 +82,7 @@ export function runUninstall(options: UninstallOptions): void {
     ? `Build policy: ${options.dryRun ? "would remove locks" : `removed locks (${buildPolicy.cleaned.join(", ") || "marker"})`}`
     : "Build policy: nothing to remove");
   printLine(`OpenCode commands: ${options.dryRun ? "would remove" : "removed"} ${removedCommands}`);
+  printLine(`OpenCode skills: ${options.dryRun ? "would remove" : "removed"} ${removedSkills.removed}; preserved ${removedSkills.preserved}`);
   printLine(describeSdkRemove(sdkRemoval));
   printLine(describePluginSync(pluginRemoval));
   printLine(describePluginStateRemoval(pluginStateRemoval));

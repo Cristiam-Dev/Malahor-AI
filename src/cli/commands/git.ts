@@ -15,6 +15,7 @@ export interface GitOptions {
   type: string | undefined;
   scope: string | undefined;
   icon: string | undefined;
+  breaking: boolean;
   json: boolean;
 }
 
@@ -71,11 +72,12 @@ function printGitHelp(): void {
   process.stdout.write(`
 Usage:
   malahor-ai git precommit [--message <mensaje>] [--profile standard|strict|release] [--json]
-  malahor-ai git commit-message [resumen...] [--type feat|fix|docs|test|chore] [--scope <scope>] [--icon <emoji>] [--json]
+  malahor-ai git commit-message [resumen...] [--type feat|fix|docs|test|chore|security] [--scope <scope>] [--icon <emoji>] [--breaking] [--json]
   malahor-ai git commit-fallback --message <subject> [--body <cuerpo>] --paths <json-array> --fingerprint <sha256:...> --blocked-by host-deny|host-ask|harness-unavailable [--json]
 
 Ejemplos:
   malahor-ai git commit-message agrega flujo git asistido --type feat --scope hooks
+  malahor-ai git commit-message cambia contrato publico --type feat --scope api --breaking
   malahor-ai git precommit --message "✨ feat(hooks): agrega flujo git asistido"
   malahor-ai git commit-fallback --message "✨ feat(git): conserva staged" --paths '["src/a.ts","src/a,b.ts"]' --fingerprint sha256:... --blocked-by harness-unavailable
 

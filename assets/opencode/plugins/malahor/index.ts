@@ -33,6 +33,7 @@ function resolvePaths(env = process.env, cwd = process.cwd(), platform = process
     opencodeDir,
     opencodeConfig: pathApi.join(opencodeDir, "opencode.jsonc"),
     opencodePluginsDir: pathApi.join(opencodeDir, "plugins"),
+    opencodeSkillsDir: pathApi.join(opencodeDir, "skills"),
     malahorPluginDir: pathApi.join(opencodeDir, "plugins", "malahor"),
     pluginState: pathApi.join(malahorHome, "plugin-state.json"),
     agentsMd: pathApi.join(opencodeDir, "AGENTS.md"),
@@ -3699,6 +3700,46 @@ function isRemovalOperation(kind) {
   return kind === "delete" || kind === "move-out";
 }
 
+// src/cli/core/git-commit-message.ts
+var COMMIT_TYPES = [
+  "feat",
+  "fix",
+  "docs",
+  "style",
+  "refactor",
+  "perf",
+  "test",
+  "build",
+  "ci",
+  "chore",
+  "revert",
+  "security"
+];
+var MAX_COMMIT_SUBJECT_LENGTH = 82;
+var COMMIT_TYPE_PATTERN = COMMIT_TYPES.join("|");
+var SCOPE_SEGMENT = String.raw`[\p{L}\p{N}][\p{L}\p{M}\p{N}]*`;
+var COMMIT_SUBJECT_PATTERN = new RegExp(String.raw`^(\S+) (${COMMIT_TYPE_PATTERN})(?:\((${SCOPE_SEGMENT}(?:-${SCOPE_SEGMENT})*)\))?(!)?: (\S(?:.*\S)?)$`, "u");
+var GRAPHEME_SEGMENTER = new Intl.Segmenter("es", { granularity: "grapheme" });
+function isValidCommitSubject(subject) {
+  if (!subject || subject.includes(`
+`) || subject.includes("\r"))
+    return false;
+  if ([...subject].length > MAX_COMMIT_SUBJECT_LENGTH)
+    return false;
+  const match = COMMIT_SUBJECT_PATTERN.exec(subject);
+  if (!match)
+    return false;
+  return isEmojiGrapheme(match[1] ?? "");
+}
+function isEmojiGrapheme(value) {
+  if (!value || /\s/u.test(value))
+    return false;
+  const graphemes = [...GRAPHEME_SEGMENTER.segment(value)];
+  if (graphemes.length !== 1 || graphemes[0]?.segment !== value)
+    return false;
+  return /\p{Extended_Pictographic}/u.test(value) || /^(?:\p{Regional_Indicator}){2}$/u.test(value) || /^[#*0-9]\uFE0F?\u20E3$/u.test(value);
+}
+
 // src/cli/core/hooks/rules.ts
 var builtInHookRules = [
   { id: "policy-integrity", run: policyIntegrityGuard },
@@ -3771,6 +3812,9 @@ function infrastructureBoundaryGuard(context) {
   const relevant = context.event === "plugin.permission.before" ? context.metadata?.deferredToToolHook === true : context.event === "file.write.before" || context.event === "file.stage.before" || context.event === "git.commit.before" || context.event === "git.push.before" || context.event === "shell.exec.before" || context.event === "tool.execute.before";
   if (!relevant)
     return [];
+  if (context.event === "git.commit.before" && context.metadata?.validationOnly === true && filesystemTargetPaths(context).length === 0) {
+    return [];
+  }
   const command = (context.command ?? "").trim();
   const commandMatch = context.event === "shell.exec.before" || context.event === "tool.execute.before" ? classifyInfrastructureCommand(command) : { protected: false };
   const resolution = infrastructureTargetPaths(context, command);
@@ -4202,8 +4246,7 @@ function commitMessageGuard(context) {
   const message = extractCommitMessage(context.command);
   if (!message)
     return [];
-  const valid = /^[^\w\s]\s+(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?:\s+\S.{0,80}$/u.test(message);
-  if (valid)
+  if (isValidCommitSubject(message))
     return [];
   return [{
     id: "MAL-HOOK-COMMIT-MESSAGE",
@@ -5624,6 +5667,11 @@ Construcción y SDD
 - Si existe una definición aprobada de Discovery, reutiliza objetivos, criterios, alcance y decisiones por referencia; no la redefinas ni pidas doble aprobación.
 - La verificación completa (diagnóstico, testing y build) se ejecuta al pedir commit o cuando el usuario la solicite explícitamente, no en cada interacción.
 - No selecciones ni detectes modelos automáticamente; la elección de modelo queda a criterio del usuario y del host.
+
+Rollout local de Malahor
+- Cuando el alcance aprobado incluya actualizar la instalación local, completa primero los gates de diagnóstico y pruebas y el build; valida después en sandbox o dry-run, pasa el guardrail o hook de instalación, ejecuta el update real y termina con doctor.
+- Para una instalación existente usa update. install queda reservado solo para bootstrap, ausencia de instalación o reparación aprobada; no los intercambies silenciosamente.
+- Detente ante un ASK o DENY, si aparecen dependencias nuevas o si cambian los efectos previstos. No instales, amplíes el alcance ni continúes por fallback sin una revisión y la aprobación correspondiente.
 
 Infraestructura, entrega y despliegue
 - CI/CD, IaC, publicación y despliegue son superficies protegidas y solo lectura por defecto en todo repositorio gestionado, incluido Malahor.
@@ -8345,6 +8393,9 @@ var TEST_PATH_OPERATORS = new Set([
   "-p",
   "-S"
 ]);
+var COMMIT_MESSAGE_FLAGS = new Set(["--breaking", "--json"]);
+var COMMIT_MESSAGE_OPTIONS = new Set(["--type", "--scope", "--icon", "--message", "--profile", "--project"]);
+var COMMIT_MESSAGE_TYPES = new Set(COMMIT_TYPES);
 function classifyReadOnlyShellCommand(command, projectRoot, options = {}) {
   const workingDirectory = options.workingDirectory ?? projectRoot;
   if (!safeProjectDirectory(workingDirectory, projectRoot))
@@ -8378,9 +8429,41 @@ function segmentIsReadOnly(tokens, segment, projectRoot, workingDirectory, gitOp
       return testIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
     case "pwd":
       return tokens.slice(1).every((token) => token === "-L" || token === "-P");
+    case "malahor-ai":
+    case "malahor-ai.exe":
+      return malahorCommitMessageIsReadOnly(tokens.slice(1));
     default:
       return false;
   }
+}
+function malahorCommitMessageIsReadOnly(args) {
+  if (args[0] !== "git" || args[1] !== "commit-message")
+    return false;
+  const seen = new Set;
+  for (let index = 2;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (COMMIT_MESSAGE_FLAGS.has(arg)) {
+      if (seen.has(arg))
+        return false;
+      seen.add(arg);
+      continue;
+    }
+    if (COMMIT_MESSAGE_OPTIONS.has(arg)) {
+      if (seen.has(arg))
+        return false;
+      const value = args[index + 1];
+      if (!value || value.startsWith("--") || value.includes("\x00"))
+        return false;
+      if (arg === "--type" && !COMMIT_MESSAGE_TYPES.has(value))
+        return false;
+      seen.add(arg);
+      index += 1;
+      continue;
+    }
+    if (!arg || arg.startsWith("-") || arg.includes("\x00"))
+      return false;
+  }
+  return true;
 }
 function gitIsReadOnly(tokens, segment, projectRoot, workingDirectory, options) {
   let index = 1;
@@ -9472,7 +9555,155 @@ function permissionResourcesAllowed(state, scope, action, resources, directory, 
   if (action !== "shell" || resources.length < 2)
     return false;
   const compound = resources.join(" && ");
-  return planAllows(state, scope, { action: "shell", resource: compound }, now, authority);
+  if (planAllows(state, scope, { action: "shell", resource: compound }, now, authority))
+    return true;
+  if (!validState(state, authority))
+    return false;
+  const scannerResources = resources;
+  return state.plan.actions.some((candidate) => candidate.action === "shell" && planAllows(state, scope, candidate, now, authority) && sameResources(shellScannerProjection(candidate.resource), scannerResources));
+}
+function shellScannerProjection(command) {
+  const segments = splitShellAnd(command);
+  if (!segments || segments.length < 2)
+    return null;
+  const projected = [];
+  for (const segment of segments) {
+    const resource = scannerResource(segment);
+    if (!resource)
+      return null;
+    projected.push(resource);
+  }
+  return projected;
+}
+function splitShellAnd(command) {
+  const segments = [];
+  let start = 0;
+  let quote = null;
+  let escaped = false;
+  let substitutionDepth = 0;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index];
+    const next = command[index + 1];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "$" && next === "(") {
+      substitutionDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (substitutionDepth > 0) {
+      if (character === "(")
+        substitutionDepth += 1;
+      else if (character === ")")
+        substitutionDepth -= 1;
+      continue;
+    }
+    if (character === "&" && next === "&") {
+      const segment = command.slice(start, index).trim();
+      if (!segment)
+        return null;
+      segments.push(segment);
+      start = index + 2;
+      index += 1;
+      continue;
+    }
+    if (character === "&" || character === "|" || character === ";" || character === `
+` || character === "\r") {
+      return null;
+    }
+  }
+  if (escaped || quote || substitutionDepth !== 0)
+    return null;
+  const finalSegment = command.slice(start).trim();
+  if (!finalSegment)
+    return null;
+  segments.push(finalSegment);
+  return segments;
+}
+function scannerResource(segment) {
+  const assignmentSubstitution = segment.match(/^[A-Za-z_][A-Za-z0-9_]*=\$\(([\s\S]+)\)$/);
+  if (assignmentSubstitution) {
+    const inner = assignmentSubstitution[1].trim();
+    const nested = splitShellAnd(inner);
+    return inner && nested?.length === 1 ? inner : null;
+  }
+  let offset = 0;
+  let assignments = 0;
+  while (offset < segment.length) {
+    while (/\s/.test(segment[offset] ?? ""))
+      offset += 1;
+    const start = offset;
+    const end = shellWordEnd(segment, start);
+    if (end === null)
+      return null;
+    const token = segment.slice(start, end);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      const resource = segment.slice(start).trim();
+      return resource || null;
+    }
+    assignments += 1;
+    offset = end;
+  }
+  return assignments === 0 ? segment.trim() || null : null;
+}
+function shellWordEnd(value, start) {
+  let quote = null;
+  let escaped = false;
+  let substitutionDepth = 0;
+  for (let index = start;index < value.length; index += 1) {
+    const character = value[index];
+    const next = value[index + 1];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "$" && next === "(") {
+      substitutionDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (substitutionDepth > 0) {
+      if (character === "(")
+        substitutionDepth += 1;
+      else if (character === ")")
+        substitutionDepth -= 1;
+      continue;
+    }
+    if (/\s/.test(character))
+      return index;
+  }
+  return escaped || quote || substitutionDepth !== 0 ? null : value.length;
+}
+function sameResources(left, right) {
+  return left !== null && left.length === right.length && left.every((resource, index) => resource === right[index]);
 }
 function readOnlyShellResources(value, projectRoot, workingDirectory) {
   if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string"))

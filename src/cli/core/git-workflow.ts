@@ -27,6 +27,7 @@ export interface GitWorkflowOptions {
   type: string | undefined;
   scope: string | undefined;
   icon: string | undefined;
+  breaking?: boolean;
 }
 
 export interface GitWorkflowResult {
@@ -114,6 +115,7 @@ function runCommitMessage(options: GitWorkflowOptions): GitWorkflowResult {
     scope: options.scope,
     icon: options.icon,
     paths: targetPaths,
+    breaking: options.breaking,
   });
   const command = `git commit -m ${quoteShell(message)}`;
   const hookResult = evaluateWorkflowHook(context, {

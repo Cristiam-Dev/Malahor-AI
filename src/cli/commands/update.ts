@@ -22,6 +22,7 @@ import { beginManagedInstallation, pruneLegacyRuntimeArtifacts } from "../core/m
 import { assertAgentAssets, describeAgentSync, syncManagedAgents } from "../core/opencode-agents";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
+import { syncOpenCodeSkills } from "../core/opencode-skills";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { ensurePrivateDirectory, isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveProject } from "../core/project";
@@ -45,6 +46,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   const project = resolveProject(packagePaths.root, config.projects.aliases);
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
+  const skillsAsset = path.join(packagePaths.assetsDir, "skills");
   const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
 
   printHeader("malahor-ai update");
@@ -106,6 +108,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
   const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
+  const skills = syncOpenCodeSkills(skillsAsset, paths, options.dryRun);
   const sdk = ensureOpencodeSdk({
     opencodeDir: paths.opencodeDir,
     backupsDir: paths.backupsDir,
@@ -128,6 +131,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
   printLine(`Legacy runtime artifacts: ${legacyRuntimeArtifacts.length === 0 ? "none" : `${options.dryRun ? "would remove" : "removed"} ${legacyRuntimeArtifacts.length}`}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
+  printLine(`OpenCode skills: ${options.dryRun ? "would sync" : "synced"} ${skills.total} (${skills.created} created, ${skills.updated} updated, ${skills.removed} removed, ${skills.preserved} preserved)`);
   printLine(describeSdkEnsure(sdk));
   printLine(describePluginSync(plugin));
   for (const agent of agents) {
@@ -181,7 +185,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   printLine(`Malahor config: ${options.dryRun ? "would save" : "saved"}`);
   printLine(`OpenCode build policy: ${host.kind === "v2" ? "runtime plugin (config verify-only)" : (options.dryRun ? "would sync" : "synced")} (${formatExecutionPolicy(execution)})`);
   printLine("Validation: passed (politica aplicada al final)");
-  printLine("Next: run `malahor-ai doctor`. Un cambio de modo aplica desde el siguiente turno de la sesion actual.");
+  printLine("Next: run `malahor-ai doctor`. El flujo equivalente del harness es /malahor-actualizar. Un cambio de modo aplica desde el siguiente turno de la sesion actual.");
   transaction.commit();
   } catch (error) {
     transaction.rollback();

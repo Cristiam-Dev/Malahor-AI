@@ -128,6 +128,24 @@ function expectTestingEditGuardrails(content: string, host: "v1" | "v2"): void {
   expect(content).not.toContain(editRule("**/src/**", "allow"));
 }
 
+function expectExplicitLocalUpdateRollout(content: string): void {
+  const marker = content.search(/rollout local|actualizaci[oó]n local/i);
+  const rollout = marker < 0 ? "" : content.slice(marker, marker + 2_400);
+  const lines = rollout.split("\n");
+
+  expect(rollout).not.toBe("");
+  expect(rollout).toMatch(/(?:gates?|diagn[oó]stico|testing|pruebas)[\s\S]{0,400}\bbuild\b/i);
+  expect(rollout).toMatch(/\b(?:sandbox|dry-run)\b/i);
+  expect(rollout).toMatch(/\b(?:guardrails?|hooks?)\b/i);
+  expect(rollout).toMatch(/(?:\bupdate(?:\s+--yes)?\s+real\b|actualizaci[oó]n real)[\s\S]{0,300}\bdoctor\b/i);
+  expect(lines.some((line) => /instalaci[oó]n existente/i.test(line) && /\bupdate\b/i.test(line))).toBe(true);
+  expect(lines.some((line) => /\binstall\b/i.test(line) && /(?:solo|[uú]nicamente|reservad)/i.test(line)
+    && /(?:bootstrap|ausencia)/i.test(line))).toBe(true);
+  expect(rollout).toMatch(/(?:det[eé]n(?:te|gase|erse)?|detien|interrump|aborta)[\s\S]{0,500}\bASK\b[\s\S]{0,80}\bDENY\b/i);
+  expect(rollout).toMatch(/(?:det[eé]n(?:te|gase|erse)?|detien|interrump|aborta)[\s\S]{0,500}(?:dependencias nuevas|nuevas dependencias)/i);
+  expect(rollout).toMatch(/(?:det[eé]n(?:te|gase|erse)?|detien|interrump|aborta)[\s\S]{0,500}(?:efectos distintos|cambian? (?:los )?efectos)/i);
+}
+
 function matchesOpenCodeResource(pattern: string, resource: string): boolean {
   const expression = [...pattern].map((character) => {
     if (character === "*") return ".*";
@@ -153,6 +171,25 @@ describe("agentes malahor gestionados", () => {
       }
     }
   });
+
+  test("el primario V2 bloquea caveman-commit y falla cerrado sin git-commit-text", () => {
+    const content = fs.readFileSync(V2_ASSET, "utf8");
+
+    expect(content).toContain([
+      "  - action: skill",
+      '    resource: "caveman-commit"',
+      "    effect: deny",
+    ].join("\n"));
+    expect(content).toContain(
+      "- Si `git-commit-text` no está disponible, detente y reporta el bloqueo; no uses `caveman-commit` ni ninguna skill alternativa como fallback.",
+    );
+  });
+
+  for (const host of ["v1", "v2"] as const) {
+    test(`el primario ${host.toUpperCase()} comparte el rollout local explicito`, () => {
+      expectExplicitLocalUpdateRollout(fs.readFileSync(assetPath(host, "malahor"), "utf8"));
+    });
+  }
 
   test("asset path resuelve los tres agentes, V1/V2 y host desconocido", () => {
     expect(malahorAgentAssetPath(ASSETS_DIR, "v2")).toBe(V2_ASSET);

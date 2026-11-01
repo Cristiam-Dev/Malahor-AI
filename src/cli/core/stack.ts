@@ -17,26 +17,27 @@ const SKILL_DEVOPS = "specialty-devops";
 const SKILL_AI = "specialty-ai-integration";
 const SKILL_MOBILE = "specialty-mobile";
 const SKILL_QUALITY = "specialty-quality";
-const P_TYPESCRIPT = "programming/frontend/typescript";
-const P_ANGULAR = "programming/frontend/angular";
-const P_REACT = "programming/frontend/react";
-const P_NEXTJS = "programming/frontend/nextjs";
-const P_JAVA = "programming/backend/java";
-const P_SPRING_BOOT = "programming/backend/spring-boot";
-const P_NODE = "programming/backend/node";
-const P_NESTJS = "programming/backend/nestjs";
-const P_REST_API = "programming/backend/rest-api";
-const P_DATABASE = "programming/backend/database";
-const P_DOCKER = "programming/devops/docker";
-const P_KUBERNETES = "programming/devops/kubernetes";
-const P_CI_CD = "programming/devops/ci-cd";
-const P_OBSERVABILITY = "programming/devops/observability";
-const P_SONARQUBE = "programming/quality/sonarqube";
-const P_TESTING = "programming/quality/testing";
-const P_SECURITY = "programming/quality/security";
-const P_AWS = "programming/cloud/aws";
-const P_GCP = "programming/cloud/gcp";
-const P_AZURE = "programming/cloud/azure";
+const P_TYPESCRIPT = "programming-frontend-typescript";
+const P_ANGULAR = "programming-frontend-angular";
+const P_REACT = "programming-frontend-react";
+const P_NEXTJS = "programming-frontend-nextjs";
+const P_MOBILE = "programming-frontend-mobile";
+const P_JAVA = "programming-backend-java";
+const P_SPRING_BOOT = "programming-backend-spring-boot";
+const P_NODE = "programming-backend-node";
+const P_NESTJS = "programming-backend-nestjs";
+const P_REST_API = "programming-backend-rest-api";
+const P_DATABASE = "programming-backend-database";
+const P_DOCKER = "programming-devops-docker";
+const P_KUBERNETES = "programming-devops-kubernetes";
+const P_CI_CD = "programming-devops-ci-cd";
+const P_OBSERVABILITY = "programming-devops-observability";
+const P_SONARQUBE = "programming-quality-sonarqube";
+const P_TESTING = "programming-quality-testing";
+const P_SECURITY = "programming-quality-security";
+const P_AWS = "programming-cloud-aws";
+const P_GCP = "programming-cloud-gcp";
+const P_AZURE = "programming-cloud-azure";
 
 interface PackageRule {
   signal: string;
@@ -175,7 +176,7 @@ export function detectStack(root = process.cwd()): StackDetection {
   if (fs.existsSync(path.join(root, "pubspec.yaml"))) {
     signals.push({ signal: "flutter", evidence: "pubspec.yaml" });
     skills.add(SKILL_MOBILE);
-    skills.add("programming/frontend/mobile");
+    skills.add(P_MOBILE);
   }
 
   for (const file of DEVOPS_FILES) {
@@ -302,7 +303,7 @@ function addPackageProgrammingSkills(deps: string[], skills: Set<string>): void 
     skills.add(P_SECURITY);
   }
   if (deps.includes("react-native") || deps.includes("expo")) {
-    skills.add("programming/frontend/mobile");
+    skills.add(P_MOBILE);
     skills.add(P_TYPESCRIPT);
   }
 }

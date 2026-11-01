@@ -11,6 +11,7 @@ import {
   malahorAgentPath,
 } from "./opencode-agents";
 import { MALAHOR_COMMAND_FILES } from "./opencode-commands";
+import { openCodeSkillsProblems } from "./opencode-skills";
 import type { MalahorPackagePaths } from "./package";
 import type { MalahorPaths } from "./paths";
 
@@ -50,6 +51,10 @@ export function validateInstallation(
   const missingCommands = MALAHOR_COMMAND_FILES.filter((file) => !fs.existsSync(path.join(commandsDir, file)));
   if (missingCommands.length > 0) {
     problems.push(`Comandos OpenCode faltan: ${missingCommands.join(", ")}`);
+  }
+
+  if (packagePaths) {
+    problems.push(...openCodeSkillsProblems(path.join(packagePaths.assetsDir, "skills"), paths));
   }
 
   // Un host desconocido no se adivina: install no crea los agentes y la validacion

@@ -10,6 +10,7 @@ export const MALAHOR_COMMAND_FILES = [
   "guardar-contexto.md",
   "compactar-seguro.md",
   "malahor-bootstrap.md",
+  "malahor-actualizar.md",
   "malahor-doctor.md",
   "malahor-reparar.md",
   "malahor-commit.md",

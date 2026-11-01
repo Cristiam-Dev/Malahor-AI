@@ -211,6 +211,48 @@ describe("malahor hooks", () => {
     expect(result.decision).toBe("allow");
   });
 
+  test.each([
+    "🛡️ security(núcleo-seguro): protege sesión y envío",
+    "♻️ refactor(catálogo): reordena índices públicos",
+    "✨ feat!: cambia el contrato público",
+    "✨ feat(api-pública)!: cambia el contrato público",
+  ])("acepta el contrato compartido con emoji completo, Unicode y breaking: %s", (message) => {
+    const result = runHooks(baseContext({
+      event: "git.commit.before",
+      command: `git commit -m '${message}'`,
+      profile: "release",
+      metadata: { validationOnly: true },
+    }));
+
+    expect(result.decision).toBe("allow");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-COMMIT-MESSAGE")).toBe(false);
+  });
+
+  test.each([
+    "feat(núcleo): falta el icono",
+    "! feat(core): puntuación no es un icono",
+    "✨ feature(núcleo): tipo fuera del contrato",
+    "✨ feat(núcleo)!!: breaking mal ubicado",
+    "✨ feat(núcleo): ",
+  ])("rechaza subjects sin icono o fuera del contrato: %s", (message) => {
+    const result = runHooks(baseContext({
+      event: "git.commit.before",
+      command: `git commit -m '${message}'`,
+      profile: "release",
+      metadata: { validationOnly: true },
+    }));
+
+    expect(result.decision).toBe("ask");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-COMMIT-MESSAGE")).toBe(true);
+  });
+
+  test("el hook delega la validación en git-commit-message sin duplicar tipos", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "cli", "core", "hooks", "rules.ts"), "utf8");
+
+    expect(source).toMatch(/from\s+["']\.\.\/git-commit-message["']/);
+    expect(source).not.toMatch(/feat\|fix\|docs\|style\|refactor\|perf\|test\|build\|ci\|chore\|revert/);
+  });
+
   test("pide consentimiento para commit real sin intencion explicita", () => {
     const result = runHooks(baseContext({
       event: "git.commit.before",

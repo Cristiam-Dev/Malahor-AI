@@ -24,6 +24,7 @@ import {
 import { MALAHOR_COMMAND_FILES, syncOpenCodeCommands } from "../core/opencode-commands";
 import { hasDuplicateConfigs } from "../core/opencode-config/preview";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
+import { openCodeSkillsProblems, syncOpenCodeSkills } from "../core/opencode-skills";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { ensurePrivateDirectory, isSandbox, privateDirectoryReady, type MalahorPaths } from "../core/paths";
 import { pluginHealthChecks, type PluginHealthCheck } from "../core/plugin-health";
@@ -82,6 +83,7 @@ function renderReport(
   checks.push(...checkMcpConfig(paths.opencodeConfig, host, paths));
   checks.push(checkCompaction(paths.opencodeConfig, host, paths));
   checks.push(checkOpenCodeCommands(paths));
+  checks.push(checkOpenCodeSkills(paths, packagePaths));
   checks.push(...checkAgents(paths, host));
   checks.push(checkOpenCodeConfigDuplicates(paths));
   for (const check of pluginHealthChecks({ paths, host, packagePaths })) {
@@ -260,6 +262,7 @@ function repairInstallFiles(
 ): void {
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
+  const skillsAsset = path.join(packagePaths.assetsDir, "skills");
 
   if (!fs.existsSync(paths.mnemoIndex) && fs.existsSync(packagePaths.mnemoBuild)) {
     if (!dryRun) {
@@ -318,6 +321,20 @@ function repairInstallFiles(
   if (missingCommands.length > 0 && fs.existsSync(commandsAsset)) {
     syncOpenCodeCommands(commandsAsset, paths, dryRun);
     repairs.push(`${dryRun ? "reinstalaria" : "reinstalados"} ${missingCommands.length} comando(s) OpenCode: ${missingCommands.join(", ")}`);
+  }
+
+  if (fs.existsSync(skillsAsset)) {
+    try {
+      const skills = syncOpenCodeSkills(skillsAsset, paths, dryRun);
+      if (skills.created > 0 || skills.updated > 0 || skills.removed > 0) {
+        repairs.push(`${dryRun ? "sincronizaria" : "sincronizadas"} skills OpenCode (${skills.created} creadas, ${skills.updated} actualizadas, ${skills.removed} retiradas)`);
+      }
+      if (skills.preserved > 0) {
+        repairs.push(`AVISO: ${skills.preserved} skill(s) o colision(es) propias preservadas; no se sobrescriben`);
+      }
+    } catch (error) {
+      repairs.push(`AVISO: catalogo de skills no reparable: ${(error as Error).message}`);
+    }
   }
 }
 
@@ -546,6 +563,19 @@ function checkOpenCodeCommands(paths: MalahorPaths): CheckResult {
     name: "OpenCode commands",
     ok: missing.length === 0,
     message: missing.length === 0 ? `${MALAHOR_COMMAND_FILES.length} instalados` : `faltan: ${missing.join(", ")}`,
+    critical: false,
+  };
+}
+
+function checkOpenCodeSkills(paths: MalahorPaths, packagePaths: MalahorPackagePaths | null): CheckResult {
+  const source = packagePaths
+    ? path.join(packagePaths.assetsDir, "skills")
+    : path.join(paths.assetsDir, "skills");
+  const problems = openCodeSkillsProblems(source, paths);
+  return {
+    name: "OpenCode skills",
+    ok: problems.length === 0,
+    message: problems.length === 0 ? "catalogo gestionado y skill git-commit-text disponibles" : problems.join("; "),
     critical: false,
   };
 }

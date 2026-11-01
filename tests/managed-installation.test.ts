@@ -90,6 +90,7 @@ describe("instalación gestionada limpia", () => {
     const paths = pathsFor(root);
     write(path.join(paths.assetsDir, "old.md"), "old asset\n");
     write(path.join(paths.opencodeDir, "commands", "foreign.md"), "foreign\n");
+    write(path.join(paths.opencodeDir, "skills", "foreign", "SKILL.md"), "old foreign skill\n");
     write(paths.opencodeConfig, "{\"old\":true}\n");
     write(paths.mnemoIndex, "old runtime\n");
 
@@ -97,6 +98,8 @@ describe("instalación gestionada limpia", () => {
     fs.rmSync(paths.assetsDir, { recursive: true });
     write(path.join(paths.assetsDir, "new.md"), "new asset\n");
     write(path.join(paths.opencodeDir, "commands", "foreign.md"), "changed\n");
+    fs.rmSync(path.join(paths.opencodeDir, "skills"), { recursive: true, force: true });
+    write(path.join(paths.opencodeDir, "skills", "managed-new", "SKILL.md"), "new managed skill\n");
     write(paths.opencodeConfig, "{\"new\":true}\n");
     write(paths.docsIndex, "new docs runtime\n");
 
@@ -105,10 +108,24 @@ describe("instalación gestionada limpia", () => {
     expect(fs.readFileSync(path.join(paths.assetsDir, "old.md"), "utf8")).toBe("old asset\n");
     expect(fs.existsSync(path.join(paths.assetsDir, "new.md"))).toBe(false);
     expect(fs.readFileSync(path.join(paths.opencodeDir, "commands", "foreign.md"), "utf8")).toBe("foreign\n");
+    expect(fs.readFileSync(path.join(paths.opencodeDir, "skills", "foreign", "SKILL.md"), "utf8")).toBe("old foreign skill\n");
+    expect(fs.existsSync(path.join(paths.opencodeDir, "skills", "managed-new"))).toBe(false);
     expect(fs.readFileSync(paths.opencodeConfig, "utf8")).toBe("{\"old\":true}\n");
     expect(fs.readFileSync(paths.mnemoIndex, "utf8")).toBe("old runtime\n");
     expect(fs.existsSync(paths.docsIndex)).toBe(false);
     expect(metadata(transaction).status).toBe("rolled-back");
+  });
+
+  test("install y update sincronizan skills; uninstall usa la eliminación acreditada", () => {
+    const install = fs.readFileSync(path.join(process.cwd(), "src", "cli", "commands", "install.ts"), "utf8");
+    const update = fs.readFileSync(path.join(process.cwd(), "src", "cli", "commands", "update.ts"), "utf8");
+    const uninstall = fs.readFileSync(path.join(process.cwd(), "src", "cli", "commands", "uninstall.ts"), "utf8");
+
+    for (const source of [install, update]) {
+      expect(source).toMatch(/syncOpenCodeSkills\s*\(/);
+      expect(source).toMatch(/assetsDir[\s\S]{0,120}["']skills["']/);
+    }
+    expect(uninstall).toMatch(/removeOpenCodeSkills\s*\(/);
   });
 
   test("commit conserva el payload nuevo y un backup verificable", () => {

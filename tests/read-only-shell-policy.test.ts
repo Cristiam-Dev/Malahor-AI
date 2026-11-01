@@ -36,6 +36,7 @@ describe("politica shell read-only sin plan", () => {
     "cmp -s README.md LICENSE",
     "rg -n fixture README.md src tests",
     "test ! -e docs && test -f README.md",
+    "malahor-ai git commit-message 'protege núcleo' --type security --scope seguridad --icon '🛡️' --breaking --json",
     "pwd",
   ])("acepta solo inspeccion local verificable: %s", (command) => {
     expect(classifyReadOnlyShellCommand(command, root)).toEqual({ readOnly: true });
@@ -63,6 +64,9 @@ describe("politica shell read-only sin plan", () => {
     "rg -e '' /etc/passwd",
     "unknown-inspector README.md",
     "bun test",
+    "malahor-ai git precommit --message '✨ feat(cli): mutación no autorizada'",
+    "malahor-ai git commit-fallback --message '✨ feat(cli): fallback' --paths '[\"src/a.ts\"]' --fingerprint sha256:abc --blocked-by host-deny",
+    "malahor-ai install --dry-run",
   ])("falla cerrado ante mutacion, indirecciones o ejecutables desconocidos: %s", (command) => {
     expect(classifyReadOnlyShellCommand(command, root).readOnly).toBe(false);
   });

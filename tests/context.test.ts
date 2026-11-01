@@ -194,6 +194,24 @@ describe("raíces registradas por proyecto", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/precommit quedó verde.*commit-fallback/is);
   });
 
+  test("el protocolo define el rollout local explicito para actualizar una instalacion existente", () => {
+    const marker = MALAHOR_RUNTIME_PROTOCOL.search(/rollout local|actualizaci[oó]n local/i);
+    const rollout = marker < 0 ? "" : MALAHOR_RUNTIME_PROTOCOL.slice(marker, marker + 2_400);
+    const lines = rollout.split("\n");
+
+    expect(rollout).not.toBe("");
+    expect(rollout).toMatch(/(?:gates?|diagn[oó]stico|testing|pruebas)[\s\S]{0,400}\bbuild\b/i);
+    expect(rollout).toMatch(/\b(?:sandbox|dry-run)\b/i);
+    expect(rollout).toMatch(/\b(?:guardrails?|hooks?)\b/i);
+    expect(rollout).toMatch(/(?:\bupdate(?:\s+--yes)?\s+real\b|actualizaci[oó]n real)[\s\S]{0,300}\bdoctor\b/i);
+    expect(lines.some((line) => /instalaci[oó]n existente/i.test(line) && /\bupdate\b/i.test(line))).toBe(true);
+    expect(lines.some((line) => /\binstall\b/i.test(line) && /(?:solo|[uú]nicamente|reservad)/i.test(line)
+      && /(?:bootstrap|ausencia)/i.test(line))).toBe(true);
+    expect(rollout).toMatch(/(?:det[eé]n(?:te|gase|erse)?|detien|interrump|aborta)[\s\S]{0,500}\bASK\b[\s\S]{0,80}\bDENY\b/i);
+    expect(rollout).toMatch(/(?:det[eé]n(?:te|gase|erse)?|detien|interrump|aborta)[\s\S]{0,500}(?:dependencias nuevas|nuevas dependencias)/i);
+    expect(rollout).toMatch(/(?:det[eé]n(?:te|gase|erse)?|detien|interrump|aborta)[\s\S]{0,500}(?:efectos distintos|cambian? (?:los )?efectos)/i);
+  });
+
   test("resuelve la raíz registrada al trabajar desde otra ubicación", () => {
     const { projects, paths } = fixture();
     registerProjectRoot(projects, "malahor", paths.cwd, false);

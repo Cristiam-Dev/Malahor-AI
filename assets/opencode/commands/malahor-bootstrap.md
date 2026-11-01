@@ -1,8 +1,8 @@
 ---
-description: Instala, actualiza o repara Malahor desde el agente sin consola
+description: Instala o repara Malahor desde el agente sin consola
 ---
 
-Ejecuta el flujo bootstrap agent-safe de Malahor. Si el usuario escribio "instala malahor", "reinstala malahor" o "actualiza malahor", tratalo igual que este comando.
+Ejecuta el flujo bootstrap agent-safe para una instalacion ausente o danada. Si el usuario escribio "instala malahor", "reinstala malahor" o "repara malahor", tratalo igual que este comando.
 
 Capsula de ejecucion generada por Malahor:
 !`malahor-ai install --bootstrap --yes 2>&1 || npx --yes malahor-ai install --bootstrap --yes 2>&1 || ( test -f package.json && grep -q 'malahor-ai' package.json && bun run src/cli/index.ts install --bootstrap --yes 2>&1 ) || echo 'MALAHOR_CLI_MISSING'`
@@ -12,7 +12,7 @@ Foco opcional del usuario: $ARGUMENTS
 Instrucciones:
 
 1. La capsula anterior ya corre con permisos del cliente: no depende de tus permisos de bash. No intentes reejecutarla si ya mostro exito.
-2. Si la capsula muestra instalacion exitosa, corre `malahor-ai doctor` para confirmar y reporta en maximo 10 lineas: que se instalo, resultado del doctor y proximo paso.
+2. Si la capsula muestra instalacion, reinstalacion o reparacion exitosa, corre `malahor-ai doctor` para confirmar y reporta en maximo 10 lineas: que se instalo, resultado del doctor y proximo paso.
 3. Si cambio el modo de intervencion, avisa que aplica desde el siguiente turno de la misma sesion. Para cambios de assets o capacidades, sigue el resultado de `doctor` y usa `/reload` solo si lo indica.
 4. Si la capsula muestra `MALAHOR_CLI_MISSING`, instala el CLI tu mismo con tus herramientas (`npm install -g malahor-ai` o `bun add -g malahor-ai`) y vuelve a ejecutar el bootstrap. Si tus permisos tampoco lo permiten, entrega UNA sola linea copia-y-pega al usuario; nunca des instrucciones de terminales intermedios ni ediciones manuales de configuracion.
 5. No instales proveedores opcionales de contexto de codigo durante este flujo.

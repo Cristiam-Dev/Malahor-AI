@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { classifyGitCommand, type GitCommandPolicyOptions } from "./git-command-policy";
+import { COMMIT_TYPES } from "./git-commit-message";
 
 export interface ReadOnlyShellClassification {
   readOnly: boolean;
@@ -73,6 +74,9 @@ const TEST_PATH_OPERATORS = new Set([
   "-e", "-f", "-d", "-r", "-w", "-x", "-s", "-L", "-h", "-b", "-c",
   "-p", "-S",
 ]);
+const COMMIT_MESSAGE_FLAGS = new Set(["--breaking", "--json"]);
+const COMMIT_MESSAGE_OPTIONS = new Set(["--type", "--scope", "--icon", "--message", "--profile", "--project"]);
+const COMMIT_MESSAGE_TYPES = new Set<string>(COMMIT_TYPES);
 
 export function classifyReadOnlyShellCommand(
   command: string,
@@ -116,9 +120,36 @@ function segmentIsReadOnly(
       return testIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
     case "pwd":
       return tokens.slice(1).every((token) => token === "-L" || token === "-P");
+    case "malahor-ai":
+    case "malahor-ai.exe":
+      return malahorCommitMessageIsReadOnly(tokens.slice(1));
     default:
       return false;
   }
+}
+
+function malahorCommitMessageIsReadOnly(args: string[]): boolean {
+  if (args[0] !== "git" || args[1] !== "commit-message") return false;
+  const seen = new Set<string>();
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (COMMIT_MESSAGE_FLAGS.has(arg)) {
+      if (seen.has(arg)) return false;
+      seen.add(arg);
+      continue;
+    }
+    if (COMMIT_MESSAGE_OPTIONS.has(arg)) {
+      if (seen.has(arg)) return false;
+      const value = args[index + 1];
+      if (!value || value.startsWith("--") || value.includes("\0")) return false;
+      if (arg === "--type" && !COMMIT_MESSAGE_TYPES.has(value)) return false;
+      seen.add(arg);
+      index += 1;
+      continue;
+    }
+    if (!arg || arg.startsWith("-") || arg.includes("\0")) return false;
+  }
+  return true;
 }
 
 function gitIsReadOnly(

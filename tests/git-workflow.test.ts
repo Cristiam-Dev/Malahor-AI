@@ -68,6 +68,40 @@ describe("git workflow asistido", () => {
     expect(message).toBe("✅ test(hook-policy): agrega validaciones nuevas");
   });
 
+  test("genera security con 🛡️ y texto Unicode", () => {
+    expect(composeCommitMessage({
+      summary: "  Protege sesión y envío.  ",
+      type: "security",
+      scope: "Núcleo Ágil",
+      icon: "🛡️",
+    })).toBe("🛡️ security(núcleo-ágil): protege sesión y envío");
+  });
+
+  test("genera refactor con el emoji completo ♻️ y scope Unicode", () => {
+    expect(composeCommitMessage({
+      summary: "Reordena índices públicos",
+      type: "refactor",
+      scope: "Catálogo",
+    })).toBe("♻️ refactor(catálogo): reordena índices públicos");
+  });
+
+  test("genera el marcador breaking después del tipo sin scope", () => {
+    expect(composeCommitMessage({
+      summary: "Cambia el contrato público",
+      type: "feat",
+      breaking: true,
+    })).toBe("✨ feat!: cambia el contrato público");
+  });
+
+  test("genera el marcador breaking después del scope", () => {
+    expect(composeCommitMessage({
+      summary: "Cambia el contrato público",
+      type: "feat",
+      scope: "API Pública",
+      breaking: true,
+    })).toBe("✨ feat(api-pública)!: cambia el contrato público");
+  });
+
   test("difiere solo el ASK de infraestructura en preflight sin autorizar el efecto", () => {
     const result = runHooks({
       event: "git.commit.before",

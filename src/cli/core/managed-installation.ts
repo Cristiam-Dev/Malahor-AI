@@ -112,6 +112,7 @@ function managedTargets(paths: MalahorPaths): string[] {
     paths.mnemoIndex,
     paths.docsIndex,
     path.join(paths.opencodeDir, "commands"),
+    paths.opencodeSkillsDir,
     paths.malahorPluginDir,
     path.join(paths.opencodeDir, "agents"),
     paths.agentsMd,

@@ -12,7 +12,7 @@ Router first-party de Malahor para asistencia de programacion profunda. Usar des
 
 1. Ejecutar `malahor-ai context detect`.
 2. Cargar primero `specialty-*` para orientacion general.
-3. Cargar despues las skills `programming/*` sugeridas por tecnologia/practica.
+3. Cargar despues las skills portables `programming-*` sugeridas por tecnologia/practica.
 4. Leer manifiestos reales: `package.json`, `pom.xml`, `build.gradle*`, `angular.json`, `next.config.*`, `nest-cli.json`, `Dockerfile`, `Chart.yaml`, `kustomization.yaml`, IaC, CI y Sonar.
 5. Para cambios no triviales, aplicar SDD: objetivo, contexto, diseno, riesgos, tests, validacion.
 6. Registrar decisiones relevantes en Mnemo.
@@ -21,17 +21,17 @@ Router first-party de Malahor para asistencia de programacion profunda. Usar des
 
 | Caso | Skills |
 |---|---|
-| Angular | `programming/frontend/angular`, `programming/frontend/typescript` |
-| React | `programming/frontend/react`, `programming/frontend/typescript` |
-| Next.js | `programming/frontend/nextjs`, `programming/frontend/react`, `programming/frontend/typescript` |
-| Java/Spring Boot | `programming/backend/java`, `programming/backend/spring-boot` |
-| Node/NestJS | `programming/backend/node`, `programming/backend/nestjs`, `programming/frontend/typescript` |
-| REST/API | `programming/backend/rest-api`, `programming/quality/security` |
-| Datos | `programming/backend/database` |
-| Arquitectura | `hexagonal-architecture`, `clean-architecture`, `solid`, `ddd`, `microservices`, `modular-monolith`, `design-patterns` |
-| Calidad | `testing`, `tdd`, `code-review`, `sonarqube`, `clean-code`, `security` |
-| DevOps | `docker`, `kubernetes`, `ci-cd`, `observability` |
-| Cloud | `aws`, `gcp`, `azure` |
+| Angular | `programming-frontend-angular`, `programming-frontend-typescript` |
+| React | `programming-frontend-react`, `programming-frontend-typescript` |
+| Next.js | `programming-frontend-nextjs`, `programming-frontend-react`, `programming-frontend-typescript` |
+| Java/Spring Boot | `programming-backend-java`, `programming-backend-spring-boot` |
+| Node/NestJS | `programming-backend-node`, `programming-backend-nestjs`, `programming-frontend-typescript` |
+| REST/API | `programming-backend-rest-api`, `programming-quality-security` |
+| Datos | `programming-backend-database` |
+| Arquitectura | `programming-architecture-hexagonal-architecture`, `programming-architecture-clean-architecture`, `programming-architecture-solid`, `programming-architecture-ddd`, `programming-architecture-microservices`, `programming-architecture-modular-monolith`, `programming-architecture-design-patterns` |
+| Calidad | `programming-quality-testing`, `programming-quality-tdd`, `programming-quality-code-review`, `programming-quality-sonarqube`, `programming-quality-clean-code`, `programming-quality-security` |
+| DevOps | `programming-devops-docker`, `programming-devops-kubernetes`, `programming-devops-ci-cd`, `programming-devops-observability` |
+| Cloud | `programming-cloud-aws`, `programming-cloud-gcp`, `programming-cloud-azure` |
 
 ## Reglas globales
 

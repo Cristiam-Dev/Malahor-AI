@@ -1,72 +1,67 @@
 # git-commit-text
 
-Skill canonica de Malahor para proponer texto de commit. Es regla de oro: siempre que el usuario pida un commit message, texto de commit, cierre de fase con commit o equivalente, aplicar esta skill antes de responder.
+Skill canonica de Malahor para generar texto de commit con el mismo contrato Unicode que valida el guard de Git.
 
-## Regla De Oro
+## Autoridad y disponibilidad
 
-1. Generar texto de commit; no ejecutar `git add`, `git commit`, `commit --amend` ni `push` salvo orden explicita y especifica del usuario.
-2. Usar subject con icono inicial + Conventional Commit en espanol.
-3. Incluir cuerpo con viñetas siempre que sea viable y aporte contexto, razon, impacto, docs o validaciones.
-4. Omitir cuerpo solo si el cambio es trivial y el cuerpo no aporta informacion real.
-5. Nunca agregar atribucion de IA, firmas, co-authored-by ni ruido ceremonial.
+1. Cargar esta skill siempre que la persona pida un mensaje, titulo o ejecucion de commit.
+2. No usar otra skill de commits como fallback. Si esta skill no esta disponible en el catalogo anunciado por OpenCode, detenerse y reportar que la instalacion esta incompleta.
+3. Esta skill orienta el texto; no autoriza `git add`, `git commit`, amend, push ni ninguna otra mutacion Git.
+4. Prevalidar el subject con `malahor-ai git commit-message ... --json` antes de firmar el plan de commit. Ese subcomando es read-only.
 
-## Formato Canonico
+## Subject canonico
 
 ```txt
-icono tipo(scope): resumen imperativo breve
-
-- cambio principal realizado
-- razon o impacto cuando aporte
-- docs/tests/validaciones relevantes cuando existan
+<emoji> <tipo>[(<scope>)][!]: <resumen imperativo breve en espanol>
 ```
 
-## Preferencias Del Usuario
+- El icono es un unico grafema emoji Unicode. Se admiten selectores de variacion y secuencias compuestas, por ejemplo `🛡️` y `♻️`.
+- Tipos: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`, `security`.
+- El scope es opcional, usa letras o numeros Unicode y guiones: `hooks`, `git-workflow`, `núcleo-ágil`.
+- Un breaking change usa `tipo!:` o `tipo(scope)!:`. Añadir tambien un footer `BREAKING CHANGE:` cuando el cuerpo deba explicar la incompatibilidad.
+- El resumen no queda vacio, no contiene saltos de linea y el subject completo respeta el limite aplicado por la CLI.
 
-- Responder en espanol.
-- Agregar un icono referente al inicio del titulo.
-- Mantener Conventional Commits despues del icono.
-- Usar cuerpo con lista de viñetas `-` por defecto cuando el cambio tenga sustancia.
-- Una idea por viñeta; sin parrafos largos.
-- Subject conciso; el detalle va en el cuerpo.
-- Si hay cambios en docs/openapi/postman en backend, mencionarlos en el cuerpo del commit.
-
-## Tipos E Iconos Sugeridos
+## Iconos sugeridos
 
 - ✨ `feat`: nueva capacidad.
 - 🐛 `fix`: correccion de bug.
 - 📝 `docs`: documentacion.
-- ✅ `test`: pruebas.
+- 🎨 `style`: formato sin cambio funcional.
 - ♻️ `refactor`: refactor interno.
-- 🎨 `style`: formato/estilo sin cambio funcional.
-- 🔧 `chore`: mantenimiento.
+- ⚡ `perf`: rendimiento.
+- ✅ `test`: pruebas.
 - 📦 `build`: build, empaquetado o dependencias.
 - 👷 `ci`: integracion continua.
-- 🔒 `security`: seguridad.
-- ⚡ `perf`: rendimiento.
+- 🔧 `chore`: mantenimiento.
 - ⏪ `revert`: revert.
+- 🛡️ `security`: seguridad.
 
-## Como Elegir Scope
+## Cuerpo
 
-- Preferir scope de dominio o modulo: `hooks`, `mnemo`, `cli`, `opencode`, `docs`, `tests`.
-- Evitar scopes genericos si existe uno mas preciso.
-- Usar kebab-case: `hook-policy`, `git-workflow`.
+Usar cuerpo con viñetas cuando haya cambio de comportamiento, mas de un archivo o modulo, guardrails, seguridad, permisos, documentacion, pruebas, build o una razon no obvia.
 
-## Cuerpo Del Commit
+```txt
+🛡️ security(hooks): protege validacion Unicode
 
-Incluir cuerpo cuando haya al menos uno de estos elementos:
+- comparte el contrato entre generador y guard
+- admite emojis compuestos y scopes Unicode
+- valida el flujo con pruebas enfocadas
+```
 
-- mas de un archivo o modulo tocado;
-- cambio de comportamiento;
-- guardrail, seguridad, permisos o politica;
-- docs o instrucciones actualizadas;
-- tests, build, smokes o validaciones relevantes;
-- razon del cambio no obvia por el subject.
+Omitir el cuerpo solo cuando el cambio sea trivial y no aporte informacion real. No agregar atribucion de IA, firmas, `Co-authored-by` ni ruido ceremonial.
 
-Omitir cuerpo solo para cambios triviales como typo, version menor o ajuste mecanico obvio.
+## Preflight read-only
 
-## Salida
+```sh
+malahor-ai git commit-message "protege sesion y envio" --type security --scope "núcleo-seguro" --icon "🛡️" --json
+malahor-ai git commit-message "cambia el contrato publico" --type feat --scope api --breaking --json
+```
 
-- Entregar solo el bloque del commit, salvo que el usuario pida explicacion.
-- Usar fenced block `txt` cuando sea conversacion normal.
-- Si el usuario pide solo el titulo, entregar solo el subject.
-- Si hay incertidumbre de scope/tipo, elegir el mas probable y no bloquear con preguntas salvo riesgo real.
+Si la CLI rechaza el subject, corregir tipo, scope, icono o resumen antes del plan. Nunca relajar el hook ni sustituir la skill canonica.
+
+## Salida conversacional
+
+- Entregar solo el bloque del commit salvo que la persona pida explicacion.
+- Usar un bloque `txt` en conversacion normal.
+- Si pide solo el titulo, entregar solo el subject.
+- Elegir el tipo y scope mas probables sin bloquear con preguntas salvo riesgo real.

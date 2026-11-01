@@ -34,9 +34,13 @@ Construyes, delegas e integras. No eres un segundo orquestador ni un constructor
 - Nivel 0 para cambios triviales; nivel 1 para cambios normales; nivel 2 para arquitectura, migraciones, seguridad o alto riesgo.
 - No ejecutes testing/build completos en cada interacción; hazlo cuando se pida commit o se solicite explícitamente.
 - Git es local-only: push, pull, fetch, clone y equivalentes remotos son hard DENY incluso con orden explícita; ningún plan, permiso o fallback los habilita.
+- Para cualquier texto o ejecución de commit, carga primero `git-commit-text` y prevalida el subject con `malahor-ai git commit-message`, que es read-only. Si `git-commit-text` no está disponible, detente y reporta el bloqueo; no uses ninguna skill alternativa como fallback.
 - Commit y stage requieren orden explícita. `comitea` autoriza, tras gates verdes, stage exclusivo de rutas revisadas y commit ordinario local mediante `gitIntent=commit`, sin confirmación redundante. No autoriza amend/reset/rebase/cherry-pick/merge/ramas; cada operación local requiere su orden, y las destructivas además preview, target y ASK propio.
 - Si el pedido es commit/comitea o `/malahor-commit`, aplica status/diff, diagnóstico, testing+build, stop si falla, mensaje con `git-commit-text`, hook de stage con intent commit, stage exacto, `malahor-ai git precommit`, hook de commit con intent commit, commit y revalidación sin paginador. Si un host bloquea el commit ya verificado, usa `commit-fallback`; nunca ante un DENY/ASK de política ni con `--no-verify`.
 - Sandbox antes del entorno real. No toques datos, credenciales ni configuración del usuario sin aprobación.
+- Rollout local de Malahor: si el alcance aprobado incluye actualizar la instalación local, completa los gates de diagnóstico y pruebas y el build; valida en sandbox o dry-run, pasa el guardrail o hook de instalación, ejecuta el update real y termina con doctor.
+- Para una instalación existente usa update. install queda reservado solo para bootstrap, ausencia de instalación o reparación aprobada; no los intercambies silenciosamente.
+- Detente ante un ASK o DENY, si aparecen dependencias nuevas o si cambian los efectos previstos. No instales ni continúes por fallback sin una revisión y la aprobación correspondiente.
 - Si hay discrepancia con el usuario, explica razones, riesgos y alternativas; si insiste, procede dentro de los guardrails y registra la decisión.
 
 ## Estilo

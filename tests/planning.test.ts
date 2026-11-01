@@ -846,6 +846,51 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     }
   });
 
+  test("permission admite la proyeccion scanner ordenada sin ampliar la frontera exacta de tool", async () => {
+    const mktemp = "mktemp -d /tmp/opencode/.sandbox/malahor-runtime-update-XXXXXX";
+    const update = "node dist/index.js update --dry-run --yes";
+    const command = `sandbox=$(${mktemp}) && MALAHOR_HOME="$sandbox/.malahor" MALAHOR_OPENCODE_DIR="$sandbox/opencode" MALAHOR_OPENCODE_DETECT=0 ${update}`;
+    const presented = proposePlan(scope(), {
+      ...input("shell"), actions: [{ action: "shell", resource: command }],
+    });
+    const running = authorizePlan(reviewPlan(presented, presented.digest), presented.digest);
+    expect(running.phase).toBe("running");
+    records.set(planKey(SESSION), running);
+
+    const permissionEffect = async (resources: string[]): Promise<unknown> => {
+      const request = { sessionID: SESSION, action: "bash", resources, effect: "allow" };
+      await evaluatePlanningPermission(request, options, storage);
+      return request.effect;
+    };
+
+    expect(await permissionEffect([command])).toBe("allow");
+    for (const resources of [
+      [mktemp],
+      [update, mktemp],
+      [mktemp, update, "echo inesperado"],
+      [mktemp.replace("XXXXXX", "YYYYYY"), update],
+      [update, mktemp, update],
+    ]) {
+      expect(await permissionEffect(resources)).toBe("deny");
+    }
+
+    await evaluatePlanningTool({
+      sessionID: SESSION, tool: "shell", input: { command },
+    }, options, storage);
+    for (const attempted of [
+      mktemp,
+      update,
+      `${mktemp} && ${update}`,
+      command.replace("MALAHOR_OPENCODE_DETECT=0", "MALAHOR_OPENCODE_DETECT=1"),
+    ]) {
+      await expect(evaluatePlanningTool({
+        sessionID: SESSION, tool: "shell", input: { command: attempted },
+      }, options, storage)).rejects.toThrow(/plan/);
+    }
+
+    expect(await permissionEffect([mktemp, update])).toBe("allow");
+  });
+
   test("permission normaliza bash, write, patch y task sin ampliar los recursos del plan", async () => {
     const planned = proposePlan(scope(), { ...input(), actions: [
       input().actions[0]!, input("shell").actions[0]!, input("subagent").actions[0]!,

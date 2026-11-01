@@ -526,7 +526,149 @@ function permissionResourcesAllowed(
   // para no rechazar antes un comando compuesto que si figura en el plan.
   if (action !== "shell" || resources.length < 2) return false;
   const compound = (resources as string[]).join(" && ");
-  return planAllows(state, scope, { action: "shell", resource: compound }, now, authority);
+  if (planAllows(state, scope, { action: "shell", resource: compound }, now, authority)) return true;
+  if (!validState(state, authority)) return false;
+
+  const scannerResources = resources as string[];
+  return state.plan.actions.some((candidate) => candidate.action === "shell"
+    && planAllows(state, scope, candidate, now, authority)
+    && sameResources(shellScannerProjection(candidate.resource), scannerResources));
+}
+
+function shellScannerProjection(command: string): string[] | null {
+  const segments = splitShellAnd(command);
+  if (!segments || segments.length < 2) return null;
+  const projected: string[] = [];
+  for (const segment of segments) {
+    const resource = scannerResource(segment);
+    if (!resource) return null;
+    projected.push(resource);
+  }
+  return projected;
+}
+
+function splitShellAnd(command: string): string[] | null {
+  const segments: string[] = [];
+  let start = 0;
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let substitutionDepth = 0;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    const next = command[index + 1];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "$" && next === "(") {
+      substitutionDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (substitutionDepth > 0) {
+      if (character === "(") substitutionDepth += 1;
+      else if (character === ")") substitutionDepth -= 1;
+      continue;
+    }
+    if (character === "&" && next === "&") {
+      const segment = command.slice(start, index).trim();
+      if (!segment) return null;
+      segments.push(segment);
+      start = index + 2;
+      index += 1;
+      continue;
+    }
+    if (character === "&" || character === "|" || character === ";" || character === "\n" || character === "\r") {
+      return null;
+    }
+  }
+
+  if (escaped || quote || substitutionDepth !== 0) return null;
+  const finalSegment = command.slice(start).trim();
+  if (!finalSegment) return null;
+  segments.push(finalSegment);
+  return segments;
+}
+
+function scannerResource(segment: string): string | null {
+  const assignmentSubstitution = segment.match(/^[A-Za-z_][A-Za-z0-9_]*=\$\(([\s\S]+)\)$/);
+  if (assignmentSubstitution) {
+    const inner = assignmentSubstitution[1]!.trim();
+    const nested = splitShellAnd(inner);
+    return inner && nested?.length === 1 ? inner : null;
+  }
+
+  let offset = 0;
+  let assignments = 0;
+  while (offset < segment.length) {
+    while (/\s/.test(segment[offset] ?? "")) offset += 1;
+    const start = offset;
+    const end = shellWordEnd(segment, start);
+    if (end === null) return null;
+    const token = segment.slice(start, end);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      const resource = segment.slice(start).trim();
+      return resource || null;
+    }
+    assignments += 1;
+    offset = end;
+  }
+  return assignments === 0 ? segment.trim() || null : null;
+}
+
+function shellWordEnd(value: string, start: number): number | null {
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let substitutionDepth = 0;
+  for (let index = start; index < value.length; index += 1) {
+    const character = value[index]!;
+    const next = value[index + 1];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "$" && next === "(") {
+      substitutionDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (substitutionDepth > 0) {
+      if (character === "(") substitutionDepth += 1;
+      else if (character === ")") substitutionDepth -= 1;
+      continue;
+    }
+    if (/\s/.test(character)) return index;
+  }
+  return escaped || quote || substitutionDepth !== 0 ? null : value.length;
+}
+
+function sameResources(left: string[] | null, right: string[]): boolean {
+  return left !== null && left.length === right.length && left.every((resource, index) => resource === right[index]);
 }
 
 function readOnlyShellResources(value: unknown, projectRoot: string, workingDirectory: string): boolean {

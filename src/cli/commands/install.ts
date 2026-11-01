@@ -28,6 +28,7 @@ import { beginManagedInstallation, pruneLegacyRuntimeArtifacts } from "../core/m
 import { assertAgentAssets, describeAgentSync, syncManagedAgents } from "../core/opencode-agents";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
+import { syncOpenCodeSkills } from "../core/opencode-skills";
 import { resolvePackagePaths } from "../core/package";
 import { ensurePrivateDirectory, isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveProject } from "../core/project";
@@ -52,6 +53,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   const project = resolveProject(packagePaths.root, config.projects.aliases);
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
+  const skillsAsset = path.join(packagePaths.assetsDir, "skills");
   const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
 
   printHeader("malahor-ai install");
@@ -116,6 +118,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
   const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
+  const skills = syncOpenCodeSkills(skillsAsset, paths, options.dryRun);
   const sdk = ensureOpencodeSdk({
     opencodeDir: paths.opencodeDir,
     backupsDir: paths.backupsDir,
@@ -139,6 +142,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   printLine(`Assets: ${options.dryRun ? "would install" : "installed"}`);
   printLine(`Legacy runtime artifacts: ${legacyRuntimeArtifacts.length === 0 ? "none" : `${options.dryRun ? "would remove" : "removed"} ${legacyRuntimeArtifacts.length}`}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would install" : "installed"} ${commands.files} in ${commands.destination}`);
+  printLine(`OpenCode skills: ${options.dryRun ? "would sync" : "synced"} ${skills.total} (${skills.created} created, ${skills.updated} updated, ${skills.removed} removed, ${skills.preserved} preserved)`);
   printLine(describeSdkEnsure(sdk));
   printLine(describePluginSync(plugin));
   for (const agent of agents) {
@@ -191,7 +195,8 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   if (legacyHint) printLine(legacyHint);
   printLine("Validation: passed (politica aplicada al final)");
   printLine("Next: run `malahor-ai doctor`. Un cambio de modo aplica desde el siguiente turno de la sesion actual.");
-  printLine("Reparacion sin consola: /malahor-bootstrap y /malahor-reparar funcionan aunque el agente este bloqueado.");
+  printLine("Actualizacion posterior: usa /malahor-actualizar sobre una instalacion existente.");
+  printLine("Bootstrap y reparacion: /malahor-bootstrap queda para ausencia o reinstalacion; /malahor-reparar aplica self-heal.");
   transaction.commit();
   } catch (error) {
     transaction.rollback();

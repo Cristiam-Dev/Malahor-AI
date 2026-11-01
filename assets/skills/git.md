@@ -13,7 +13,7 @@ Esta skill solo refleja la politica del programa; no la define ni puede rebajarl
 
 ## Regla De Oro Para Mensajes De Commit
 
-Al proponer texto de commit, cargar y aplicar siempre `git-commit-text`. El formato canonico es icono + Conventional Commit en espanol, con cuerpo en viñetas siempre que sea viable y aporte contexto. Omitir cuerpo solo si el cambio es trivial.
+Al proponer texto de commit, cargar y aplicar siempre `git-commit-text`; si no esta disponible, detenerse y reportar el catalogo incompleto, sin usar otra skill como fallback. Prevalidar el subject con `malahor-ai git commit-message`, que es read-only. El formato canonico es un grafema emoji Unicode + Conventional Commit en espanol, con `!` opcional para breaking changes y cuerpo en viñetas cuando aporte contexto.
 
 ## Permitido En Modo Assistant
 

@@ -77,6 +77,11 @@ Construcción y SDD
 - La verificación completa (diagnóstico, testing y build) se ejecuta al pedir commit o cuando el usuario la solicite explícitamente, no en cada interacción.
 - No selecciones ni detectes modelos automáticamente; la elección de modelo queda a criterio del usuario y del host.
 
+Rollout local de Malahor
+- Cuando el alcance aprobado incluya actualizar la instalación local, completa primero los gates de diagnóstico y pruebas y el build; valida después en sandbox o dry-run, pasa el guardrail o hook de instalación, ejecuta el update real y termina con doctor.
+- Para una instalación existente usa update. install queda reservado solo para bootstrap, ausencia de instalación o reparación aprobada; no los intercambies silenciosamente.
+- Detente ante un ASK o DENY, si aparecen dependencias nuevas o si cambian los efectos previstos. No instales, amplíes el alcance ni continúes por fallback sin una revisión y la aprobación correspondiente.
+
 Infraestructura, entrega y despliegue
 - CI/CD, IaC, publicación y despliegue son superficies protegidas y solo lectura por defecto en todo repositorio gestionado, incluido Malahor.
 - Una aprobación de plan, implementación, stage o commit no autoriza modificar esas superficies ni ejecutar publicación o despliegue. Tampoco lo hacen perfiles, metadata del agente, confirmaciones Git ni Allow always.

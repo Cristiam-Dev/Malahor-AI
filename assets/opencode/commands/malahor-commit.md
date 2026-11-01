@@ -9,6 +9,7 @@ Disparadores validos: el usuario dice "commit", "comitea" o equivalente explicit
 Reglas:
 
 - La invocacion de este comando o un pedido explicito de commit crea un unico plan nivel 0 minimo y espera un unico `go`; no uses Discovery, SDD, subagentes ni documentacion ceremonial.
+- Antes de firmar ese plan, carga exclusivamente `git-commit-text`. Si no esta disponible, detente y reporta el catalogo incompleto: no uses otra skill como fallback. Genera y valida el subject con `malahor-ai git commit-message "<resumen>" --type <tipo> --scope <scope> [--breaking] --json`; este preflight es read-only y no autoriza stage ni commit.
 - Las inspecciones read-only previas no crean otro plan ni obligan a revisar el vigente cuando no cambian efectos, recursos o riesgo.
 - Tras `go`, ejecuta todo el flujo en una sola pasada y, solo si esta verde, el stage exacto y un commit ordinario local de los archivos revisados. No presentes otro plan. No pidas otra confirmacion humana.
 - No uses `git add -A` por defecto: stagea solo los archivos del cambio revisado. Si hay archivos no relacionados o dudosos, pide confirmacion antes de stagear.
@@ -24,7 +25,7 @@ Pasos:
 1. Revisa `git status --short`, `git diff --stat` y `git diff --cached --stat`. Si no hay cambios, detente.
 2. Ejecuta directamente el diagnostico disponible del stack: typecheck, lint y Sonar cuando existan. No delegues un commit nivel 0 salvo que el alcance deje de ser trivial y requiera un plan revisado.
 3. Ejecuta directamente las pruebas y despues el build del proyecto.
-4. Si todo esta verde, carga `git-commit-text` y genera el subject con icono + Conventional Commit en espanol y el cuerpo en vinetas cuando aporte contexto.
+4. Si todo esta verde, conserva el subject prevalidado con `git-commit-text` y genera el cuerpo en vinetas cuando aporte contexto. Si el diff material cambio, vuelve a ejecutar `malahor-ai git commit-message`; si cambia el alcance del plan, detente.
 5. Ejecuta `malahor_hook_check` para `file.stage.before` con el comando `git add -- <rutas exactas>`, esas mismas rutas e `intent: "commit"`. Si no permite, detente. Luego stagea exclusivamente esas rutas.
 6. Valida el staged y el subject con `malahor-ai git precommit --message "<subject>" --json`. Conserva `targetPaths` y `stagedFingerprint`; si falla o queda un ASK pendiente, detente y no uses fallback.
 7. Ejecuta `malahor_hook_check` para `git.commit.before` con el comando final, las rutas staged e `intent: "commit"`. Si permite, ejecuta `git commit -m "<subject>" -m "<cuerpo>"` sin `--no-verify`.

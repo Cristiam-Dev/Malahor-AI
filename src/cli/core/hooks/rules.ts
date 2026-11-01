@@ -16,6 +16,7 @@ import {
 } from "../documentation-boundary";
 import { classifyGitCommand, loadGitAliases, type GitOperation } from "../git-command-policy";
 import { intentAuthorizes, type GitIntent } from "../git-intent";
+import { isValidCommitSubject } from "../git-commit-message";
 
 export const builtInHookRules: HookRule[] = [
   { id: "policy-integrity", run: policyIntegrityGuard },
@@ -108,6 +109,12 @@ function infrastructureBoundaryGuard(context: HookContext): HookViolation[] {
       || context.event === "shell.exec.before"
       || context.event === "tool.execute.before";
   if (!relevant) return [];
+
+  if (context.event === "git.commit.before"
+    && context.metadata?.validationOnly === true
+    && filesystemTargetPaths(context).length === 0) {
+    return [];
+  }
 
   const command = (context.command ?? "").trim();
   const commandMatch = context.event === "shell.exec.before" || context.event === "tool.execute.before"
@@ -583,8 +590,7 @@ function commitMessageGuard(context: HookContext): HookViolation[] {
   const message = extractCommitMessage(context.command);
   if (!message) return [];
 
-  const valid = /^[^\w\s]\s+(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?:\s+\S.{0,80}$/u.test(message);
-  if (valid) return [];
+  if (isValidCommitSubject(message)) return [];
 
   return [{
     id: "MAL-HOOK-COMMIT-MESSAGE",

@@ -85,6 +85,7 @@ async function main(argv: string[]): Promise<void> {
           type: parsed.options.type,
           scope: parsed.options.scope,
           icon: parsed.options.icon,
+          breaking: parsed.flags.has("breaking"),
           json: parsed.flags.has("json"),
         });
         return;
@@ -208,7 +209,7 @@ Commands:
 
 Git commands:
   git precommit [--message <mensaje>] [--profile <perfil>]
-  git commit-message [resumen...] [--type <tipo>] [--scope <scope>] [--icon <emoji>]
+  git commit-message [resumen...] [--type <tipo>] [--scope <scope>] [--icon <emoji>] [--breaking]
   git commit-fallback --message <subject> --paths <a,b> --fingerprint <sha256:...> --blocked-by <causa>
 
 Context commands:
