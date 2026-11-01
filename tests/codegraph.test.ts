@@ -588,6 +588,30 @@ test("doctor sin self-heal avisa CodeGraph ausente sin bloquear un host V2 aisla
     expect(fs.readdirSync(home).sort()).toEqual(before);
     expect(hasEntry(path.join(home, "codegraph"))).toBe(false);
 
+    fs.rmSync(paths.opencodeConfig);
+    output = "";
+    process.exitCode = undefined;
+    await withFixtureEnvironment(async () => {
+      runDoctor({ dryRun: false, selfHeal: false });
+    }, { MALAHOR_OPENCODE_BIN: fakeHost });
+    expect(output).toMatch(/^OK OpenCode config: .*runtime plugin.*verify-only/m);
+    expect(output).not.toMatch(/^FAIL /m);
+    expect(output).toMatch(/Status: ready with \d+ warning\(s\)/);
+    expect(process.exitCode).not.toBe(1);
+
+    const pluginFile = path.join(paths.malahorPluginDir, "index.ts");
+    const pluginContents = fs.readFileSync(pluginFile, "utf8");
+    fs.rmSync(pluginFile);
+    output = "";
+    process.exitCode = undefined;
+    await withFixtureEnvironment(async () => {
+      runDoctor({ dryRun: false, selfHeal: false });
+    }, { MALAHOR_OPENCODE_BIN: fakeHost });
+    expect(output).toMatch(/^FAIL OpenCode config: /m);
+    expect(process.exitCode).toBe(1);
+    fs.writeFileSync(pluginFile, pluginContents);
+    process.exitCode = 0;
+
     for (const disabledLevel of ["memory", "mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"]) {
       writeJson(paths.projectsFile, { malahor: { context: disabledLevel, roots: [repo], defaultRoot: repo } });
       const registry = fs.readFileSync(paths.projectsFile, "utf8");

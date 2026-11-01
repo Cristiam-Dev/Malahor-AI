@@ -76,7 +76,7 @@ function renderReport(
   checks.push({ name: "Docs MCP index", ok: fs.existsSync(paths.docsIndex), message: paths.docsIndex, critical: true });
   checks.push({ name: "Docs vault", ok: fs.existsSync(paths.vaultDir), message: paths.vaultDir, critical: true });
   checks.push({ name: "Assets dir", ok: fs.existsSync(paths.assetsDir), message: paths.assetsDir, critical: true });
-  checks.push({ name: "OpenCode config", ok: fs.existsSync(paths.opencodeConfig), message: paths.opencodeConfig, critical: true });
+  checks.push(checkOpenCodeConfigPresence(paths, host));
   checks.push(checkInstructions(paths));
   checks.push(checkLegacyInstructions(paths));
   checks.push(...checkMcpConfig(paths.opencodeConfig, host, paths));
@@ -620,6 +620,21 @@ function checkOpenCodeConfigDuplicates(paths: MalahorPaths): CheckResult {
   }
 
   return { name: "OpenCode config duplicados", ok: false, message: "opencode.json y opencode.jsonc coexisten; usar `malahor-ai config` (el self-heal no los consolida)", critical: false };
+}
+
+function checkOpenCodeConfigPresence(paths: MalahorPaths, host: OpenCodeHostInfo): CheckResult {
+  const exists = fs.existsSync(paths.opencodeConfig);
+  const runtimeManaged = host.kind === "v2" && pluginManagesMcp(paths);
+  return {
+    name: "OpenCode config",
+    ok: exists || runtimeManaged,
+    message: exists
+      ? paths.opencodeConfig
+      : runtimeManaged
+        ? `${paths.opencodeConfig} ausente; runtime plugin (config verify-only)`
+        : paths.opencodeConfig,
+    critical: true,
+  };
 }
 
 function checkInstructions(paths: MalahorPaths): CheckResult {
