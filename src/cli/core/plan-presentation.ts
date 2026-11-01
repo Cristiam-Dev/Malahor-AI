@@ -103,8 +103,8 @@ function renderSummaryView(state: PlanState): string {
   const presentation = state.plan.presentation;
   const critical = requiresVisibleDetails(presentation.risk);
   const lines = [
-    planIdentity(state),
-    `Estado: ${state.phase}`,
+    planSummaryHeading(state),
+    `Estado: ${phaseStatus(state)}`,
     "",
     "## Objetivo",
     safeText(presentation.objective),
@@ -130,30 +130,30 @@ function renderSummaryView(state: PlanState): string {
     `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
     `- ${safeText(presentation.risk.summary)}`,
     "",
-    "## Acción requerida",
+    "## Qué debes hacer ahora",
     nextAction(state),
     "",
     critical
-      ? "Los detalles críticos están abiertos por defecto. También puedes consultarlos con `/malahor-plan detalles`."
-      : "Despliega el anexo técnico cuando necesites rutas, comandos o evidencias exactas. Si tu cliente no lo muestra, usa `/malahor-plan detalles`.",
+      ? "Este plan contiene riesgo alto o una categoría crítica; por eso el detalle técnico se muestra completo antes de aprobar."
+      : "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.",
+  );
+  if (critical) lines.push(
     "",
-    `<details${critical ? " open" : ""}>`,
+    "<details open>",
     "<summary>Ver detalle técnico</summary>",
     "",
     ...technicalBody(state),
     "",
     "</details>",
-    "",
-    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.",
   );
   return lines.join("\n");
 }
 
 function renderLevelZeroSummary(state: PlanState): string {
   const presentation = state.plan.presentation;
-  return [
-    planIdentity(state),
-    `Estado: ${state.phase}`,
+  const lines = [
+    planSummaryHeading(state),
+    `Estado: ${phaseStatus(state)}`,
     "",
     "## Cambio",
     safeText(presentation.objective),
@@ -165,31 +165,21 @@ function renderLevelZeroSummary(state: PlanState): string {
     `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
     `- ${safeText(presentation.risk.summary)}`,
     "",
-    "## Acción requerida",
+    "## Qué debes hacer ahora",
     nextAction(state),
     "",
-    "Los efectos exactos están en el anexo. Si tu cliente no lo muestra, usa `/malahor-plan detalles`.",
-    "",
-    "<details>",
-    "<summary>Ver detalle técnico</summary>",
-    "",
-    ...technicalBody(state),
-    "",
-    "</details>",
-    "",
-    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.",
-  ].join("\n");
+    "Si necesitas revisar las rutas, comandos o la identidad firmada, usa `/malahor-plan detalles`.",
+  ];
+  return lines.join("\n");
 }
 
 function renderTechnicalView(state: PlanState): string {
   return [
     planIdentity(state),
-    `Estado: ${state.phase}`,
+    `Estado: ${phaseStatus(state)}`,
     "",
     "## Detalle técnico",
     ...technicalBody(state),
-    "",
-    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.",
   ].join("\n");
 }
 
@@ -251,6 +241,9 @@ function technicalBody(state: PlanState): string[] {
     `- Plan: ${state.planID}`,
     `- Revisión: ${state.revision}`,
     `- Digest: ${state.digest}`,
+    "",
+    "### Vigencia",
+    "- Sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.",
   );
   return lines;
 }
@@ -286,24 +279,56 @@ function approvalLines(state: PlanState): string[] {
 }
 
 function nextAction(state: PlanState): string {
-  if (state.phase === "completed") return "Plan terminado; no hay ninguna acción pendiente.";
-  if (state.phase === "revoked") return "Plan revocado; no hay ninguna acción ejecutable.";
-  if (state.phase === "superseded") return "Plan reemplazado por una revisión posterior; no lo ejecutes.";
-  if (state.phase === "paused") return "Solicita reanudar este mismo plan cuando corresponda.";
-  if (state.phase === "blocked") return "Resuelve sus dependencias y solicita reanudarlo; nunca arrancará automáticamente.";
-  if (state.phase === "running") return "Continúa únicamente con las acciones exactas autorizadas y conserva los demás guardrails.";
-  if (state.mode === "advisor") return "Revisa el concepto; el modo asesor no ejecuta cambios.";
+  if (state.phase === "completed") {
+    return "No tienes que hacer nada más: el trabajo de este plan terminó. Si necesitas otro cambio, solicítalo como una tarea nueva.";
+  }
+  if (state.phase === "revoked") {
+    return "Este plan fue cancelado y ya no puede ejecutarse. Si todavía necesitas el cambio, pide un plan nuevo con el alcance actualizado.";
+  }
+  if (state.phase === "superseded") {
+    return "No apruebes ni ejecutes esta versión: fue reemplazada por una revisión posterior. Revisa únicamente el plan más reciente.";
+  }
+  if (state.phase === "paused") {
+    return "La ejecución está detenida. Cuando quieras continuar exactamente con este alcance, solicita reanudar el plan; cualquier cambio requiere una revisión nueva.";
+  }
+  if (state.phase === "blocked") {
+    return "El plan no puede continuar porque aún tiene dependencias pendientes. Resuélvelas y solicita reanudarlo; Malahor nunca lo iniciará automáticamente.";
+  }
+  if (state.phase === "running") {
+    return "El plan ya está aprobado. Malahor puede continuar únicamente con el alcance firmado; no necesitas responder salvo que quieras pausarlo o cambiarlo.";
+  }
+  if (state.mode === "advisor") {
+    return "Revisa la recomendación y decide si quieres convertirla en una tarea ejecutable. En modo asesor no se realizan cambios.";
+  }
   if (state.mode === "assistant" && state.phase === "presented") {
-    return "Completa la primera confirmación para revisar el plan; esta confirmación no autoriza la ejecución.";
+    return "Revisa el alcance y completa la primera confirmación. Ese paso solo registra que lo has revisado: no inicia cambios. Después podrás responder `go` en un turno nuevo para pedir la autorización de ejecución.";
   }
   if (state.mode === "assistant") {
-    return "En un turno posterior, responde `go` o `implementa` para solicitar la segunda confirmación.";
+    return "Si el plan te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor abrirá la segunda confirmación y, si la aceptas, ejecutará únicamente este alcance.";
   }
-  return "En un turno posterior, responde `go` o `implementa` para solicitar la aprobación previa.";
+  return "Si el alcance te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor pedirá la aprobación de esta revisión y, si se concede, ejecutará únicamente lo descrito; esa respuesta no autoriza operaciones adicionales ni evita otros guardrails.";
+}
+
+function planSummaryHeading(state: PlanState): string {
+  return `Plan de trabajo Malahor · nivel ${planLevel(state)}`;
 }
 
 function planIdentity(state: PlanState): string {
   return `Plan Malahor (${state.mode} · nivel ${planLevel(state)}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
+}
+
+function phaseStatus(state: PlanState): string {
+  if (state.phase === "presented") {
+    return state.mode === "assistant" ? "esperando tu revisión" : state.mode === "executor"
+      ? "esperando tu aprobación" : "presentado para consulta";
+  }
+  if (state.phase === "reviewed") return "revisado; esperando autorización para ejecutar";
+  if (state.phase === "running") return "aprobado y en ejecución";
+  if (state.phase === "paused") return "en pausa";
+  if (state.phase === "blocked") return "bloqueado por dependencias";
+  if (state.phase === "completed") return "completado";
+  if (state.phase === "revoked") return "cancelado";
+  return "reemplazado por otra revisión";
 }
 
 function planLevel(state: PlanState): PlanLevel {

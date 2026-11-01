@@ -257,7 +257,7 @@ async function registeredTools(onApproval?: (request: ApprovalRequest) => Promis
     if (!definition || typeof definition.execute !== "function") throw new Error(`Tool ${name} no registrada`);
     return (definition.execute as (value: unknown, context: ReturnType<typeof call>) => Promise<{
       content: string;
-      metadata?: { planID?: string; revision?: string; phase?: string };
+      metadata?: { planID?: string; revision?: string; digest?: string; phase?: string };
     }>)(value, context);
   };
   return { approvals, definitions, execute, registration };
@@ -620,7 +620,9 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     const review = { sessionID: SESSION, action: "malahor_plan_review", resources: [plan.digest], effect: "allow" } as Record<string, unknown>;
     await evaluatePlanningPermission(review, options, storage);
     expect(review.effect).toBe("ask");
-    expect(review.message).toContain(plan.planID.slice(0, 12));
+    expect(review.message).not.toContain(plan.planID);
+    expect(review.message).not.toContain(plan.revision);
+    expect(review.message).not.toContain(plan.digest);
     expect(String(review.message).endsWith(renderPlan(plan))).toBe(true);
     expect(String(review.message).split(renderPlan(plan))).toHaveLength(2);
 
@@ -639,7 +641,9 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     const run = { ...earlyRun, effect: "allow" };
     await evaluatePlanningPermission(run, options, storage);
     expect(run.effect).toBe("ask");
-    expect(run.message).toContain(plan.planID.slice(0, 12));
+    expect(run.message).not.toContain(plan.planID);
+    expect(run.message).not.toContain(plan.revision);
+    expect(run.message).not.toContain(plan.digest);
     expect(String(run.message).endsWith(renderPlan(reviewed))).toBe(true);
     expect(String(run.message).split(renderPlan(reviewed))).toHaveLength(2);
     const hostDenied = { ...run, effect: "deny" };
@@ -1052,7 +1056,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(state.version).toBe(4);
     expect(state.plan.presentation).toEqual(input().presentation);
     expect(planResult.metadata).toMatchObject({
-      planID: state.planID, revision: state.revision, phase: state.phase,
+      planID: state.planID, revision: state.revision, digest: state.digest, phase: state.phase,
     });
     expect(presentationIdentity(state)).toBe(planCall.messageID);
     expect(validState(state)).toBe(true);
@@ -1067,15 +1071,17 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const result = await harness.execute("plan", input(), call(SESSION, "malahor", "msg_foreground_envelope"));
     const state = records.get(planKey(SESSION)) as PlanState;
 
-    expect(result.content).toMatch(/copia (?:exactamente )?(?:el )?Markdown[\s\S]*mensaje normal[\s\S]*foreground/i);
-    expect(result.content).toMatch(/(?:traza|output)[\s\S]*(?:tool|t[eé]cnic)[\s\S]*background[\s\S]*no cuenta[\s\S]*presentaci[oó]n/i);
+    expect(result.content).toMatch(/publica[\s\S]*bloque delimitado[\s\S]*exactamente una vez[\s\S]*mensaje normal/i);
     expect(foregroundMarkdown(result.content)).toBe(renderPlan(state));
     expect(result.content.match(/malahor-plan-foreground:start/g) ?? []).toHaveLength(1);
     expect(result.content.match(/malahor-plan-foreground:end/g) ?? []).toHaveLength(1);
     expect(foregroundMarkdown(result.content)).toMatch(/^## Objetivo$/m);
     expect(foregroundMarkdown(result.content)).toMatch(/^## Al terminar$/m);
-    expect(foregroundMarkdown(result.content)).toMatch(/^## Acción requerida$/m);
+    expect(foregroundMarkdown(result.content)).toMatch(/^## Qué debes hacer ahora$/m);
     expect(foregroundMarkdown(result.content)).toContain("/malahor-plan detalles");
+    expect(foregroundMarkdown(result.content)).not.toContain(state.planID);
+    expect(foregroundMarkdown(result.content)).not.toContain(state.revision);
+    expect(foregroundMarkdown(result.content)).not.toContain(state.digest);
   });
 
   test("asistente revisa el plan pero bloquea la segunda confirmacion en el mismo turno", async () => {
@@ -1116,9 +1122,9 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       planID: running.planID, revision: running.revision, phase: running.phase,
     });
     expect(runResult.content).toBe(renderPlan(running));
-    expect(runResult.content).toContain(running.planID);
-    expect(runResult.content).toContain(running.revision);
-    expect(runResult.content).toContain(running.digest);
+    expect(runResult.content).not.toContain(running.planID);
+    expect(runResult.content).not.toContain(running.revision);
+    expect(runResult.content).not.toContain(running.digest);
     expect(harness.approvals.map((request) => request.action)).toEqual(["malahor_plan_review", "malahor_plan_run"]);
     const afterRun = { ...beforeRun, effect: "allow" };
     await evaluatePlanningPermission(afterRun, options, storage);

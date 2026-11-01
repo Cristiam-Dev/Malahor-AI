@@ -89,6 +89,9 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toContain("No arbitres automáticamente");
     expect(system[0]?.text).toContain("exclusivamente mediante docs_*");
     expect(system[0]?.text).toContain("Obsidian MCP ni fallback al repositorio");
+    expect(system[0]?.text).toContain("Qué debes hacer ahora");
+    expect(system[0]?.text).toMatch(/no incrusta IDs, comandos ni el anexo técnico/i);
+    expect(system[0]?.text).toMatch(/ctx\.storage de OpenCode[\s\S]*independientes de Mnemo/i);
   });
 
   test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {
@@ -968,6 +971,8 @@ describe("adaptador de plugin V2", () => {
         storage: {
           get: async (key: string) => storageWrites.find((entry) => entry.key === key)?.value,
           set: async (key: string, value: Record<string, unknown>) => { storageWrites.push({ key, value }); },
+          remove: async () => undefined,
+          scan: async () => ({ entries: [] }),
         },
       });
 
@@ -1027,6 +1032,10 @@ describe("adaptador de plugin V2", () => {
         status: "completed",
       });
       expect(storageWrites.some((entry) => entry.key === "memory/freshness/demo")).toBe(true);
+      const pluginState = JSON.parse(fs.readFileSync(path.join(home, "plugin-state.json"), "utf8")) as {
+        capabilities: Record<string, boolean>;
+      };
+      expect(pluginState.capabilities["planning.retention"]).toBe(true);
 
       await (cleanup as () => Promise<void>)();
       expect(disposed).toContain("permission.evaluate");

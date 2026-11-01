@@ -38,6 +38,7 @@ import {
 } from "./planning";
 import { registerModeCommand, type ModeCommandHost } from "./mode-command";
 import { registerPlanCommand, type PlanCommandHost } from "./plan-command";
+import { compactTerminalPlans } from "./plan-retention";
 import {
   createProjectAffinityResolver,
   type ProjectAffinityResolver,
@@ -155,6 +156,25 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       criticalGaps.push("planning.authority");
       warn(`autoridad de planeacion no disponible: ${(error as Error).message}`);
     }
+  }
+  if (planStorage && planningAuthority) {
+    try {
+      const retention = await compactTerminalPlans(planStorage, planningAuthority);
+      capabilities["planning.retention"] = retention.supported;
+      if (!retention.supported) {
+        degraded.push("planning.retention");
+      } else if (retention.failed > 0) {
+        degraded.push("planning.retention.verification");
+        warn(`retencion de planes degradada: ${retention.failed} revision(es) no se compactaron`);
+      }
+    } catch (error) {
+      capabilities["planning.retention"] = false;
+      degraded.push("planning.retention");
+      warn(`retencion de planes no disponible: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    capabilities["planning.retention"] = false;
+    degraded.push("planning.retention");
   }
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {

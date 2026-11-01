@@ -5576,12 +5576,13 @@ Intervención y reparación
 - Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. La autorización del plan no caduca por tiempo; si cambian revisión, efectos, proyecto, modo o política, deja de autorizar.
 - Cada plan declara nivel 0, 1 o 2 dentro de su payload firmado. Nivel 0 usa un plan mínimo visible y conserva la aprobación posterior go: nunca ejecuta en el turno de presentación ni elimina malahor_run.
 - Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentación ceremonial. Tras go ejecuta el alcance aprobado en una sola pasada y usa validación enfocada; un commit conserva excepcionalmente diagnóstico, tests, build y hooks completos.
-- Usa divulgación progresiva: el resumen del plan debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto agrupado, riesgo y acción requerida; rutas, comandos, dependencias y evidencia exacta van en el anexo técnico.
-- El anexo puede desplegarse o consultarse siempre con /malahor-plan detalles. Un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción mantiene ese detalle visible y abierto por defecto, sin interacción adicional.
+- Usa divulgación progresiva: el resumen debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto, riesgo y “Qué debes hacer ahora” narrado en lenguaje técnico comprensible.
+- En riesgo bajo o medio sin categorías críticas, la vista normal no incrusta IDs, comandos ni el anexo técnico; el detalle exacto se consulta con /malahor-plan detalles. Un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción mantiene ese detalle completo visible y abierto por defecto, sin interacción adicional.
 - En asistente y ejecutor, despues de malahor_plan copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno. Una traza u output tecnico del tool en background no cuenta como presentacion. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
+- Los estados de planning viven en ctx.storage de OpenCode y son independientes de Mnemo. Una revisión terminal deja de actuar como plan activo: primero se archiva completa, firmada y comprimida; solo después se retiran copias vivas que aún coincidan exactamente. Sin verificación o sin capacidades de scan/remove se conservan las copias originales.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni las escrituras documentales autorizadas mediante docs_*.
 - Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
 - No edites opencode.json/opencode.jsonc manualmente ni pidas al usuario hacerlo; usa las rutas de diagnóstico y reparación de Malahor.
@@ -7405,8 +7406,8 @@ function renderSummaryView(state) {
   const presentation = state.plan.presentation;
   const critical = requiresVisibleDetails(presentation.risk);
   const lines = [
-    planIdentity(state),
-    `Estado: ${state.phase}`,
+    planSummaryHeading(state),
+    `Estado: ${phaseStatus(state)}`,
     "",
     "## Objetivo",
     safeText(presentation.objective),
@@ -7420,15 +7421,17 @@ function renderSummaryView(state) {
   if (presentation.impact.length > 0) {
     lines.push("", "## Impacto", ...impactLines(presentation.impact));
   }
-  lines.push("", "## Riesgo", `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`, `- ${safeText(presentation.risk.summary)}`, "", "## Acción requerida", nextAction(state), "", critical ? "Los detalles críticos están abiertos por defecto. También puedes consultarlos con `/malahor-plan detalles`." : "Despliega el anexo técnico cuando necesites rutas, comandos o evidencias exactas. Si tu cliente no lo muestra, usa `/malahor-plan detalles`.", "", `<details${critical ? " open" : ""}>`, "<summary>Ver detalle técnico</summary>", "", ...technicalBody(state), "", "</details>", "", "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.");
+  lines.push("", "## Riesgo", `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`, `- ${safeText(presentation.risk.summary)}`, "", "## Qué debes hacer ahora", nextAction(state), "", critical ? "Este plan contiene riesgo alto o una categoría crítica; por eso el detalle técnico se muestra completo antes de aprobar." : "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.");
+  if (critical)
+    lines.push("", "<details open>", "<summary>Ver detalle técnico</summary>", "", ...technicalBody(state), "", "</details>");
   return lines.join(`
 `);
 }
 function renderLevelZeroSummary(state) {
   const presentation = state.plan.presentation;
-  return [
-    planIdentity(state),
-    `Estado: ${state.phase}`,
+  const lines = [
+    planSummaryHeading(state),
+    `Estado: ${phaseStatus(state)}`,
     "",
     "## Cambio",
     safeText(presentation.objective),
@@ -7440,31 +7443,21 @@ function renderLevelZeroSummary(state) {
     `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
     `- ${safeText(presentation.risk.summary)}`,
     "",
-    "## Acción requerida",
+    "## Qué debes hacer ahora",
     nextAction(state),
     "",
-    "Los efectos exactos están en el anexo. Si tu cliente no lo muestra, usa `/malahor-plan detalles`.",
-    "",
-    "<details>",
-    "<summary>Ver detalle técnico</summary>",
-    "",
-    ...technicalBody(state),
-    "",
-    "</details>",
-    "",
-    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política."
-  ].join(`
+    "Si necesitas revisar las rutas, comandos o la identidad firmada, usa `/malahor-plan detalles`."
+  ];
+  return lines.join(`
 `);
 }
 function renderTechnicalView(state) {
   return [
     planIdentity(state),
-    `Estado: ${state.phase}`,
+    `Estado: ${phaseStatus(state)}`,
     "",
     "## Detalle técnico",
-    ...technicalBody(state),
-    "",
-    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política."
+    ...technicalBody(state)
   ].join(`
 `);
 }
@@ -7495,7 +7488,7 @@ function technicalBody(state) {
   if (state.plan.actions.length > 0) {
     lines.push("", "### Acciones exactas", ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${safeJson(resource)}`));
   }
-  lines.push("", "### Autorización", ...approvalLines(state), "", "### Identidad firmada", `- Plan: ${state.planID}`, `- Revisión: ${state.revision}`, `- Digest: ${state.digest}`);
+  lines.push("", "### Autorización", ...approvalLines(state), "", "### Identidad firmada", `- Plan: ${state.planID}`, `- Revisión: ${state.revision}`, `- Digest: ${state.digest}`, "", "### Vigencia", "- Sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.");
   return lines;
 }
 function impactLines(impact) {
@@ -7528,30 +7521,58 @@ function approvalLines(state) {
   ];
 }
 function nextAction(state) {
-  if (state.phase === "completed")
-    return "Plan terminado; no hay ninguna acción pendiente.";
-  if (state.phase === "revoked")
-    return "Plan revocado; no hay ninguna acción ejecutable.";
-  if (state.phase === "superseded")
-    return "Plan reemplazado por una revisión posterior; no lo ejecutes.";
-  if (state.phase === "paused")
-    return "Solicita reanudar este mismo plan cuando corresponda.";
-  if (state.phase === "blocked")
-    return "Resuelve sus dependencias y solicita reanudarlo; nunca arrancará automáticamente.";
-  if (state.phase === "running")
-    return "Continúa únicamente con las acciones exactas autorizadas y conserva los demás guardrails.";
-  if (state.mode === "advisor")
-    return "Revisa el concepto; el modo asesor no ejecuta cambios.";
+  if (state.phase === "completed") {
+    return "No tienes que hacer nada más: el trabajo de este plan terminó. Si necesitas otro cambio, solicítalo como una tarea nueva.";
+  }
+  if (state.phase === "revoked") {
+    return "Este plan fue cancelado y ya no puede ejecutarse. Si todavía necesitas el cambio, pide un plan nuevo con el alcance actualizado.";
+  }
+  if (state.phase === "superseded") {
+    return "No apruebes ni ejecutes esta versión: fue reemplazada por una revisión posterior. Revisa únicamente el plan más reciente.";
+  }
+  if (state.phase === "paused") {
+    return "La ejecución está detenida. Cuando quieras continuar exactamente con este alcance, solicita reanudar el plan; cualquier cambio requiere una revisión nueva.";
+  }
+  if (state.phase === "blocked") {
+    return "El plan no puede continuar porque aún tiene dependencias pendientes. Resuélvelas y solicita reanudarlo; Malahor nunca lo iniciará automáticamente.";
+  }
+  if (state.phase === "running") {
+    return "El plan ya está aprobado. Malahor puede continuar únicamente con el alcance firmado; no necesitas responder salvo que quieras pausarlo o cambiarlo.";
+  }
+  if (state.mode === "advisor") {
+    return "Revisa la recomendación y decide si quieres convertirla en una tarea ejecutable. En modo asesor no se realizan cambios.";
+  }
   if (state.mode === "assistant" && state.phase === "presented") {
-    return "Completa la primera confirmación para revisar el plan; esta confirmación no autoriza la ejecución.";
+    return "Revisa el alcance y completa la primera confirmación. Ese paso solo registra que lo has revisado: no inicia cambios. Después podrás responder `go` en un turno nuevo para pedir la autorización de ejecución.";
   }
   if (state.mode === "assistant") {
-    return "En un turno posterior, responde `go` o `implementa` para solicitar la segunda confirmación.";
+    return "Si el plan te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor abrirá la segunda confirmación y, si la aceptas, ejecutará únicamente este alcance.";
   }
-  return "En un turno posterior, responde `go` o `implementa` para solicitar la aprobación previa.";
+  return "Si el alcance te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor pedirá la aprobación de esta revisión y, si se concede, ejecutará únicamente lo descrito; esa respuesta no autoriza operaciones adicionales ni evita otros guardrails.";
+}
+function planSummaryHeading(state) {
+  return `Plan de trabajo Malahor · nivel ${planLevel(state)}`;
 }
 function planIdentity(state) {
   return `Plan Malahor (${state.mode} · nivel ${planLevel(state)}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
+}
+function phaseStatus(state) {
+  if (state.phase === "presented") {
+    return state.mode === "assistant" ? "esperando tu revisión" : state.mode === "executor" ? "esperando tu aprobación" : "presentado para consulta";
+  }
+  if (state.phase === "reviewed")
+    return "revisado; esperando autorización para ejecutar";
+  if (state.phase === "running")
+    return "aprobado y en ejecución";
+  if (state.phase === "paused")
+    return "en pausa";
+  if (state.phase === "blocked")
+    return "bloqueado por dependencias";
+  if (state.phase === "completed")
+    return "completado";
+  if (state.phase === "revoked")
+    return "cancelado";
+  return "reemplazado por otra revisión";
 }
 function planLevel(state) {
   return state.plan.level === 0 || state.plan.level === 2 ? state.plan.level : 1;
@@ -8085,6 +8106,300 @@ function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+// src/plugin/plan-retention.ts
+import { createHash as createHash8 } from "node:crypto";
+import { gunzipSync, gzipSync } from "node:zlib";
+var ARCHIVE_SCHEMA = 1;
+var ARCHIVE_KIND = "malahor.plan.archive";
+var POINTER_KIND = "malahor.plan.archive-pointer";
+var LIVE_PREFIX = "planning/v4/";
+var ARCHIVE_PREFIX = "planning/archive/v1/plans";
+var MAX_ARCHIVE_BYTES = 64 * 1024;
+var DEFAULT_SCAN_LIMIT = 500;
+var SCAN_PAGE_SIZE = 100;
+var TERMINAL_PHASES = new Set(["completed", "revoked", "superseded"]);
+function planKey(sessionID) {
+  if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
+    throw new Error("ID de sesion no evaluable.");
+  return `planning/v4/sessions/${sessionID}`;
+}
+function planRecordKey(planID) {
+  assertPlanID(planID);
+  return `planning/v4/plans/${planID}`;
+}
+function planRevisionKey(planID, revision) {
+  assertPlanID(planID);
+  assertRevision(revision);
+  return `${planRecordKey(planID)}/revisions/${revision}`;
+}
+function planArchiveRecordKey(planID) {
+  assertPlanID(planID);
+  return `${ARCHIVE_PREFIX}/${planID}`;
+}
+function planArchiveRevisionKey(planID, revision) {
+  assertRevision(revision);
+  return `${planArchiveRecordKey(planID)}/revisions/${revision}`;
+}
+async function persistPlanState(storage, state, authority) {
+  await writeLiveState(storage, state);
+  if (!TERMINAL_PHASES.has(state.phase))
+    return { status: "live", removed: 0 };
+  const result = await archiveAndPrune(storage, state, authority);
+  return result.ok && result.removed === 3 ? { status: "archived", removed: result.removed } : { status: "retained", removed: result.removed, reason: result.reason ?? "compactacion incompleta" };
+}
+async function loadPlanRecord(storage, planID, authority) {
+  const live = await safeGet(storage, planRecordKey(planID));
+  if (live !== undefined)
+    return validState(live, authority) ? live : undefined;
+  const rawPointer = await safeGet(storage, planArchiveRecordKey(planID));
+  const pointer = parsePointer(rawPointer, planID);
+  if (!pointer)
+    return;
+  const archived = await safeGet(storage, pointer.archiveKey);
+  const state = decodeArchive(archived, authority);
+  return state && pointerMatchesState(pointer, state) ? state : undefined;
+}
+async function compactTerminalPlans(storage, authority, options = {}) {
+  if (typeof storage.scan !== "function" || typeof storage.remove !== "function") {
+    return { supported: false, scanned: 0, compacted: 0, removed: 0, failed: 0, truncated: false };
+  }
+  const maxEntries = boundedLimit(options.maxEntries);
+  const candidates = new Map;
+  let scanned = 0;
+  let after;
+  let truncated = false;
+  while (scanned < maxEntries) {
+    let page;
+    try {
+      page = await storage.scan({
+        prefix: LIVE_PREFIX,
+        ...after ? { after } : {},
+        limit: Math.min(SCAN_PAGE_SIZE, maxEntries - scanned)
+      });
+    } catch {
+      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+    }
+    if (!page || !Array.isArray(page.entries) || page.next !== undefined && (typeof page.next !== "string" || page.next.length === 0) || page.entries.length === 0 && page.next !== undefined) {
+      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+    }
+    for (const entry of page.entries) {
+      scanned++;
+      if (!validState(entry.value, authority) || !TERMINAL_PHASES.has(entry.value.phase))
+        continue;
+      candidates.set(planIdentity2(entry.value), entry.value);
+      if (scanned >= maxEntries)
+        break;
+    }
+    if (!page.next)
+      break;
+    if (scanned >= maxEntries) {
+      truncated = true;
+      break;
+    }
+    if (page.next === after) {
+      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+    }
+    after = page.next;
+  }
+  let compacted = 0;
+  let removed = 0;
+  let failed = 0;
+  for (const state of candidates.values()) {
+    const result = await archiveAndPrune(storage, state, authority);
+    removed += result.removed;
+    if (result.ok)
+      compacted++;
+    else
+      failed++;
+  }
+  return { supported: true, scanned, compacted, removed, failed, truncated };
+}
+async function writeLiveState(storage, state) {
+  await storage.set(planRevisionKey(state.planID, state.revision), state);
+  await storage.set(planRecordKey(state.planID), state);
+  await storage.set(planKey(state.sessionID), state);
+}
+async function archiveAndPrune(storage, state, authority) {
+  try {
+    const archiveKey = planArchiveRevisionKey(state.planID, state.revision);
+    const envelope = encodeArchive(state);
+    await storage.set(archiveKey, envelope);
+    const verifiedArchive = decodeArchive(await storage.get(archiveKey), authority);
+    if (!verifiedArchive || !sameRevision2(verifiedArchive, state)) {
+      return { ok: false, removed: 0, reason: "archivo terminal no verificable" };
+    }
+    const pointer = archivePointer(state, archiveKey);
+    await storage.set(planArchiveRecordKey(state.planID), pointer);
+    const verifiedPointer = parsePointer(await storage.get(planArchiveRecordKey(state.planID)), state.planID);
+    if (!verifiedPointer || !pointerMatchesState(verifiedPointer, state)) {
+      return { ok: false, removed: 0, reason: "indice de archivo no verificable" };
+    }
+    if (typeof storage.remove !== "function") {
+      return { ok: false, removed: 0, reason: "remove no disponible; archivo verificado y copias conservadas" };
+    }
+    return removeMatchingLiveRecords(storage, state, authority);
+  } catch (error) {
+    return { ok: false, removed: 0, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function removeMatchingLiveRecords(storage, state, authority) {
+  if (!storage.remove)
+    return { ok: false, removed: 0, reason: "remove no disponible" };
+  const keys = [
+    planRevisionKey(state.planID, state.revision),
+    planRecordKey(state.planID),
+    planKey(state.sessionID)
+  ];
+  const candidates = [];
+  for (const key of keys) {
+    const current = await safeGet(storage, key);
+    if (validState(current, authority) && sameRevision2(current, state)) {
+      candidates.push({ key, value: current });
+    }
+  }
+  const removed = [];
+  for (const candidate of candidates) {
+    const current = await safeGet(storage, candidate.key);
+    if (!validState(current, authority) || !sameRevision2(current, candidate.value))
+      continue;
+    try {
+      await storage.remove(candidate.key);
+      if (await safeGet(storage, candidate.key) !== undefined) {
+        throw new Error(`storage no retiro ${candidate.key}`);
+      }
+      removed.push(candidate);
+    } catch (error) {
+      const restored = await restoreRemovedRecords(storage, removed);
+      return {
+        ok: false,
+        removed: removed.length - restored,
+        reason: `retiro incompleto; copias restauradas: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+  }
+  return { ok: true, removed: removed.length };
+}
+async function restoreRemovedRecords(storage, removed) {
+  let restored = 0;
+  for (const candidate of [...removed].reverse()) {
+    try {
+      const current = await storage.get(candidate.key);
+      if (current !== undefined)
+        continue;
+      await storage.set(candidate.key, candidate.value);
+      const verified = await storage.get(candidate.key);
+      if (isRecord6(verified) && verified.proof === candidate.value.proof)
+        restored++;
+    } catch {}
+  }
+  return restored;
+}
+function encodeArchive(state) {
+  const serialized = JSON.stringify(state);
+  const raw = Buffer.from(serialized, "utf8");
+  if (raw.byteLength > MAX_ARCHIVE_BYTES)
+    throw new Error("Plan terminal demasiado grande para archivar.");
+  const compressed = gzipSync(raw, { level: 9 });
+  return {
+    schema: ARCHIVE_SCHEMA,
+    kind: ARCHIVE_KIND,
+    encoding: "gzip-base64",
+    planID: state.planID,
+    revision: state.revision,
+    project: state.project,
+    phase: state.phase,
+    digest: state.digest,
+    sha256: createHash8("sha256").update(raw).digest("hex"),
+    compressedSha256: createHash8("sha256").update(compressed).digest("hex"),
+    uncompressedBytes: raw.byteLength,
+    payload: compressed.toString("base64")
+  };
+}
+function decodeArchive(value, authority) {
+  if (!isArchiveEnvelope(value) || !canonicalBase64(value.payload))
+    return;
+  try {
+    const compressed = Buffer.from(value.payload, "base64");
+    if (createHash8("sha256").update(compressed).digest("hex") !== value.compressedSha256)
+      return;
+    const raw = gunzipSync(compressed, { maxOutputLength: MAX_ARCHIVE_BYTES });
+    if (raw.byteLength !== value.uncompressedBytes || createHash8("sha256").update(raw).digest("hex") !== value.sha256)
+      return;
+    const state = JSON.parse(raw.toString("utf8"));
+    if (!validState(state, authority) || !archiveMatchesState(value, state))
+      return;
+    return state;
+  } catch {
+    return;
+  }
+}
+function archivePointer(state, archiveKey) {
+  return {
+    schema: ARCHIVE_SCHEMA,
+    kind: POINTER_KIND,
+    planID: state.planID,
+    revision: state.revision,
+    project: state.project,
+    phase: state.phase,
+    digest: state.digest,
+    archiveKey
+  };
+}
+function parsePointer(value, planID) {
+  if (!isRecord6(value) || value.schema !== ARCHIVE_SCHEMA || value.kind !== POINTER_KIND || value.planID !== planID || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.project !== "string" || typeof value.phase !== "string" || !TERMINAL_PHASES.has(value.phase) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.archiveKey !== "string" || value.archiveKey !== planArchiveRevisionKey(planID, value.revision))
+    return;
+  return value;
+}
+function isArchiveEnvelope(value) {
+  return isRecord6(value) && value.schema === ARCHIVE_SCHEMA && value.kind === ARCHIVE_KIND && value.encoding === "gzip-base64" && typeof value.planID === "string" && /^[a-f0-9]{32}$/.test(value.planID) && typeof value.revision === "string" && /^[a-f0-9]{32}$/.test(value.revision) && typeof value.project === "string" && typeof value.phase === "string" && TERMINAL_PHASES.has(value.phase) && typeof value.digest === "string" && /^[a-f0-9]{64}$/.test(value.digest) && typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256) && typeof value.compressedSha256 === "string" && /^[a-f0-9]{64}$/.test(value.compressedSha256) && typeof value.uncompressedBytes === "number" && Number.isInteger(value.uncompressedBytes) && value.uncompressedBytes > 0 && value.uncompressedBytes <= MAX_ARCHIVE_BYTES && typeof value.payload === "string" && value.payload.length <= MAX_ARCHIVE_BYTES * 2;
+}
+function archiveMatchesState(archive, state) {
+  return archive.planID === state.planID && archive.revision === state.revision && archive.project === state.project && archive.phase === state.phase && archive.digest === state.digest;
+}
+function pointerMatchesState(pointer, state) {
+  return pointer.planID === state.planID && pointer.revision === state.revision && pointer.project === state.project && pointer.phase === state.phase && pointer.digest === state.digest;
+}
+function sameRevision2(left, right) {
+  return left.planID === right.planID && left.revision === right.revision && left.digest === right.digest && left.proof === right.proof && left.phase === right.phase;
+}
+function planIdentity2(state) {
+  return `${state.planID}\x00${state.revision}\x00${state.digest}\x00${state.phase}`;
+}
+function canonicalBase64(value) {
+  if (!value || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value))
+    return false;
+  try {
+    return Buffer.from(value, "base64").toString("base64") === value;
+  } catch {
+    return false;
+  }
+}
+async function safeGet(storage, key) {
+  try {
+    return await storage.get(key);
+  } catch {
+    return;
+  }
+}
+function boundedLimit(value) {
+  if (value === undefined)
+    return DEFAULT_SCAN_LIMIT;
+  if (!Number.isInteger(value) || value < 1)
+    return DEFAULT_SCAN_LIMIT;
+  return Math.min(value, 5000);
+}
+function assertPlanID(value) {
+  if (!/^[a-f0-9]{32}$/.test(value))
+    throw new Error("ID de plan no evaluable.");
+}
+function assertRevision(value) {
+  if (!/^[a-f0-9]{32}$/.test(value))
+    throw new Error("Revision de plan no evaluable.");
+}
+function isRecord6(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 // src/plugin/planning.ts
 var REVIEW_ACTION = "malahor_plan_review";
 var RUN_ACTION = "malahor_plan_run";
@@ -8293,12 +8608,13 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs13.existsSync(item.resource));
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
-        const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority);
+        const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call, authority), authority);
         return { content: foregroundPlanResult(state), metadata: {
           kind: "malahor.plan.presentation",
           version: 1,
           planID: state.planID,
           revision: state.revision,
+          digest: state.digest,
           phase: state.phase
         } };
       }
@@ -8313,7 +8629,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede solicitar ejecucion.");
         const digest = text(value.digest);
-        const state = await requestPlanExecution(resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call), authority);
+        const state = await requestPlanExecution(resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call, authority), authority);
         return { content: renderPlan(state), metadata: {
           kind: "malahor.plan.state",
           version: 1,
@@ -8338,7 +8654,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         if (!["status", "pause", "resume", "revoke", "complete"].includes(action)) {
           throw new Error("Control de plan invalido.");
         }
-        const state = await controlPlan(resolved.scope, action, planningAdapter(storage, approvals, call), authority);
+        const state = await controlPlan(resolved.scope, action, planningAdapter(storage, approvals, call, authority), authority);
         return { content: renderPlan(state) };
       }
     });
@@ -8346,27 +8662,21 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
 }
 function foregroundPlanResult(state) {
   return [
-    "Presentacion requerida: copia exactamente el Markdown delimitado como mensaje normal; esa sera la presentacion foreground canonica.",
-    "La traza tecnica del tool en background no cuenta como presentacion y no sustituye este contenido.",
-    "",
     FOREGROUND_START,
     renderPlan(state),
     FOREGROUND_END,
     "",
-    `Digest completo: ${state.digest}`,
-    "Despues de copiar el Markdown, termina este turno y espera una solicitud posterior del usuario."
+    "Publica solo el bloque delimitado, exactamente una vez como mensaje normal, y termina el turno."
   ].join(`
 `);
 }
-function planningAdapter(storage, port, call) {
+function planningAdapter(storage, port, call, authority) {
   return {
     loadActive: (sessionID) => storage.get(planKey(sessionID)),
-    loadPlan: (planID) => storage.get(planRecordKey(planID)),
-    save: async (state) => {
-      await storage.set(planRevisionKey(state.planID, state.revision), state);
-      await storage.set(planRecordKey(state.planID), state);
-      await storage.set(planKey(state.sessionID), state);
-    },
+    loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
+    save: (state) => persistPlanState(storage, state, authority).then(() => {
+      return;
+    }),
     confirm: (kind, state) => ask(port, call, kind === "review" ? REVIEW_ACTION : kind === "run" ? RUN_ACTION : kind === "resume" ? RESUME_ACTION : COMPLETE_ACTION, state.digest)
   };
 }
@@ -8383,21 +8693,6 @@ async function delegatedSpecialist(sessionID, scope, options, storage, authority
     return false;
   }
 }
-function planKey(sessionID) {
-  if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
-    throw new Error("ID de sesion no evaluable.");
-  return `planning/v4/sessions/${sessionID}`;
-}
-function planRecordKey(planID) {
-  if (!/^[a-f0-9]{32}$/.test(planID))
-    throw new Error("ID de plan no evaluable.");
-  return `planning/v4/plans/${planID}`;
-}
-function planRevisionKey(planID, revision) {
-  if (!/^[a-f0-9]{32}$/.test(revision))
-    throw new Error("Revision de plan no evaluable.");
-  return `${planRecordKey(planID)}/revisions/${revision}`;
-}
 async function injectPlanningInstructions(input, options, storage, authority = fallbackAuthority) {
   if (input.agent !== "malahor")
     return;
@@ -8411,9 +8706,9 @@ async function injectPlanningInstructions(input, options, storage, authority = f
     "Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentacion ceremonial; ejecuta en una sola pasada y aplica validacion enfocada. Commit es la excepcion: conserva todos sus gates y hooks obligatorios.",
     "Usa nivel 0 solo con riesgo bajo, como maximo un archivo existente y sin categorias criticas, dependencias, infraestructura, instalacion, publicacion, despliegue ni destruccion; si el alcance crece, presenta nivel 1 o 2.",
     "Commit nivel 0: tras go revisa status/diff y ejecuta diagnostico, tests, build, stage exacto, precommit, hooks y revalidacion; no pide otra confirmacion salvo fallo o cambio material.",
-    "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto por area, riesgo y accion requerida; rutas, comandos y evidencia exacta permanecen en el anexo tecnico.",
-    "El detalle exacto siempre puede consultarse con /malahor-plan detalles, aunque el cliente no renderice el desplegable.",
-    "Un riesgo alto o una categoria critica mantiene el anexo visible y abierto por defecto, sin interaccion adicional.",
+    "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto, riesgo y una seccion 'Que debes hacer ahora' narrada en lenguaje tecnico comprensible.",
+    "En riesgo bajo o medio sin categorias criticas, no incrustes IDs, comandos ni el anexo tecnico en la vista normal; el detalle exacto se consulta con /malahor-plan detalles.",
+    "Un riesgo alto o una categoria critica mantiene el anexo completo visible y abierto por defecto, sin interaccion adicional.",
     "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
     "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
     "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
@@ -8433,7 +8728,7 @@ async function injectPlanningInstructions(input, options, storage, authority = f
     "<!-- malahor-planning:v1 -->"
   ];
   for (const part of system) {
-    if (!isRecord6(part) || part.type !== "text" || typeof part.text !== "string")
+    if (!isRecord7(part) || part.type !== "text" || typeof part.text !== "string")
       continue;
     const text = part.text;
     if (text.includes(marker)) {
@@ -8451,7 +8746,7 @@ ${instructions}`;
     }
   }
   const last = system.at(-1);
-  if (isRecord6(last) && last.type === "text" && typeof last.text === "string") {
+  if (isRecord7(last) && last.type === "text" && typeof last.text === "string") {
     last.text += `
 
 ${marker}
@@ -8528,7 +8823,7 @@ async function resolvePlanningScope(value, options) {
   }
 }
 function toolActions(tool, value, directory) {
-  const args = isRecord6(value) ? value : {};
+  const args = isRecord7(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
     if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path17.resolve(directory, cwd) !== path17.resolve(directory))))
       return;
@@ -8639,7 +8934,7 @@ function inside2(target, root) {
 function text(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord6(value) {
+function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function deny(input, message) {
@@ -8747,12 +9042,10 @@ async function registerPlanCommand(host, storage, authority, options) {
         throw new Error("Sesion sin afinidad a un proyecto registrado; plan no disponible.");
       const adapter = {
         loadActive: (id) => storage.get(planKey(id)),
-        loadPlan: (planID) => storage.get(planRecordKey(planID)),
-        save: async (state2) => {
-          await storage.set(planRevisionKey(state2.planID, state2.revision), state2);
-          await storage.set(planRecordKey(state2.planID), state2);
-          await storage.set(planKey(state2.sessionID), state2);
-        },
+        loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
+        save: (state2) => persistPlanState(storage, state2, authority).then(() => {
+          return;
+        }),
         confirm: async (kind, state2) => {
           const permissionAction2 = kind === "resume" ? "malahor_plan_resume" : kind === "complete" ? "malahor_plan_complete" : kind === "review" ? "malahor_plan_review" : "malahor_plan_run";
           await host.permission.assert({
@@ -8951,10 +9244,10 @@ async function writePending(options, sessionID, canonicalKey, kind, candidates, 
 }
 async function readRecord2(storage, sessionID) {
   const value = await storage.get(projectAffinityKey(sessionID));
-  if (!isRecord7(value) || value.schema !== 1 || value.sessionID !== sessionID)
+  if (!isRecord8(value) || value.schema !== 1 || value.sessionID !== sessionID)
     return;
   const canonicalKey = stringValue5(value.canonicalKey);
-  const pendingValue = isRecord7(value.pending) ? value.pending : undefined;
+  const pendingValue = isRecord8(value.pending) ? value.pending : undefined;
   const kind = pendingValue?.kind === "ambiguous" || pendingValue?.kind === "conflict" ? pendingValue.kind : undefined;
   const candidates = Array.isArray(pendingValue?.candidates) ? pendingValue.candidates.filter((item) => typeof item === "string") : [];
   return {
@@ -8985,7 +9278,7 @@ Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${r
 Proyecto ambiguo. Pregunta UNA sola vez cual proyecto usar entre: ${candidates}. La respuesta fijara la afinidad de esta sesion. No pidas claves tecnicas ni ejecutes operaciones protegidas antes de resolverlo.`;
 }
 function promptText(input) {
-  const prompt = isRecord7(input.prompt) ? input.prompt : undefined;
+  const prompt = isRecord8(input.prompt) ? input.prompt : undefined;
   return [stringValue5(prompt?.text), stringValue5(input.text), stringValue5(input.message)].filter(Boolean).join(`
 `);
 }
@@ -9003,7 +9296,7 @@ function collectPaths(value, output, depth) {
     value.forEach((item) => collectPaths(item, output, depth + 1));
     return;
   }
-  if (!isRecord7(value))
+  if (!isRecord8(value))
     return;
   for (const [key, item] of Object.entries(value)) {
     if (["path", "filePath", "file_path", "directory", "cwd", "workdir", "uri"].includes(key) && typeof item === "string") {
@@ -9063,9 +9356,9 @@ function stringValue5(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 function isTextPart4(value) {
-  return isRecord7(value) && value.type === "text" && typeof value.text === "string";
+  return isRecord8(value) && value.type === "text" && typeof value.text === "string";
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -9084,12 +9377,12 @@ var SESSION_HOOKS = [
   "session.http-response.after"
 ];
 function detectHost(value) {
-  if (!isRecord8(value))
+  if (!isRecord9(value))
     return "unknown";
-  const isV2 = isRecord8(value.session) && typeof value.session.hook === "function" || isRecord8(value.mcp) && typeof value.mcp.transform === "function" || isRecord8(value.agent) && typeof value.agent.transform === "function";
+  const isV2 = isRecord9(value.session) && typeof value.session.hook === "function" || isRecord9(value.mcp) && typeof value.mcp.transform === "function" || isRecord9(value.agent) && typeof value.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord8(value.client) && isRecord8(value.project) && typeof value.directory === "string";
+  const isV1 = isRecord9(value.client) && isRecord9(value.project) && typeof value.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -9108,7 +9401,7 @@ async function setupV2(context) {
   const criticalGaps = [];
   const domain = (name) => {
     const value = context[name];
-    if (!isRecord8(value) || typeof value.hook !== "function")
+    if (!isRecord9(value) || typeof value.hook !== "function")
       return;
     return value;
   };
@@ -9136,6 +9429,25 @@ async function setupV2(context) {
       warn(`autoridad de planeacion no disponible: ${error.message}`);
     }
   }
+  if (planStorage && planningAuthority) {
+    try {
+      const retention = await compactTerminalPlans(planStorage, planningAuthority);
+      capabilities["planning.retention"] = retention.supported;
+      if (!retention.supported) {
+        degraded.push("planning.retention");
+      } else if (retention.failed > 0) {
+        degraded.push("planning.retention.verification");
+        warn(`retencion de planes degradada: ${retention.failed} revision(es) no se compactaron`);
+      }
+    } catch (error) {
+      capabilities["planning.retention"] = false;
+      degraded.push("planning.retention");
+      warn(`retencion de planes no disponible: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    capabilities["planning.retention"] = false;
+    degraded.push("planning.retention");
+  }
   if (session?.get) {
     options.resolveSessionDirectory = async (sessionID) => {
       const value = await session.get?.({ sessionID });
@@ -9143,8 +9455,8 @@ async function setupV2(context) {
     };
     options.resolveParentSession = async (sessionID) => {
       const raw = await session.get?.({ sessionID });
-      const value = isRecord8(raw) && isRecord8(raw.data) ? raw.data : raw;
-      return isRecord8(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
+      const value = isRecord9(raw) && isRecord9(raw.data) ? raw.data : raw;
+      return isRecord9(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
     };
   }
   const affinityStorage = storage && typeof storage.get === "function" ? storage : undefined;
@@ -9190,7 +9502,7 @@ async function setupV2(context) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord8(input.env)) {
+      if (isRecord9(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -9233,7 +9545,7 @@ async function setupV2(context) {
     if (!freshnessRegistered)
       degraded.push("memory.freshness");
     const planningTools = typeof tool.transform === "function" ? tool : undefined;
-    const approvalPort = isRecord8(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
+    const approvalPort = isRecord9(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
     if (planningTools && approvalPort && planStorage && planningAuthority && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
@@ -9253,7 +9565,7 @@ async function setupV2(context) {
     criticalGaps.push("tool.hook");
     criticalGaps.push("planning.v4");
   }
-  const modeHost = isRecord8(context.command) && typeof context.command.transform === "function" && isRecord8(context.session) && typeof context.session.synthetic === "function" && isRecord8(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const modeHost = isRecord9(context.command) && typeof context.command.transform === "function" && isRecord9(context.session) && typeof context.session.synthetic === "function" && isRecord9(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (modeHost) {
     try {
       const registration = await registerModeCommand(modeHost, options);
@@ -9266,7 +9578,7 @@ async function setupV2(context) {
   }
   if (!capabilities["mode.command"])
     degraded.push("mode.command");
-  const planCommandHost = isRecord8(context.command) && typeof context.command.transform === "function" && isRecord8(context.session) && typeof context.session.synthetic === "function" && isRecord8(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const planCommandHost = isRecord9(context.command) && typeof context.command.transform === "function" && isRecord9(context.session) && typeof context.session.synthetic === "function" && isRecord9(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (planCommandHost && planStorage && planningAuthority) {
     try {
       const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
@@ -9373,7 +9685,7 @@ async function setupV2(context) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord8(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
+    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord9(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -9404,12 +9716,12 @@ async function setupV2(context) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord8(input.client),
-    project: isRecord8(input.project),
+    client: isRecord9(input.client),
+    project: isRecord9(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord8(input.experimental_workspace)
+    workspace: isRecord9(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -9458,7 +9770,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback, cleanups) {
   try {
     const registration = await domain.hook(name, callback);
-    if (isRecord8(registration) && typeof registration.dispose === "function") {
+    if (isRecord9(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -9487,28 +9799,28 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context) {
-  const location = isRecord8(context.location) ? context.location : undefined;
+  const location = isRecord9(context.location) ? context.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function locationCanonical(context) {
-  const location = isRecord8(context.location) ? context.location : undefined;
-  const project = location && isRecord8(location.project) ? location.project : undefined;
+  const location = isRecord9(context.location) ? context.location : undefined;
+  const project = location && isRecord9(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function transformDomain(value) {
-  if (!isRecord8(value) || typeof value.transform !== "function")
+  if (!isRecord9(value) || typeof value.transform !== "function")
     return;
   return value;
 }
 function storageDomain(value) {
-  if (!isRecord8(value) || typeof value.set !== "function")
+  if (!isRecord9(value) || typeof value.set !== "function")
     return;
   return value;
 }
 function eventDomain(value) {
-  if (!isRecord8(value) || typeof value.subscribe !== "function")
+  if (!isRecord9(value) || typeof value.subscribe !== "function")
     return;
   return value;
 }
@@ -9544,7 +9856,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
             type: "local",
             command: ["node", paths.mnemoIndex],
             environment: memoryProject ? {
-              ...isRecord8(existingMnemo?.environment) ? existingMnemo.environment : {},
+              ...isRecord9(existingMnemo?.environment) ? existingMnemo.environment : {},
               MALAHOR_MEMORY_BOUND: "1",
               MALAHOR_MEMORY_PROJECT: memoryProject
             } : {
@@ -9605,7 +9917,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
         });
       }
     });
-    if (isRecord8(registration) && typeof registration.dispose === "function") {
+    if (isRecord9(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -9664,18 +9976,18 @@ function isMalahorDocs(config, paths) {
   return command.some((item) => path19.resolve(paths.opencodeDir, item) === path19.resolve(paths.docsIndex));
 }
 function sessionLocationDirectory(value) {
-  const response = isRecord8(value) && isRecord8(value.data) ? value.data : value;
-  if (!isRecord8(response))
+  const response = isRecord9(value) && isRecord9(value.data) ? value.data : value;
+  if (!isRecord9(response))
     return;
-  const location = isRecord8(response.location) ? response.location : undefined;
+  const location = isRecord9(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function sessionLocationProject(value) {
-  const response = isRecord8(value) && isRecord8(value.data) ? value.data : value;
-  if (!isRecord8(response))
+  const response = isRecord9(value) && isRecord9(value.data) ? value.data : value;
+  if (!isRecord9(response))
     return;
-  const location = isRecord8(response.location) ? response.location : undefined;
-  const project = location && isRecord8(location.project) ? location.project : undefined;
+  const location = isRecord9(response.location) ? response.location : undefined;
+  const project = location && isRecord9(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : typeof project?.name === "string" ? project.name : typeof project?.id === "string" ? project.id : undefined;
 }
 function recordState(inspection) {
@@ -9727,7 +10039,7 @@ function warn(message) {
 function unique2(values) {
   return [...new Set(values)];
 }
-function isRecord8(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export {

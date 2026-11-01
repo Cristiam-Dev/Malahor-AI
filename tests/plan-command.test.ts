@@ -7,6 +7,11 @@ import { createPlanningAuthority } from "../src/cli/core/planning-authority";
 import type { PluginAdapterOptions } from "../src/cli/core/hooks/plugin-adapter";
 import { registerPlanCommand, type PlanCommandHost } from "../src/plugin/plan-command";
 import { planKey, planRecordKey, planRevisionKey, type PlanningStorage } from "../src/plugin/planning";
+import {
+  loadPlanRecord,
+  planArchiveRecordKey,
+  planArchiveRevisionKey,
+} from "../src/plugin/plan-retention";
 
 const SESSION = "ses_plan_command";
 let root: string;
@@ -108,7 +113,8 @@ describe("/malahor-plan", () => {
       const current = records.get(planKey(SESSION)) as PlanState;
       expect({ planID: current.planID, revision: current.revision, digest: current.digest }).toEqual(identity);
       expect(messages.at(-1)).toBe(render(current));
-      expect(messages.at(-1)).toContain(current.revision);
+      expect(messages.at(-1)).not.toContain(current.revision);
+      expect(messages.at(-1)).toContain("/malahor-plan detalles");
     }
     expect(permissions).toEqual(["malahor_plan_resume"]);
     expect((records.get(planKey(SESSION)) as PlanState).phase).toBe("revoked");
@@ -157,6 +163,51 @@ describe("/malahor-plan", () => {
     expect(records.get(planKey(SESSION))).toEqual(before);
     expect(writes).toBe(0);
     expect(permissions).toEqual([]);
+  });
+
+  test("complete archiva la revisión y la retira del slot activo cuando storage permite remove", async () => {
+    const authority = createPlanningAuthority(Buffer.alloc(32, 10));
+    const scope: PlanScope = {
+      sessionID: SESSION,
+      project: "demo",
+      mode: "executor",
+      policyRevision: "1".repeat(32),
+    };
+    const presented = proposePlan(scope, commandFixtureInput(), Date.now(), "msg-complete", undefined, authority);
+    const running = authorizePlan(presented, presented.digest, Date.now(), authority);
+    const records = new Map<string, unknown>([
+      [planKey(SESSION), running],
+      [planRecordKey(running.planID), running],
+      [planRevisionKey(running.planID, running.revision), running],
+    ]);
+    const storage: PlanningStorage = {
+      get: async (key) => records.get(key),
+      set: async (key, value) => { records.set(key, structuredClone(value)); },
+      remove: async (key) => { records.delete(key); },
+    };
+    const messages: string[] = [];
+    let execute!: (input: any) => Promise<void>;
+    const host: PlanCommandHost = {
+      command: { transform: async (callback) => callback({ add: (definition) => { execute = definition.execute; } }) },
+      session: { synthetic: async ({ text }) => { messages.push(text); } },
+      permission: { assert: async () => undefined },
+    };
+    await registerPlanCommand(host, storage, authority, {
+      cwd: home,
+      env,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
+    });
+
+    await execute({ sessionID: SESSION, prompt: { text: "/malahor-plan complete" }, delivery: "steer" });
+
+    expect(records.has(planKey(SESSION))).toBe(false);
+    expect(records.has(planRecordKey(running.planID))).toBe(false);
+    expect(records.has(planRevisionKey(running.planID, running.revision))).toBe(false);
+    expect(records.has(planArchiveRecordKey(running.planID))).toBe(true);
+    expect(records.has(planArchiveRevisionKey(running.planID, running.revision))).toBe(true);
+    expect((await loadPlanRecord(storage, running.planID, authority))?.phase).toBe("completed");
+    expect(messages.at(-1)).toContain("No tienes que hacer nada más");
+    expect(messages.at(-1)).not.toContain(running.planID);
   });
 
   test("rechaza adjuntos y el uso enumera las vistas de detalle", async () => {

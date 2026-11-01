@@ -54,7 +54,12 @@ function v2Context(overrides: Record<string, unknown> = {}): Record<string, unkn
     tool: { hook: () => undefined, transform: () => undefined },
     shell: { hook: () => undefined },
     event: { subscribe: () => (async function* () {})() },
-    storage: { get: async () => undefined, set: async () => undefined },
+    storage: {
+      get: async () => undefined,
+      set: async () => undefined,
+      remove: async () => undefined,
+      scan: async () => ({ entries: [] }),
+    },
     ...overrides,
   };
 }
@@ -111,6 +116,7 @@ describe("scaffold del plugin", () => {
       "tool.execute.before": true,
       "planning.v4": true,
       "planning.authority": true,
+      "planning.retention": true,
       "mode.command": true,
       "plan.command": true,
       "shell.create.before": true,

@@ -2,12 +2,14 @@ import { controlPlan, renderPlan, type PlanControl, type PlanningAdapter } from 
 import type { PlanningAuthority } from "../cli/core/planning-authority";
 import type { PluginAdapterOptions } from "../cli/core/hooks/plugin-adapter";
 import {
-  planKey,
-  planRecordKey,
-  planRevisionKey,
   resolvePlanningScope,
   type PlanningStorage,
 } from "./planning";
+import {
+  loadPlanRecord,
+  persistPlanState,
+  planKey,
+} from "./plan-retention";
 
 interface PlanInvocation {
   sessionID: string;
@@ -57,12 +59,8 @@ export async function registerPlanCommand(
       if (!resolved) throw new Error("Sesion sin afinidad a un proyecto registrado; plan no disponible.");
       const adapter: PlanningAdapter = {
         loadActive: (id) => storage.get(planKey(id)),
-        loadPlan: (planID) => storage.get(planRecordKey(planID)),
-        save: async (state) => {
-          await storage.set(planRevisionKey(state.planID, state.revision), state);
-          await storage.set(planRecordKey(state.planID), state);
-          await storage.set(planKey(state.sessionID), state);
-        },
+        loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
+        save: (state) => persistPlanState(storage, state, authority).then(() => undefined),
         confirm: async (kind, state) => {
           const permissionAction = kind === "resume" ? "malahor_plan_resume"
             : kind === "complete" ? "malahor_plan_complete"

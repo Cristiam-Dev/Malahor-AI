@@ -241,7 +241,7 @@ describe("contrato estricto de la presentación humana", () => {
 });
 
 describe("divulgación progresiva del plan", () => {
-  test("nivel 0 muestra un plan mínimo, conserva go y deja la evidencia en el anexo", async () => {
+  test("nivel 0 muestra un plan mínimo, explica go y deja la evidencia bajo demanda", async () => {
     const target = presentation();
     const state = renderState({
       mode: "executor",
@@ -257,26 +257,29 @@ describe("divulgación progresiva del plan", () => {
     });
     const markdown = await render(state);
     const main = mainFlow(markdown);
-    const annex = technicalSection(markdown);
+    const technical = await render(state, "technical");
 
     expect(main).toContain("nivel 0");
     expect(main).toContain("## Cambio");
     expect(main).toContain("## Resultado");
     expect(main).toContain("## Riesgo");
-    expect(main).toContain("## Acción requerida");
-    expect(main).toMatch(/turno posterior[\s\S]*(?:go|implementa)/i);
+    expect(main).toContain("## Qué debes hacer ahora");
+    expect(main).toMatch(/responde[\s\S]*(?:go|implementa)[\s\S]*únicamente/i);
     expect(main).not.toMatch(/^## Ruta$/m);
     expect(main).not.toMatch(/^## Impacto$/m);
-    expect(annex).toContain("Nivel de trabajo: 0");
-    expect(annex).toContain("### Ruta firmada");
-    expect(annex).toContain("### Impacto firmado");
-    expect(annex).toContain(`- edit: ${safeJson("/repo/tests/planning.test.ts")}`);
-    expect(markdown).toContain("<details>");
-    expect(markdown).not.toContain("<details open>");
+    expect(main).not.toContain(state.planID);
+    expect(main).not.toContain(state.revision);
+    expect(main).not.toContain(state.digest);
+    expect(markdown).not.toContain("<details");
+    expect(markdown).toContain("/malahor-plan detalles");
+    expect(technical).toContain("Nivel de trabajo: 0");
+    expect(technical).toContain("### Ruta firmada");
+    expect(technical).toContain("### Impacto firmado");
+    expect(technical).toContain(`- edit: ${safeJson("/repo/tests/planning.test.ts")}`);
   });
 
   test("la vista principal se lee como objetivo, resultado, ruta, impacto, riesgo y acción", async () => {
-    const state = renderState();
+    const state = renderState({ mode: "executor" });
     const markdown = await render(state);
     const main = mainFlow(markdown);
 
@@ -294,32 +297,35 @@ describe("divulgación progresiva del plan", () => {
     expect(main).toContain("Los efectos exactos pasan al anexo técnico.");
     expect(main).toContain("## Riesgo");
     expect(main).toMatch(/\b(?:low|bajo)\b/i);
-    expect(main).toContain("## Acción requerida");
+    expect(main).toContain("## Qué debes hacer ahora");
+    expect(main).toMatch(/responde[\s\S]*(?:go|implementa)[\s\S]*únicamente/i);
     expect(main).not.toContain("/repo/tests/planning.test.ts");
     expect(main).not.toContain("bun test tests/planning.test.ts");
+    expect(main).not.toContain(state.planID);
+    expect(main).not.toContain(state.revision);
+    expect(main).not.toContain(state.digest);
   });
 
-  test("un plan normal deja el anexo cerrado y ofrece el fallback de detalles", async () => {
+  test("un plan normal no incrusta el anexo y ofrece el detalle bajo demanda", async () => {
     const state = renderState({
       presentation: { risk: { ...presentation().risk, level: "medium" } },
     });
     const markdown = await render(state);
-    const annex = technicalSection(markdown);
+    const technical = await render(state, "technical");
 
-    expect(markdown).toContain("<details>");
-    expect(markdown).not.toContain("<details open>");
+    expect(markdown).not.toContain("<details");
     expect(mainFlow(markdown)).toContain("/malahor-plan detalles");
-    expect(annex).toMatch(/criterios/i);
-    expect(annex).toContain(presentation().completionCriteria[0]!);
-    expect(annex).toMatch(/exclusiones/i);
-    expect(annex).toContain(presentation().exclusions[0]!);
-    expect(annex).toMatch(/dependencias/i);
-    expect(annex).toContain(`${DEPENDENCY.planID}@${DEPENDENCY.revision}`);
-    expect(annex).toContain(state.planID);
-    expect(annex).toContain(state.revision);
-    expect(annex).toContain(state.digest);
-    expect(annex).toContain(`- edit: ${safeJson("/repo/tests/planning.test.ts")}`);
-    expect(annex).toContain(`- shell: ${safeJson("bun test tests/planning.test.ts")}`);
+    expect(technical).toMatch(/criterios/i);
+    expect(technical).toContain(presentation().completionCriteria[0]!);
+    expect(technical).toMatch(/exclusiones/i);
+    expect(technical).toContain(presentation().exclusions[0]!);
+    expect(technical).toMatch(/dependencias/i);
+    expect(technical).toContain(`${DEPENDENCY.planID}@${DEPENDENCY.revision}`);
+    expect(technical).toContain(state.planID);
+    expect(technical).toContain(state.revision);
+    expect(technical).toContain(state.digest);
+    expect(technical).toContain(`- edit: ${safeJson("/repo/tests/planning.test.ts")}`);
+    expect(technical).toContain(`- shell: ${safeJson("bun test tests/planning.test.ts")}`);
   });
 
   test("omite secciones realmente vacías", async () => {
@@ -378,7 +384,7 @@ describe("divulgación progresiva del plan", () => {
     const state = renderState({
       dependencies: [],
       actions: [{ action: "shell", resource }],
-      presentation: { risk: { ...presentation().risk, details: hostileRisk } },
+      presentation: { risk: { ...presentation().risk, categories: ["security"], details: hostileRisk } },
     });
     const markdown = await render(state);
     const annex = technicalSection(markdown);
@@ -396,20 +402,20 @@ describe("divulgación progresiva del plan", () => {
     expect(markdown).not.toContain("</details>\\n## Aprobado falsamente");
   });
 
-  test("deriva la acción requerida de modo y estado de forma determinista", async () => {
+  test("narra qué debe hacer la persona según modo y estado de forma determinista", async () => {
     const assistant = renderState({ mode: "assistant", phase: "presented", dependencies: [] });
     const assistantPresented = await render(assistant);
     expect(await render(assistant)).toBe(assistantPresented);
-    expect(assistantPresented).toMatch(/Acci[oó]n requerida[\s\S]*primera confirmaci[oó]n[\s\S]*no autoriza.*ejecuci[oó]n/i);
+    expect(assistantPresented).toMatch(/Qu[eé] debes hacer ahora[\s\S]*revisa[\s\S]*no inicia cambios/i);
 
     const reviewed = { ...assistant, phase: "reviewed", reviewedAt: NOW + 1 } as PlanState;
     const assistantReviewed = await render(reviewed);
     expect(assistantReviewed).not.toBe(assistantPresented);
-    expect(assistantReviewed).toMatch(/Acci[oó]n requerida[\s\S]*turno posterior[\s\S]*(?:go|implementa)/i);
+    expect(assistantReviewed).toMatch(/Qu[eé] debes hacer ahora[\s\S]*responde[\s\S]*(?:go|implementa)[\s\S]*segunda confirmaci[oó]n/i);
 
     const executor = renderState({ mode: "executor", phase: "presented", dependencies: [] });
-    expect(await render(executor)).toMatch(/Acci[oó]n requerida[\s\S]*aprobaci[oó]n previa[\s\S]*turno posterior/i);
+    expect(await render(executor)).toMatch(/Qu[eé] debes hacer ahora[\s\S]*responde[\s\S]*(?:go|implementa)[\s\S]*únicamente/i);
     const completed = { ...executor, phase: "completed", completedAt: NOW + 2 } as PlanState;
-    expect(await render(completed)).toMatch(/Acci[oó]n requerida[\s\S]*(?:terminado|completado|ninguna)/i);
+    expect(await render(completed)).toMatch(/Qu[eé] debes hacer ahora[\s\S]*No tienes que hacer nada más/i);
   });
 });

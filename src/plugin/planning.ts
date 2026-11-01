@@ -14,11 +14,16 @@ import { detectSecretKinds, type PluginAdapterOptions } from "../cli/core/hooks/
 import { isProtectedDocumentationPath, parsePatchOperations } from "../cli/core/documentation-boundary";
 import { classifyInfrastructureCommand, classifyInfrastructurePath } from "../cli/core/infrastructure-boundary";
 import { classifyGitCommand, loadGitAliases } from "../cli/core/git-command-policy";
+import {
+  loadPlanRecord,
+  persistPlanState,
+  planKey,
+  type PlanningRetentionStorage,
+} from "./plan-retention";
 
-export interface PlanningStorage {
-  get(key: string): Promise<unknown>;
-  set(key: string, value: PlanState): Promise<void>;
-}
+export type PlanningStorage = PlanningRetentionStorage;
+
+export { planKey, planRecordKey, planRevisionKey } from "./plan-retention";
 
 interface ApprovalPort {
   assert(input: {
@@ -241,11 +246,12 @@ export async function registerPlanningTools(
           && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));
         if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const state = await presentPlan(
-          resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority,
+          resolved.scope, { ...raw, actions }, call.messageID,
+          planningAdapter(storage, approvals, call, authority), authority,
         );
         return { content: foregroundPlanResult(state), metadata: {
           kind: "malahor.plan.presentation", version: 1,
-          planID: state.planID, revision: state.revision, phase: state.phase,
+          planID: state.planID, revision: state.revision, digest: state.digest, phase: state.phase,
         } };
       },
     });
@@ -259,7 +265,8 @@ export async function registerPlanningTools(
         if (call.agent !== "malahor") throw new Error("Solo el primario puede solicitar ejecucion.");
         const digest = text((value as { digest?: unknown }).digest);
         const state = await requestPlanExecution(
-          resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call), authority,
+          resolved.scope, digest, call.messageID,
+          planningAdapter(storage, approvals, call, authority), authority,
         );
         return { content: renderPlan(state), metadata: {
           kind: "malahor.plan.state", version: 1,
@@ -282,7 +289,7 @@ export async function registerPlanningTools(
           throw new Error("Control de plan invalido.");
         }
         const state = await controlPlan(resolved.scope, action,
-          planningAdapter(storage, approvals, call), authority);
+          planningAdapter(storage, approvals, call, authority), authority);
         return { content: renderPlan(state) };
       },
     });
@@ -291,27 +298,24 @@ export async function registerPlanningTools(
 
 function foregroundPlanResult(state: PlanState): string {
   return [
-    "Presentacion requerida: copia exactamente el Markdown delimitado como mensaje normal; esa sera la presentacion foreground canonica.",
-    "La traza tecnica del tool en background no cuenta como presentacion y no sustituye este contenido.",
-    "",
     FOREGROUND_START,
     renderPlan(state),
     FOREGROUND_END,
     "",
-    `Digest completo: ${state.digest}`,
-    "Despues de copiar el Markdown, termina este turno y espera una solicitud posterior del usuario.",
+    "Publica solo el bloque delimitado, exactamente una vez como mensaje normal, y termina el turno.",
   ].join("\n");
 }
 
-function planningAdapter(storage: PlanningStorage, port: ApprovalPort, call: ToolCall): PlanningAdapter {
+function planningAdapter(
+  storage: PlanningStorage,
+  port: ApprovalPort,
+  call: ToolCall,
+  authority: PlanningAuthority,
+): PlanningAdapter {
   return {
     loadActive: (sessionID) => storage.get(planKey(sessionID)),
-    loadPlan: (planID) => storage.get(planRecordKey(planID)),
-    save: async (state) => {
-      await storage.set(planRevisionKey(state.planID, state.revision), state);
-      await storage.set(planRecordKey(state.planID), state);
-      await storage.set(planKey(state.sessionID), state);
-    },
+    loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
+    save: (state) => persistPlanState(storage, state, authority).then(() => undefined),
     confirm: (kind, state) => ask(port, call,
       kind === "review" ? REVIEW_ACTION : kind === "run" ? RUN_ACTION
         : kind === "resume" ? RESUME_ACTION : COMPLETE_ACTION, state.digest),
@@ -330,21 +334,6 @@ async function delegatedSpecialist(
     const state = await readPlan(storage, parent.parentID, authority);
     return planAllows(state, { ...scope, sessionID: parent.parentID }, { action: "subagent", resource: parent.agent }, Date.now(), authority);
   } catch { return false; }
-}
-
-export function planKey(sessionID: string): string {
-  if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID)) throw new Error("ID de sesion no evaluable.");
-  return `planning/v4/sessions/${sessionID}`;
-}
-
-export function planRecordKey(planID: string): string {
-  if (!/^[a-f0-9]{32}$/.test(planID)) throw new Error("ID de plan no evaluable.");
-  return `planning/v4/plans/${planID}`;
-}
-
-export function planRevisionKey(planID: string, revision: string): string {
-  if (!/^[a-f0-9]{32}$/.test(revision)) throw new Error("Revision de plan no evaluable.");
-  return `${planRecordKey(planID)}/revisions/${revision}`;
 }
 
 export async function injectPlanningInstructions(
@@ -368,9 +357,9 @@ export async function injectPlanningInstructions(
         "Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentacion ceremonial; ejecuta en una sola pasada y aplica validacion enfocada. Commit es la excepcion: conserva todos sus gates y hooks obligatorios.",
         "Usa nivel 0 solo con riesgo bajo, como maximo un archivo existente y sin categorias criticas, dependencias, infraestructura, instalacion, publicacion, despliegue ni destruccion; si el alcance crece, presenta nivel 1 o 2.",
         "Commit nivel 0: tras go revisa status/diff y ejecuta diagnostico, tests, build, stage exacto, precommit, hooks y revalidacion; no pide otra confirmacion salvo fallo o cambio material.",
-        "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto por area, riesgo y accion requerida; rutas, comandos y evidencia exacta permanecen en el anexo tecnico.",
-        "El detalle exacto siempre puede consultarse con /malahor-plan detalles, aunque el cliente no renderice el desplegable.",
-        "Un riesgo alto o una categoria critica mantiene el anexo visible y abierto por defecto, sin interaccion adicional.",
+        "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto, riesgo y una seccion 'Que debes hacer ahora' narrada en lenguaje tecnico comprensible.",
+        "En riesgo bajo o medio sin categorias criticas, no incrustes IDs, comandos ni el anexo tecnico en la vista normal; el detalle exacto se consulta con /malahor-plan detalles.",
+        "Un riesgo alto o una categoria critica mantiene el anexo completo visible y abierto por defecto, sin interaccion adicional.",
         "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
         "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
         "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
