@@ -85,6 +85,7 @@ function policy(controls: Record<string, unknown>): void {
 async function command(
   resolveSessionDirectory: (sessionID: string) => Promise<string | undefined>,
   onPermission: (request: PermissionRequest) => Promise<void> | void = () => undefined,
+  resolveSessionProject?: (sessionID: string) => Promise<{ canonicalKey: string; root: string } | undefined>,
 ) {
   const messages: Array<{ sessionID: string; text: string }> = [];
   const permissions: PermissionRequest[] = [];
@@ -104,7 +105,7 @@ async function command(
       await onPermission(input);
     } },
   };
-  await registerModeCommand(host, { cwd: repo, env, resolveSessionDirectory });
+  await registerModeCommand(host, { cwd: repo, env, resolveSessionDirectory, resolveSessionProject });
   const invoke = (text: string, sessionID = SESSION, extras: Omit<Invocation["prompt"], "text"> = {}) =>
     execute({ sessionID, prompt: { text, ...extras }, delivery: "steer" });
   return { invoke, messages, permissions };
@@ -285,6 +286,16 @@ describe("CLI mode en entorno aislado", () => {
 });
 
 describe("/malahor-modo: comando V2 sin shell", () => {
+  test("usa afinidad de proyecto aunque location.directory apunte fuera del repo", async () => {
+    const { invoke, messages } = await command(
+      async () => home,
+      () => undefined,
+      async (sessionID) => sessionID === SESSION ? { canonicalKey: "project", root: repo } : undefined,
+    );
+    await invoke("/malahor-modo status");
+    expect(messages.at(-1)?.text).toContain("Modo efectivo: asistente (guiar)");
+  });
+
   test("status, preview y cambio directo usan confirmacion nativa sin token", async () => {
     const { invoke, messages, permissions } = await command(async (sessionID) => sessionID === SESSION ? repo : undefined);
     const opencode = fs.readFileSync(opencodeFile, "utf8");

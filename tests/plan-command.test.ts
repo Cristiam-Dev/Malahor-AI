@@ -49,7 +49,12 @@ describe("/malahor-plan", () => {
       session: { synthetic: async ({ text }) => { messages.push(text); } },
       permission: { assert: async ({ action }) => { permissions.push(action); } },
     };
-    const options: PluginAdapterOptions = { cwd: repo, env, resolveSessionDirectory: async () => repo };
+    const options: PluginAdapterOptions = {
+      cwd: home,
+      env,
+      resolveSessionDirectory: async () => home,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
+    };
     await registerPlanCommand(host, storage, authority, options);
     const invoke = (action: string) => execute({ sessionID: SESSION, prompt: { text: `/malahor-plan ${action}` }, delivery: "steer" });
 

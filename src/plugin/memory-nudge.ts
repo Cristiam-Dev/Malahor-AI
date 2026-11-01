@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { resolveProject } from "../cli/core/project";
+import type { ResolvedSessionProject } from "../cli/core/hooks/plugin-adapter";
 import type { CompactionStorage } from "./compaction";
 
 export const MALAHOR_MEMORY_NUDGE_MARKER = "<!-- malahor-memory-nudge:v1 -->";
@@ -10,6 +11,7 @@ export interface MemoryNudgeOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   resolveSessionDirectory?: (sessionID: string) => Promise<string | undefined>;
+  resolveSessionProject?: (sessionID: string) => Promise<ResolvedSessionProject | undefined>;
   now?: () => number;
   staleMinutes?: number;
 }
@@ -26,8 +28,8 @@ export async function maybeInjectMemoryNudge(
 
   const now = options.now ?? Date.now;
   const timestamp = now();
-  const directory = await resolveDirectory(sessionID, options);
-  const project = resolveProject(directory).canonicalKey;
+  const context = await resolveContext(sessionID, options);
+  const project = context.project;
   const thresholdMs = staleMinutes(options) * 60_000;
   const sessionKey = `memory/nudge/${encodeURIComponent(sessionID)}`;
   const freshnessKey = `memory/freshness/${encodeURIComponent(project)}`;
@@ -78,8 +80,8 @@ export async function markMemoryPersisted(
 
   const sessionID = stringValue(input.sessionID);
   if (!sessionID) return { ok: false, marked: false, reason: "sessionID ausente" };
-  const directory = await resolveDirectory(sessionID, options);
-  const project = resolveProject(directory).canonicalKey;
+  const context = await resolveContext(sessionID, options);
+  const project = context.project;
   const now = (options.now ?? Date.now)();
   const key = `memory/freshness/${encodeURIComponent(project)}`;
 
@@ -121,16 +123,31 @@ function staleMinutes(options: MemoryNudgeOptions): number {
   return Math.min(24 * 60, Math.max(1, Math.floor(configured)));
 }
 
-async function resolveDirectory(sessionID: string, options: MemoryNudgeOptions): Promise<string> {
+async function resolveContext(
+  sessionID: string,
+  options: MemoryNudgeOptions,
+): Promise<{ directory: string; project: string }> {
+  if (options.resolveSessionProject) {
+    try {
+      const project = await options.resolveSessionProject(sessionID);
+      if (project) return { directory: path.resolve(project.root), project: project.canonicalKey };
+    } catch {
+      // El nudge es auxiliar; conserva el fallback local.
+    }
+  }
   if (options.resolveSessionDirectory) {
     try {
       const directory = await options.resolveSessionDirectory(sessionID);
-      if (directory) return path.resolve(directory);
+      if (directory) {
+        const resolved = path.resolve(directory);
+        return { directory: resolved, project: resolveProject(resolved).canonicalKey };
+      }
     } catch {
       // El nudge es auxiliar; usa el cwd de la instancia.
     }
   }
-  return path.resolve(options.cwd);
+  const directory = path.resolve(options.cwd);
+  return { directory, project: resolveProject(directory).canonicalKey };
 }
 
 function timestampValue(value: unknown): number | undefined {

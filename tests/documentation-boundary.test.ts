@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -178,6 +179,77 @@ describe("enforcement en write, stage y commit", () => {
       metadata: { validationOnly: true },
     }));
     expect(docsViolation(publicCommit)).toBe(false);
+  });
+
+  test("stage permite solo una eliminacion Git real y exacta de documentacion", () => {
+    const relativePath = "docs/architecture/historical.md";
+    const targetPath = path.join(repo, relativePath);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, "# Historical\n", "utf8");
+    execFileSync("git", ["init", "--quiet"], { cwd: repo });
+    execFileSync("git", ["add", "--", relativePath], { cwd: repo });
+    fs.rmSync(targetPath);
+
+    const removal = runHooks(context({
+      event: "file.stage.before",
+      command: `git add -u -- ${relativePath}`,
+      confirmation: "USER_REQUESTED_STAGE",
+      targetPaths: [relativePath],
+    }));
+    expect(docsViolation(removal)).toBe(false);
+
+    const unproven = runHooks(context({
+      event: "file.stage.before",
+      command: "git add -u -- docs/architecture/missing.md",
+      confirmation: "USER_REQUESTED_STAGE",
+      targetPaths: ["docs/architecture/missing.md"],
+    }));
+    expect(unproven.decision).toBe("deny");
+    expect(docsViolation(unproven)).toBe(true);
+  });
+
+  test("commit permite solo una eliminacion staged real y exacta de documentacion", () => {
+    const relativePath = "docs/architecture/historical.md";
+    const targetPath = path.join(repo, relativePath);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, "# Historical\n", "utf8");
+    execFileSync("git", ["init", "--quiet"], { cwd: repo });
+    execFileSync("git", ["add", "--", relativePath], { cwd: repo });
+    execFileSync("git", [
+      "-c", "user.name=Malahor Fixture",
+      "-c", "user.email=fixture@malahor.invalid",
+      "-c", "commit.gpgsign=false",
+      "commit", "--quiet", "--no-verify", "-m", "fixture",
+    ], { cwd: repo });
+    fs.rmSync(targetPath);
+    execFileSync("git", ["add", "-u", "--", relativePath], { cwd: repo });
+
+    for (const target of [relativePath, targetPath]) {
+      const removal = runHooks(context({
+        event: "git.commit.before",
+        command: "git commit -m '📝 docs(docs): retira historico'",
+        confirmation: "USER_REQUESTED_COMMIT",
+        targetPaths: [target],
+      }));
+      expect(docsViolation(removal)).toBe(false);
+    }
+
+    const shellRemoval = runHooks(context({
+      event: "shell.exec.before",
+      command: "git commit -m '📝 docs(docs): retira historico'",
+      confirmation: "USER_REQUESTED_COMMIT",
+      targetPaths: [relativePath],
+    }));
+    expect(docsViolation(shellRemoval)).toBe(false);
+
+    const unproven = runHooks(context({
+      event: "git.commit.before",
+      command: "git commit -m '📝 docs(docs): retira historico'",
+      confirmation: "USER_REQUESTED_COMMIT",
+      targetPaths: ["docs/architecture/missing.md"],
+    }));
+    expect(unproven.decision).toBe("deny");
+    expect(docsViolation(unproven)).toBe(true);
   });
 
   test("deniega filesystem directo al vault default, overrides y aliases symlink", () => {

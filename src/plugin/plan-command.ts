@@ -51,7 +51,7 @@ export async function registerPlanCommand(
         throw new Error("Uso: /malahor-plan [status|pause|resume|revoke|complete]");
       }
       const resolved = await resolvePlanningScope(sessionID, options);
-      if (!resolved) throw new Error("Sesion sin proyecto registrado; plan no disponible.");
+      if (!resolved) throw new Error("Sesion sin afinidad a un proyecto registrado; plan no disponible.");
       const adapter: PlanningAdapter = {
         loadActive: (id) => storage.get(planKey(id)),
         loadPlan: (planID) => storage.get(planRecordKey(planID)),

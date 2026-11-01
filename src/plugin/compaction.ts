@@ -1,3 +1,5 @@
+import type { ResolvedSessionProject } from "../cli/core/hooks/plugin-adapter";
+
 export const MALAHOR_COMPACTION_MARKER = "<!-- malahor-compaction-protocol:v1 -->";
 
 export interface CompactionStorage {
@@ -8,6 +10,7 @@ export interface CompactionStorage {
 export interface CompactionOptions {
   cwd: string;
   resolveSessionDirectory?: (sessionID: string) => Promise<string | undefined>;
+  resolveSessionProject?: (sessionID: string) => Promise<ResolvedSessionProject | undefined>;
 }
 
 export async function checkpointBeforeCompaction(
@@ -18,13 +21,14 @@ export async function checkpointBeforeCompaction(
   const sessionID = stringValue(input.sessionID);
   if (!sessionID) return { ok: false, reason: "sessionID ausente" };
 
-  const directory = await resolveDirectory(sessionID, options);
+  const context = await resolveContext(sessionID, options);
   const messageCount = Array.isArray(input.messages) ? input.messages.length : 0;
   const value = {
     schema: 1,
     kind: "compaction.pending",
     sessionID,
-    directory,
+    directory: context.directory,
+    project: context.project,
     messageCount,
     createdAt: new Date().toISOString(),
     memoryTool: "mem_session_summary",
@@ -61,16 +65,27 @@ CHECKPOINT DE COMPACTACIÓN MALAHOR
   return true;
 }
 
-async function resolveDirectory(sessionID: string, options: CompactionOptions): Promise<string> {
+async function resolveContext(
+  sessionID: string,
+  options: CompactionOptions,
+): Promise<{ directory: string; project?: string }> {
+  if (options.resolveSessionProject) {
+    try {
+      const project = await options.resolveSessionProject(sessionID);
+      if (project) return { directory: project.root, project: project.canonicalKey };
+    } catch {
+      // El checkpoint es auxiliar; conserva el fallback de ubicacion.
+    }
+  }
   if (options.resolveSessionDirectory) {
     try {
       const directory = await options.resolveSessionDirectory(sessionID);
-      if (directory) return directory;
+      if (directory) return { directory };
     } catch {
       // El checkpoint es auxiliar; usa el cwd de la instancia sin bloquear compaction.
     }
   }
-  return options.cwd;
+  return { directory: options.cwd };
 }
 
 function stringValue(value: unknown): string | undefined {

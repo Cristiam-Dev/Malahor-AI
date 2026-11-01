@@ -32,11 +32,16 @@ import {
 import type { HookEvent, HookResult } from "../cli/core/hooks/types";
 import { injectMalahorProtocol } from "./protocol";
 import {
-  evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, registerPlanningTools,
+  evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, readPlan, registerPlanningTools,
   type PlanningStorage, type PlanningTools,
 } from "./planning";
 import { registerModeCommand, type ModeCommandHost } from "./mode-command";
 import { registerPlanCommand, type PlanCommandHost } from "./plan-command";
+import {
+  createProjectAffinityResolver,
+  type ProjectAffinityResolver,
+  type ProjectAffinityStorage,
+} from "./project-affinity";
 
 const PLUGIN_ID = "malahor";
 const PLUGIN_VERSION = "0.4.0";
@@ -163,6 +168,31 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
         ? { parentID: value.parentID, agent: value.agent } : undefined;
     };
   }
+  const affinityStorage = storage && typeof storage.get === "function"
+    ? storage as ProjectAffinityStorage
+    : undefined;
+  const projectAffinity: ProjectAffinityResolver | undefined = affinityStorage && session?.get
+    ? createProjectAffinityResolver({
+      cwd,
+      env: process.env,
+      storage: affinityStorage,
+      locationProject: locationCanonical(context),
+      resolveSessionHints: async (sessionID) => {
+        const value = await session.get?.({ sessionID });
+        const directory = sessionLocationDirectory(value);
+        const projectHint = sessionLocationProject(value);
+        return directory || projectHint ? {
+          ...(directory ? { directory } : {}),
+          ...(projectHint ? { projectHint } : {}),
+        } : undefined;
+      },
+      resolvePlanProject: planStorage && planningAuthority ? async (sessionID) => {
+        const state = await readPlan(planStorage, sessionID, planningAuthority);
+        return state && !["completed", "revoked"].includes(state.phase) ? state.project : undefined;
+      } : undefined,
+    })
+    : undefined;
+  if (projectAffinity) options.resolveSessionProject = projectAffinity.resolveSessionProject;
 
   const permission = domain("permission");
   if (permission) {
@@ -210,6 +240,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       }
       await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
     }, cleanups);
+    options.toolRegistered = registered;
     capabilities.tool = true;
     capabilities["tool.execute.before"] = registered;
     if (!registered) criticalGaps.push("tool.execute.before");
@@ -220,6 +251,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
           cwd,
           env: process.env,
           resolveSessionDirectory: options.resolveSessionDirectory,
+          resolveSessionProject: options.resolveSessionProject,
         });
         if (!marked.ok) warn(`freshness de memoria degradada${marked.reason ? `: ${marked.reason}` : ""}`);
       }, cleanups)
@@ -232,7 +264,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     const approvalPort = isRecord(context.permission) && typeof context.permission.assert === "function"
       ? context.permission as unknown as Parameters<typeof registerPlanningTools>[1] : undefined;
     if (planningTools && approvalPort && planStorage && planningAuthority
-      && options.resolveSessionDirectory && options.permissionRegistered && registered) {
+      && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
@@ -253,7 +285,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   const modeHost = isRecord(context.command) && typeof context.command.transform === "function"
     && isRecord(context.session) && typeof context.session.synthetic === "function"
     && isRecord(context.permission) && typeof context.permission.assert === "function"
-    && options.resolveSessionDirectory
+    && (options.resolveSessionProject || options.resolveSessionDirectory)
     ? context as unknown as ModeCommandHost : undefined;
   if (modeHost) {
     try {
@@ -269,7 +301,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   const planCommandHost = isRecord(context.command) && typeof context.command.transform === "function"
     && isRecord(context.session) && typeof context.session.synthetic === "function"
     && isRecord(context.permission) && typeof context.permission.assert === "function"
-    && options.resolveSessionDirectory
+    && (options.resolveSessionProject || options.resolveSessionDirectory)
     ? context as unknown as PlanCommandHost : undefined;
   if (planCommandHost && planStorage && planningAuthority) {
     try {
@@ -285,6 +317,13 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   if (session) {
     for (const event of SESSION_HOOKS) {
       const registered = await registerHook(session, hookNameForEvent(event), async (input) => {
+        if (event === "session.prompt.before" && projectAffinity) {
+          try {
+            await projectAffinity.observePrompt(input);
+          } catch (error) {
+            warn(`afinidad de proyecto no observable: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         const result = await evaluateSessionHook(event, input, options);
         if (event === "session.http-response.after") return;
         if (result.decision === "deny" || result.decision === "ask") {
@@ -299,6 +338,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     }
 
     const protocolRegistered = await registerHook(session, "context", async (input) => {
+      if (projectAffinity) await projectAffinity.injectContext(input);
       injectMalahorProtocol(input);
       await injectPlanningInstructions(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
     }, cleanups);
@@ -307,10 +347,11 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
 
     const compactionRegistered = await registerHook(session, "compaction", async (input) => {
       if (storage) {
-        const checkpoint = await checkpointBeforeCompaction(input, storage, {
-          cwd,
-          resolveSessionDirectory: options.resolveSessionDirectory,
-        });
+          const checkpoint = await checkpointBeforeCompaction(input, storage, {
+            cwd,
+            resolveSessionDirectory: options.resolveSessionDirectory,
+            resolveSessionProject: options.resolveSessionProject,
+          });
         if (!checkpoint.ok) {
           warn(`checkpoint de compaction degradado${checkpoint.reason ? `: ${checkpoint.reason}` : ""}`);
         }
@@ -324,11 +365,12 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
 
     const nudgeRegistered = storage && typeof storage.get === "function"
       ? await registerHook(session, "context", async (input) => {
-        const nudge = await maybeInjectMemoryNudge(input, storage, {
-          cwd,
-          env: process.env,
-          resolveSessionDirectory: options.resolveSessionDirectory,
-        });
+          const nudge = await maybeInjectMemoryNudge(input, storage, {
+            cwd,
+            env: process.env,
+            resolveSessionDirectory: options.resolveSessionDirectory,
+            resolveSessionProject: options.resolveSessionProject,
+          });
         if (!nudge.ok && nudge.reason) warn(`nudge de memoria degradado: ${nudge.reason}`);
       }, cleanups)
       : false;
@@ -348,8 +390,9 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   if (event && storage) {
     const capture = startEventCapture(event, storage, {
       cwd,
-      captureSubagentsOptIn: captureSubagentsOptIn(cwd, process.env),
+      captureSubagentsOptIn: (project) => captureSubagentsOptIn(project.root, process.env, project.canonicalKey),
       resolveSessionDirectory: options.resolveSessionDirectory,
+      resolveSessionProject: options.resolveSessionProject,
       onError: (message) => warn(message),
     });
     capabilities.event = capture.ok;
@@ -515,11 +558,11 @@ function eventDomain(value: unknown): EventDomain | undefined {
   return value as unknown as EventDomain;
 }
 
-function captureSubagentsOptIn(cwd: string, env: NodeJS.ProcessEnv): boolean {
+function captureSubagentsOptIn(cwd: string, env: NodeJS.ProcessEnv, canonicalKey?: string): boolean {
   try {
     const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
-    const project = resolveProject(cwd);
-    const loaded = loadHookPolicy(paths, project.canonicalKey);
+    const project = canonicalKey ?? resolveProject(cwd).canonicalKey;
+    const loaded = loadHookPolicy(paths, project);
     return loaded.security?.persistence?.captureSubagentsOptIn === true;
   } catch {
     return false;
@@ -641,6 +684,16 @@ function sessionLocationDirectory(value: unknown): string | undefined {
   if (!isRecord(response)) return undefined;
   const location = isRecord(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
+}
+
+function sessionLocationProject(value: unknown): string | undefined {
+  const response = isRecord(value) && isRecord(value.data) ? value.data : value;
+  if (!isRecord(response)) return undefined;
+  const location = isRecord(response.location) ? response.location : undefined;
+  const project = location && isRecord(location.project) ? location.project : undefined;
+  return typeof project?.canonical === "string" ? project.canonical
+    : typeof project?.name === "string" ? project.name
+      : typeof project?.id === "string" ? project.id : undefined;
 }
 
 function recordState(inspection: HostInspection): boolean {

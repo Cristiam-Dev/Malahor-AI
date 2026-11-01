@@ -214,6 +214,7 @@ describe("malahor hooks", () => {
     const result = runHooks(baseContext({
       event: "git.commit.before",
       command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
+      targetPaths: ["src/fixture.ts"],
       profile: "release",
     }));
 
@@ -225,6 +226,7 @@ describe("malahor hooks", () => {
     const result = runHooks(baseContext({
       event: "git.commit.before",
       command: "git commit -m '🧠 feat(memoria): agrega hooks seguros'",
+      targetPaths: ["src/fixture.ts"],
       confirmation: "USER_REQUESTED_COMMIT",
       profile: "release",
     }));
@@ -280,6 +282,7 @@ describe("malahor hooks", () => {
     const context = baseContext({
       event: "git.commit.before",
       command: "git commit -m 'update stuff'",
+      targetPaths: ["src/fixture.ts"],
       profile: "release",
       confirmation: "USER_REQUESTED_COMMIT",
     });

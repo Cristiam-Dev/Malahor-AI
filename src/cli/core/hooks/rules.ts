@@ -85,10 +85,11 @@ function repoBoundaryGuard(context: HookContext): HookViolation[] {
 }
 
 function documentationBoundaryGuard(context: HookContext): HookViolation[] {
+  const commit = context.event === "git.commit.before"
+    || (context.event === "shell.exec.before" && /\bgit\s+commit\b/.test(context.command ?? ""));
   const relevant = context.event === "file.write.before"
     || context.event === "file.stage.before"
-    || context.event === "git.commit.before"
-    || (context.event === "shell.exec.before" && /\bgit\s+commit\b/.test(context.command ?? ""));
+    || commit;
   if (!relevant) return [];
 
   if (context.event === "file.write.before") {
@@ -123,6 +124,11 @@ function documentationBoundaryGuard(context: HookContext): HookViolation[] {
       ?? filesystemTargetPaths(context).map((targetPath) => ({ kind: "write", path: targetPath }));
   } else {
     const targets = filesystemTargetPaths(context);
+    if (context.metadata?.validationOnly === true && targets.length === 0) {
+      // Validar texto/forma de un commit no representa un commit real y no debe
+      // depender del indice Git del proceso que ejecuta los tests o el preview.
+      return [];
+    }
     const persisted = targets.length > 0 ? targets : stagedPaths(context.projectRoot);
     if (persisted === null) {
       return [{
@@ -132,7 +138,12 @@ function documentationBoundaryGuard(context: HookContext): HookViolation[] {
         fix: "Corrige el repositorio y vuelve a ejecutar el flujo Git verificado.",
       }];
     }
-    operations = persisted.map((targetPath) => ({ kind: "write", path: targetPath }));
+    operations = persisted.map((targetPath) => {
+      const removal = context.event === "file.stage.before"
+        ? isExactUnstagedRemoval(context, targetPath)
+        : commit && isExactStagedRemoval(context, targetPath);
+      return { kind: removal ? "delete" : "write", path: targetPath };
+    });
   }
 
   const unsafe = operations.filter((operation) => {
@@ -184,13 +195,50 @@ function metadataOperations(value: unknown): DocumentationOperation[] | undefine
 
 function stagedPaths(cwd: string): string[] | null {
   try {
-    return execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMR"], {
+    return execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMRD"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).split("\n").map((item) => item.trim()).filter(Boolean);
   } catch {
     return null;
+  }
+}
+
+function isExactUnstagedRemoval(context: HookContext, targetPath: string): boolean {
+  return isExactGitRemoval(context, targetPath, false);
+}
+
+function isExactStagedRemoval(context: HookContext, targetPath: string): boolean {
+  return isExactGitRemoval(context, targetPath, true);
+}
+
+function isExactGitRemoval(context: HookContext, targetPath: string, cached: boolean): boolean {
+  const projectRoot = path.resolve(context.projectRoot);
+  const absoluteTarget = path.resolve(context.cwd, targetPath);
+  if (absoluteTarget === projectRoot || !isInside(absoluteTarget, projectRoot)) return false;
+
+  const relativeTarget = path.relative(projectRoot, absoluteTarget);
+  try {
+    const output = execFileSync("git", [
+      "diff",
+      ...(cached ? ["--cached"] : []),
+      "--no-ext-diff",
+      "--no-textconv",
+      "--name-only",
+      "-z",
+      "--diff-filter=D",
+      "--",
+      relativeTarget,
+    ], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const removals = output.split("\0").filter(Boolean);
+    return removals.length === 1 && path.resolve(projectRoot, removals[0]!) === absoluteTarget;
+  } catch {
+    return false;
   }
 }
 

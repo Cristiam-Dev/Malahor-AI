@@ -146,6 +146,7 @@ export async function evaluatePlanningTool(
 ): Promise<void> {
   const tool = text(input.tool);
   if (routineTool(tool)) return;
+  if (["question", "list", "todowrite", "todoread", "invalid"].includes(tool)) return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
   if (!resolved || !storage) throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
   if (CODE_READ_TOOLS.has(tool) && resolved.scope.mode === "advisor") {
@@ -364,8 +365,20 @@ async function requireScope(call: ToolCall, options: PluginAdapterOptions) {
 }
 
 export async function resolvePlanningScope(value: unknown, options: PluginAdapterOptions): Promise<{ scope: PlanScope; directory: string } | undefined> {
-  if (typeof value !== "string" || !options.resolveSessionDirectory) return undefined;
+  if (typeof value !== "string") return undefined;
   try {
+    if (options.resolveSessionProject) {
+      const project = await options.resolveSessionProject(value);
+      if (!project) return undefined;
+      const directory = path.resolve(project.root);
+      const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
+      const config = loadConfig(env, directory);
+      return { scope: {
+        sessionID: value, project: project.canonicalKey, mode: config.mode,
+        policyRevision: config.execution.revision,
+      }, directory };
+    }
+    if (!options.resolveSessionDirectory) return undefined;
     const directory = await options.resolveSessionDirectory(value);
     if (!directory) return undefined;
     const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };

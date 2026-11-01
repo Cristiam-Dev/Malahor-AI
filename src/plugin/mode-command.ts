@@ -28,11 +28,14 @@ export async function registerModeCommand(host: ModeCommandHost, options: Plugin
       if (!prompt || typeof prompt.text !== "string" || prompt.files?.length || prompt.agents?.length || prompt.skills?.length) {
         throw new Error("El comando de modo solo acepta argumentos de texto, sin adjuntos.");
       }
-      const directory = await options.resolveSessionDirectory?.(sessionID);
-      if (!directory) throw new Error("Sesion sin ubicacion verificable; modo no disponible.");
+      const affinity = await options.resolveSessionProject?.(sessionID);
+      const directory = affinity?.root ?? await options.resolveSessionDirectory?.(sessionID);
+      if (!directory) throw new Error("Sesion sin proyecto verificable; modo no disponible.");
       const env = { ...(options.env ?? process.env), MALAHOR_OPENCODE_DETECT: "0" };
       const config = loadConfig(env, directory);
-      const project = resolveRegisteredProject(config.paths, config.projects.aliases);
+      const project = affinity
+        ? { canonicalKey: affinity.canonicalKey, root: affinity.root }
+        : resolveRegisteredProject(config.paths, config.projects.aliases);
       if (!rootsForProject(config.paths.projectsFile, project.canonicalKey).includes(project.root)) {
         throw new Error("El comando de modo requiere un proyecto registrado.");
       }

@@ -12,7 +12,7 @@ import {
 import plugin from "../src/plugin/index";
 import {
   evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, planKey,
-  registerPlanningTools, type PlanningStorage, type PlanningTools,
+  registerPlanningTools, resolvePlanningScope, type PlanningStorage, type PlanningTools,
 } from "../src/plugin/planning";
 
 const SESSION = "ses_planning_fixture";
@@ -614,6 +614,28 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "shell", input: {
       command: "echo fixture", cwd: repo, workdir: otherRepo,
     } }, options, storage)).rejects.toThrow(/plan/);
+  });
+
+  test("planning usa afinidad canonica aunque la sesion y la instancia esten fuera del repo", async () => {
+    const affinityOptions: PluginAdapterOptions = {
+      ...options,
+      cwd: home,
+      resolveSessionDirectory: async () => home,
+      resolveSessionProject: async (sessionID) => sessionID === SESSION
+        ? { canonicalKey: "demo", root: repo }
+        : undefined,
+    };
+    expect(await resolvePlanningScope(SESSION, affinityOptions)).toMatchObject({
+      directory: repo,
+      scope: { sessionID: SESSION, project: "demo", mode: "assistant" },
+    });
+
+    records.set(planKey(SESSION), authorized());
+    const edit = path.join(repo, "file.ts");
+    const permission = { sessionID: SESSION, action: "edit", resources: [edit], effect: "allow" };
+    await evaluatePlanningPermission(permission, affinityOptions, storage);
+    expect(permission.effect).toBe("allow");
+    await evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, affinityOptions, storage);
   });
 
   test("solo el especialista gestionado con parentID directo y delegacion aprobada hereda edit/shell", async () => {

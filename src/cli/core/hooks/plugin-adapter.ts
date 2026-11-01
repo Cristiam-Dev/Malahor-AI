@@ -20,11 +20,27 @@ import { parsePatchOperations } from "../documentation-boundary";
 
 export type PermissionEffect = "allow" | "ask" | "deny";
 
+export interface ResolvedSessionProject {
+  canonicalKey: string;
+  root: string;
+}
+
+export interface SessionProjectHints {
+  directory?: string;
+  projectHint?: string;
+  targetPaths?: string[];
+}
+
 export interface PluginAdapterOptions {
   cwd: string;
   permissionRegistered?: boolean;
   shellRegistered?: boolean;
+  toolRegistered?: boolean;
   resolveSessionDirectory?: (sessionID: string) => Promise<string | undefined>;
+  resolveSessionProject?: (
+    sessionID: string,
+    hints?: SessionProjectHints,
+  ) => Promise<ResolvedSessionProject | undefined>;
   resolveParentSession?: (sessionID: string) => Promise<{ parentID: string; agent: string } | undefined>;
   env?: NodeJS.ProcessEnv;
 }
@@ -50,6 +66,12 @@ interface EvaluationDetails {
   destructive?: boolean;
 }
 
+interface EvaluationScope {
+  options: PluginAdapterOptions;
+  project?: ResolvedSessionProject;
+  error?: string;
+}
+
 /**
  * Evaluador comun de los hooks V2. No conoce el SDK: recibe la forma estructural
  * que expone `@opencode/plugin` y la traduce al motor unico de hooks.
@@ -62,9 +84,13 @@ export async function evaluatePermission(
   const resources = stringArray(input.resources);
   const metadata = recordValue(input.metadata) ?? {};
   const generic = action === "*";
+  const toolOrigin = recordValue(input.source)?.type === "tool";
 
-  const details = permissionDetails(action, resources, metadata);
-  const scope = await resolveEvaluationScope(input, options, details.cwd);
+  const details = permissionDetails(action, resources, metadata, options.toolRegistered === true && toolOrigin);
+  const allowUnbound = ["question", "list", "todowrite", "todoread"].includes(action.toLowerCase());
+  const scope = await resolveEvaluationScope(
+    input, options, details.cwd, details.targetPaths, details.resourceKind, allowUnbound,
+  );
   const built = scope.error ? undefined : buildContext(details.event, scope.options, {
     command: details.command,
     resourceKind: details.resourceKind,
@@ -76,11 +102,11 @@ export async function evaluatePermission(
       action,
       ...(generic ? { genericPermission: true } : {}),
     },
-  });
+  }, scope.project);
 
   const result = built?.context
     ? evaluate(built.context)
-    : policyFailure(details.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
+    : policyFailure(details.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
   const hostEffect = permissionEffect(input.effect);
   const effect = strongerEffect(hostEffect, decisionEffect(result.decision));
 
@@ -103,7 +129,10 @@ export async function evaluateToolHook(
   const toolInput = input.input;
   const mapped = toolDetails(tool, toolInput, options);
 
-  const scope = await resolveEvaluationScope(input, options, mapped.cwd);
+  const allowUnbound = ["question", "list", "todowrite", "todoread"].includes(tool.toLowerCase());
+  const scope = await resolveEvaluationScope(
+    input, options, mapped.cwd, mapped.targetPaths, mapped.resourceKind, allowUnbound,
+  );
   const built = scope.error ? undefined : buildContext(mapped.event, scope.options, {
     command: mapped.command,
     resourceKind: mapped.resourceKind,
@@ -113,11 +142,11 @@ export async function evaluateToolHook(
       origin: "opencode-v2",
       tool,
     },
-  });
+  }, scope.project);
 
   return built?.context
     ? evaluate(built.context)
-    : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
+    : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
 }
 
 export async function evaluateShellHook(
@@ -146,11 +175,11 @@ export async function evaluateShellHook(
       cwd: scope.options.cwd,
       timeoutSeconds: timeout,
     },
-  });
+  }, scope.project);
 
   if (!built?.context) {
     return {
-      result: policyFailure("shell.exec.before", scope.options, scope.error ?? built?.error ?? "politica no evaluable"),
+      result: policyFailure("shell.exec.before", scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project),
       env,
       timeout,
     };
@@ -230,11 +259,11 @@ export async function evaluateSessionHook(
     metadata.secretKinds = secretKinds;
   }
 
-  const scope = await resolveEvaluationScope(input, options);
-  const built = scope.error ? undefined : buildContext(event, scope.options, { metadata });
+  const scope = await resolveEvaluationScope(input, options, undefined, undefined, undefined, true);
+  const built = scope.error ? undefined : buildContext(event, scope.options, { metadata }, scope.project);
   return built?.context
     ? evaluate(built.context)
-    : policyFailure(event, scope.options, scope.error ?? built?.error ?? "politica no evaluable");
+    : policyFailure(event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
 }
 
 export function shouldBlockPluginResult(result: HookResult, options: PluginAdapterOptions, blockingAskIds: string[] = []): boolean {
@@ -261,17 +290,59 @@ async function resolveEvaluationScope(
   input: Record<string, unknown>,
   options: PluginAdapterOptions,
   operationCwd?: string,
-): Promise<{ options: PluginAdapterOptions; error?: string }> {
+  targetPaths?: string[],
+  resourceKind?: HookResourceKind,
+  allowUnbound = false,
+): Promise<EvaluationScope> {
   const fallback = path.resolve(options.cwd);
-  if (operationCwd) {
-    return { options: { ...options, cwd: path.resolve(fallback, operationCwd) } };
+  const operationDirectory = operationCwd ? path.resolve(fallback, operationCwd) : undefined;
+  const sessionID = stringValue(input.sessionID);
+
+  if (options.resolveSessionProject && sessionID) {
+    try {
+      const project = await options.resolveSessionProject(sessionID, {
+        ...(operationDirectory ? { directory: operationDirectory } : {}),
+        ...(targetPaths?.length ? { targetPaths } : {}),
+      });
+      if (!project) {
+        if (allowUnbound) return { options: { ...options, cwd: fallback } };
+        return {
+          options: { ...options, cwd: fallback },
+          error: `la sesion ${sessionID} no tiene afinidad de proyecto inequívoca`,
+        };
+      }
+      if (operationDirectory && !isWithinPath(operationDirectory, project.root)) {
+        return {
+          options: { ...options, cwd: fallback },
+          project,
+          error: `el directorio de operacion no pertenece al proyecto ${project.canonicalKey}`,
+        };
+      }
+      const cwd = operationDirectory ?? path.resolve(project.root);
+      const conflict = conflictingProjectTarget(cwd, targetPaths, resourceKind, project, options);
+      if (conflict) {
+        return {
+          options: { ...options, cwd },
+          project,
+          error: `la operacion de ${project.canonicalKey} apunta a la raiz registrada de ${conflict}`,
+        };
+      }
+      return { options: { ...options, cwd }, project };
+    } catch (error) {
+      if (allowUnbound) return { options: { ...options, cwd: fallback } };
+      return {
+        options: { ...options, cwd: fallback },
+        error: `no se pudo resolver el proyecto de la sesion ${sessionID}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
   }
+
+  if (operationDirectory) return { options: { ...options, cwd: operationDirectory } };
 
   if (!options.resolveSessionDirectory) {
     return { options: { ...options, cwd: fallback } };
   }
 
-  const sessionID = stringValue(input.sessionID);
   if (!sessionID) {
     return {
       options: { ...options, cwd: fallback },
@@ -300,13 +371,16 @@ function buildContext(
   event: HookEvent,
   options: PluginAdapterOptions,
   details: Omit<EvaluationDetails, "event">,
+  boundProject?: ResolvedSessionProject,
 ): { context?: HookContext; error?: string } {
   const cwd = path.resolve(options.cwd);
   const env = options.env ?? process.env;
 
   try {
     const paths = pluginPaths(cwd, env);
-    const project = resolveOperationProject(cwd, details.resourceKind, details.targetPaths, paths);
+    const project = boundProject
+      ? { ...resolveProject(boundProject.root), canonicalKey: boundProject.canonicalKey, root: boundProject.root }
+      : resolveOperationProject(cwd, details.resourceKind, details.targetPaths, paths);
     const loaded = loadHookPolicy(paths, project.canonicalKey);
     const context: HookContext = {
       event,
@@ -335,7 +409,12 @@ function buildContext(
   }
 }
 
-function policyFailure(event: HookEvent, options: PluginAdapterOptions, detail: string): HookResult {
+function policyFailure(
+  event: HookEvent,
+  options: PluginAdapterOptions,
+  detail: string,
+  boundProject?: ResolvedSessionProject,
+): HookResult {
   const result: HookResult = {
     event,
     profile: "off",
@@ -351,7 +430,9 @@ function policyFailure(event: HookEvent, options: PluginAdapterOptions, detail: 
   try {
     const cwd = path.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
-    const project = resolveProject(cwd);
+    const project = boundProject
+      ? { ...resolveProject(boundProject.root), canonicalKey: boundProject.canonicalKey, root: boundProject.root }
+      : resolveProject(cwd);
     const context: HookContext = {
       event,
       harness: "opencode",
@@ -395,12 +476,32 @@ function resolveOperationProject(
   return { ...resolved, canonicalKey: candidate.canonicalKey };
 }
 
+function conflictingProjectTarget(
+  cwd: string,
+  targetPaths: string[] | undefined,
+  resourceKind: HookResourceKind | undefined,
+  project: ResolvedSessionProject,
+  options: PluginAdapterOptions,
+): string | undefined {
+  if (!usesFilesystemResources(resourceKind) || !targetPaths?.length) return undefined;
+  const paths = pluginPaths(cwd, options.env ?? process.env);
+  const roots = registeredProjectRoots(paths.projectsFile);
+  const targets = targetPaths.map((target) => path.resolve(cwd, target));
+  return roots.find((entry) => entry.canonicalKey !== project.canonicalKey
+    && targets.some((target) => isWithinPath(target, entry.root)))?.canonicalKey;
+}
+
 function isWithinPath(value: string, root: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(value));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function permissionDetails(action: string, resources: string[], metadata: Record<string, unknown>): EvaluationDetails {
+function permissionDetails(
+  action: string,
+  resources: string[],
+  metadata: Record<string, unknown>,
+  deferToolWrite: boolean,
+): EvaluationDetails {
   const normalized = action.toLowerCase();
   const metadataCommand = stringValue(metadata.command) || stringValue(metadata.cmd);
 
@@ -414,6 +515,13 @@ function permissionDetails(action: string, resources: string[], metadata: Record
 
   if (normalized === "read" || normalized === "glob" || normalized === "grep") {
     return { event: "file.read.before", resourceKind: "filesystem", targetPaths: resources, metadata };
+  }
+
+  if (["edit", "write", "patch", "create"].includes(normalized) && deferToolWrite) {
+    return {
+      event: "plugin.permission.before",
+      metadata: { ...metadata, knownTool: true, deferredToToolHook: true },
+    };
   }
 
   if (normalized === "edit" || normalized === "write" || normalized === "patch" || normalized === "create") {

@@ -101,12 +101,14 @@ describe("adaptador de plugin V2", () => {
     const checkpoint = await checkpointBeforeCompaction(input, {
       set: async (key, value) => { saved = { key, value }; },
     }, {
-      cwd: repo,
-      resolveSessionDirectory: async () => repo,
+      cwd: home,
+      resolveSessionDirectory: async () => home,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
     });
     expect(checkpoint.ok).toBe(true);
     expect(saved?.key).toBe("compaction/ses_compact");
     expect(saved?.value.messageCount).toBe(2);
+    expect(saved?.value).toMatchObject({ directory: repo, project: "demo" });
 
     expect(injectCompactionInstructions(input)).toBe(true);
     expect(injectCompactionInstructions(input)).toBe(false);
@@ -126,7 +128,12 @@ describe("adaptador de plugin V2", () => {
       sessionID: "ses_nudge",
       system: [{ type: "text", text: "base" }],
     };
-    const options = { cwd: repo, staleMinutes: 15, now: () => now };
+    const options = {
+      cwd: home,
+      staleMinutes: 15,
+      now: () => now,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
+    };
 
     expect((await maybeInjectMemoryNudge(input, storage, options)).injected).toBe(false);
     now += 16 * 60_000;
@@ -158,13 +165,13 @@ describe("adaptador de plugin V2", () => {
       id: "evt-primary",
       type: "session.execution.succeeded",
       created: Date.parse("2026-10-22T00:00:00.000Z"),
-      data: { sessionID: "ses_primary", location: { directory: repo }, agent: "malahor" },
+      data: { sessionID: "ses_primary", location: { directory: home }, agent: "malahor" },
     };
     const child = {
       id: "evt-child",
       type: "session.execution.succeeded",
       created: Date.parse("2026-10-22T00:01:00.000Z"),
-      data: { sessionID: "ses_child", parentID: "ses_primary", location: { directory: repo }, agent: "malahor-testing" },
+      data: { sessionID: "ses_child", parentID: "ses_primary", location: { directory: home }, agent: "malahor-testing" },
     };
     const stream = (events: unknown[]): AsyncIterable<unknown> => (async function* () {
       for (const event of events) yield event;
@@ -173,6 +180,7 @@ describe("adaptador de plugin V2", () => {
     const excluded = startEventCapture({ subscribe: () => stream([primary, child]) }, storage, {
       cwd: repo,
       captureSubagentsOptIn: false,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
     });
     await excluded.done;
     expect(values.has("session/events/demo/evt-primary")).toBe(true);
@@ -182,6 +190,7 @@ describe("adaptador de plugin V2", () => {
     const included = startEventCapture({ subscribe: () => stream([child]) }, storage, {
       cwd: repo,
       captureSubagentsOptIn: true,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
     });
     await included.done;
     expect(values.has("session/events/demo/evt-child")).toBe(true);
@@ -296,6 +305,90 @@ describe("adaptador de plugin V2", () => {
     expect(result.result.violations).toEqual([]);
   });
 
+  test("permission edit difiere la operacion solo para una tool realmente mediada", async () => {
+    const input = {
+      action: "edit",
+      resources: ["docs/security/operation-matrix.md"],
+      effect: "allow",
+      source: { type: "tool", messageID: "msg_fixture", id: "call_fixture" },
+    };
+
+    const deferred = await evaluatePermission({ ...input }, {
+      cwd: repo,
+      permissionRegistered: true,
+      toolRegistered: true,
+      env,
+    });
+    expect(deferred.effect).toBe("allow");
+    expect(deferred.result.violations).toEqual([]);
+
+    const unmediated = await evaluatePermission({ ...input }, {
+      cwd: repo,
+      permissionRegistered: true,
+      toolRegistered: false,
+      env,
+    });
+    expect(unmediated.effect).toBe("deny");
+    expect(unmediated.result.violations.some((violation) => violation.id === "MAL-HOOK-DOCS-EXTERNAL")).toBe(true);
+
+    const unattributed = await evaluatePermission({
+      action: input.action,
+      resources: input.resources,
+      effect: input.effect,
+    }, {
+      cwd: repo,
+      permissionRegistered: true,
+      toolRegistered: true,
+      env,
+    });
+    expect(unattributed.effect).toBe("deny");
+    expect(unattributed.result.violations.some((violation) => violation.id === "MAL-HOOK-DOCS-EXTERNAL")).toBe(true);
+  });
+
+  test("tool patch permite delete documental y bloquea update", async () => {
+    const options = {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: true,
+      toolRegistered: true,
+      env,
+    };
+    const directEdit = await evaluateToolHook({
+      tool: "edit",
+      input: { path: "docs/security/operation-matrix.md" },
+    }, options);
+    expect(directEdit.decision).toBe("deny");
+    expect(directEdit.violations.some((violation) => violation.id === "MAL-HOOK-DOCS-EXTERNAL")).toBe(true);
+
+    const deletion = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          "*** Delete File: docs/security/operation-matrix.md",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, options);
+    expect(deletion.decision).toBe("allow");
+
+    const update = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          "*** Update File: docs/security/operation-matrix.md",
+          "@@",
+          "-old",
+          "+new",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, options);
+    expect(update.decision).toBe("deny");
+    expect(update.violations.some((violation) => violation.id === "MAL-HOOK-DOCS-EXTERNAL")).toBe(true);
+  });
+
   test("shell hook bloquea ejecucion indirecta y minimiza entorno", async () => {
     writeProjectPolicy({
       shell: {
@@ -375,6 +468,62 @@ describe("adaptador de plugin V2", () => {
 
     expect(result.effect).toBe("deny");
     expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-MCP-ALLOWLIST")).toBe(true);
+  });
+
+  test("hooks usan afinidad canonica desde home y rechazan otra raiz registrada", async () => {
+    const other = path.join(root, "other-repo");
+    fs.mkdirSync(other);
+    fs.writeFileSync(path.join(other, "package.json"), JSON.stringify({ name: "other" }));
+    fs.writeFileSync(path.join(home, "projects.json"), JSON.stringify({
+      demo: { context: "memory", roots: [repo], defaultRoot: repo },
+      other: { context: "memory", roots: [other], defaultRoot: other },
+    }));
+    writeProjectPolicy({
+      integrations: { enforceMcpToolAllowlist: true, allowedMcpTools: ["mcp_ok*"] },
+    });
+    const options = {
+      cwd: home,
+      permissionRegistered: true,
+      shellRegistered: true,
+      resolveSessionDirectory: async () => home,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
+      env,
+    };
+
+    const permission = await evaluatePermission({
+      sessionID: "ses_demo",
+      action: "mcp_bad_search",
+      resources: [],
+      effect: "allow",
+    }, options);
+    expect(permission.effect).toBe("deny");
+
+    const crossProject = await evaluateToolHook({
+      sessionID: "ses_demo",
+      tool: "read",
+      input: { filePath: path.join(other, "package.json") },
+    }, options);
+    expect(crossProject.decision).toBe("deny");
+    expect(crossProject.violations.some((violation) => violation.id === "MAL-HOOK-PLUGIN-POLICY")).toBe(true);
+
+    const audit = fs.readFileSync(path.join(home, "audit", "security.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line) as { project: string });
+    expect(audit.at(-1)?.project).toBe("demo");
+  });
+
+  test("question sigue disponible para resolver una afinidad ambigua", async () => {
+    const result = await evaluateToolHook({
+      sessionID: "ses_ambiguous",
+      tool: "question",
+      input: { questions: [] },
+    }, {
+      cwd: home,
+      permissionRegistered: true,
+      shellRegistered: true,
+      resolveSessionProject: async () => undefined,
+      env,
+    });
+    expect(result.decision).toBe("allow");
   });
 
   test("un fallo al resolver la sesion deniega en vez de usar la instancia", async () => {
@@ -517,6 +666,9 @@ describe("adaptador de plugin V2", () => {
     process.env.MALAHOR_HOME = home;
     process.env.MALAHOR_OPENCODE_DIR = opencode;
     fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({ name: "demo" }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({
+      demo: { context: "memory", roots: [repo], defaultRoot: repo },
+    })}\n`, "utf8");
     writeProjectPolicy({
       integrations: {
         enforceMcpToolAllowlist: true,

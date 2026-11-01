@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { resolveProject } from "../cli/core/project";
+import type { ResolvedSessionProject, SessionProjectHints } from "../cli/core/hooks/plugin-adapter";
 import type { CompactionStorage } from "./compaction";
 
 export interface EventDomain {
@@ -9,8 +10,12 @@ export interface EventDomain {
 
 export interface EventCaptureOptions {
   cwd: string;
-  captureSubagentsOptIn: boolean;
+  captureSubagentsOptIn: boolean | ((project: ResolvedSessionProject) => boolean);
   resolveSessionDirectory?: (sessionID: string) => Promise<string | undefined>;
+  resolveSessionProject?: (
+    sessionID: string,
+    hints?: SessionProjectHints,
+  ) => Promise<ResolvedSessionProject | undefined>;
   onError?: (message: string) => void;
 }
 
@@ -86,15 +91,18 @@ async function eventRecord(
   const sessionID = stringValue(data.sessionID) ?? stringValue(event.aggregateID);
   if (!sessionID) return null;
 
-  const parentID = stringValue(data.parentID);
-  const agent = stringValue(data.agent);
-  const subagent = Boolean(parentID) || Boolean(agent?.startsWith("malahor-"));
-  if (subagent && !options.captureSubagentsOptIn) return null;
-
   const directory = stringValue(recordValue(data.location)?.directory)
     ?? stringValue(recordValue(event.location)?.directory)
     ?? await resolveDirectory(sessionID, options);
-  const project = resolveProject(directory).canonicalKey;
+  const resolvedProject = await resolveEventProject(sessionID, directory, options);
+  const project = resolvedProject.canonicalKey;
+  const parentID = stringValue(data.parentID);
+  const agent = stringValue(data.agent);
+  const subagent = Boolean(parentID) || Boolean(agent?.startsWith("malahor-"));
+  const captureSubagent = typeof options.captureSubagentsOptIn === "function"
+    ? options.captureSubagentsOptIn(resolvedProject)
+    : options.captureSubagentsOptIn;
+  if (subagent && !captureSubagent) return null;
   const eventID = stringValue(event.id) ?? stringValue(event.seq) ?? `${event.type}:${sessionID}:${event.created ?? Date.now()}`;
   const key = `session/events/${encodeURIComponent(project)}/${encodeURIComponent(eventID)}`;
 
@@ -126,6 +134,23 @@ async function resolveDirectory(sessionID: string, options: EventCaptureOptions)
     }
   }
   return path.resolve(options.cwd);
+}
+
+async function resolveEventProject(
+  sessionID: string,
+  directory: string,
+  options: EventCaptureOptions,
+): Promise<ResolvedSessionProject> {
+  if (options.resolveSessionProject) {
+    try {
+      const project = await options.resolveSessionProject(sessionID, { directory });
+      if (project) return project;
+    } catch {
+      // La captura es auxiliar; conserva el fallback derivado del evento.
+    }
+  }
+  const fallback = resolveProject(directory);
+  return { canonicalKey: fallback.canonicalKey, root: fallback.root };
 }
 
 function statusForEvent(type: string): string {
