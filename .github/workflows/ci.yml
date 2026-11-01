@@ -28,7 +28,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck
-        run: pnpm exec tsc --noEmit
+        run: pnpm run typecheck
 
       - name: Build
         run: bun run build
