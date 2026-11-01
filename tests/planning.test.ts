@@ -6,14 +6,15 @@ import { loadConfig, type MalahorIntervention, type MalahorMode } from "../src/c
 import type { PluginAdapterOptions } from "../src/cli/core/hooks/plugin-adapter";
 import { MODE_CHANGE_ACTION, previewModeChange } from "../src/cli/core/mode";
 import {
-  authorizePlan, controlPlan, planAllows, presentPlan, proposePlan, requestPlanExecution, reviewPlan, validState,
+  authorizePlan, controlPlan, planAllows, presentPlan, proposePlan, renderPlan, requestPlanExecution, reviewPlan, validState,
   type PlanInput, type PlanningAdapter, type PlanScope, type PlanState,
 } from "../src/cli/core/planning";
 import plugin from "../src/plugin/index";
 import {
-  evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, planKey,
-  registerPlanningTools, resolvePlanningScope, type PlanningStorage, type PlanningTools,
+  evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, planKey, planRecordKey,
+  planRevisionKey, readPlan, registerPlanningTools, resolvePlanningScope, type PlanningStorage, type PlanningTools,
 } from "../src/plugin/planning";
+import { MALAHOR_RUNTIME_PROTOCOL } from "../src/plugin/protocol";
 
 const SESSION = "ses_planning_fixture";
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
@@ -101,8 +102,58 @@ function input(action: "edit" | "shell" | "subagent" = "edit"): PlanInput {
   return {
     summary: "Cambiar una ruta del fixture",
     steps: ["Presentar plan", "Cambiar solo lo declarado"],
+    presentation: {
+      objective: "Cambiar exclusivamente la ruta declarada por el plan.",
+      rationale: "El cambio debe permanecer acotado y ser verificable antes de aprobarlo.",
+      steps: [
+        {
+          title: "Presentar el plan",
+          what: "Mostrar el objetivo, alcance y efectos exactos.",
+          why: "La persona necesita comprender el cambio antes de aprobar.",
+          expected: "El plan queda visible como un mensaje normal y completo.",
+        },
+        {
+          title: "Cambiar solo lo declarado",
+          what: "Ejecutar unicamente la accion y el recurso enumerados.",
+          why: "Evita ampliar silenciosamente los efectos autorizados.",
+          expected: "No se toca ningun recurso fuera del plan.",
+        },
+      ],
+      changes: ["La ruta declarada en acciones"],
+      exclusions: ["Cualquier otro archivo, comando o subagente"],
+      completionCriteria: ["La accion declarada queda verificada sin ampliar el alcance"],
+    },
     actions: [{ action, resource: action === "edit" ? path.join(repo, "file.ts") : action === "shell" ? "echo fixture" : "malahor-testing" }],
   };
+}
+
+function conceptInput(summary = "Alternativas"): PlanInput {
+  return {
+    summary,
+    steps: [],
+    presentation: {
+      objective: summary,
+      rationale: "Comparar opciones sin ejecutar cambios.",
+      steps: [],
+      changes: [],
+      exclusions: ["No se ejecutaran acciones ni se modificaran recursos"],
+      completionCriteria: ["Las alternativas y sus implicaciones quedan explicadas"],
+    },
+    actions: [],
+  };
+}
+
+const FOREGROUND_START = "<!-- malahor-plan-foreground:start -->";
+const FOREGROUND_END = "<!-- malahor-plan-foreground:end -->";
+
+function foregroundMarkdown(content: string): string {
+  expect(content.split(FOREGROUND_START)).toHaveLength(2);
+  expect(content.split(FOREGROUND_END)).toHaveLength(2);
+  const start = content.indexOf(FOREGROUND_START) + FOREGROUND_START.length;
+  const end = content.indexOf(FOREGROUND_END);
+  expect(start).toBeGreaterThan(FOREGROUND_START.length - 1);
+  expect(end).toBeGreaterThan(start);
+  return content.slice(start, end).trim();
 }
 
 function authorized(mode: "assistant" | "executor" = "assistant", now = Date.now()): PlanState {
@@ -206,7 +257,7 @@ describe("configuracion: intervention es el unico modo efectivo", () => {
 
 describe("nucleo: transiciones y binding del plan", () => {
   test("asesor presenta concepto sin pasos ni ejecucion", () => {
-    const plan = proposePlan(scope("advisor"), { summary: "Alternativas", steps: [], actions: [] }, NOW);
+    const plan = proposePlan(scope("advisor"), conceptInput(), NOW);
     expect(validState(plan)).toBe(true);
     expect(() => reviewPlan(plan, plan.digest, NOW)).toThrow();
     expect(() => authorizePlan(plan, plan.digest, NOW)).toThrow();
@@ -234,7 +285,7 @@ describe("nucleo: transiciones y binding del plan", () => {
     expect(planAllows(authorizePlan(plan, plan.digest, NOW), scope("executor"), input("shell").actions[0]!, NOW)).toBe(true);
   });
 
-  test("acciones canonicas sin duplicados; hash ligado a revision, pasos, recursos y scope", () => {
+  test("acciones canonicas sin duplicados; hash ligado a presentacion, recursos y scope", () => {
     const base = input();
     const first = proposePlan(scope(), { ...base, actions: [base.actions[0]!, { action: "shell", resource: "echo fixture" }] }, NOW);
     const reordered = proposePlan(scope(), { ...base, actions: [
@@ -243,7 +294,12 @@ describe("nucleo: transiciones y binding del plan", () => {
     expect(first.plan).toEqual(reordered.plan);
     expect(first.digest).not.toBe(reordered.digest);
     expect(first.plan.actions).toHaveLength(2);
+    expect(first.plan.presentation).toEqual(base.presentation);
     expect(proposePlan(scope(), { ...base, steps: ["Distinto"] }, NOW).digest).not.toBe(first.digest);
+    expect(proposePlan(scope(), {
+      ...base,
+      presentation: { ...base.presentation, rationale: "Una razon materialmente distinta." },
+    }, NOW).digest).not.toBe(first.digest);
     expect(proposePlan(scope(), { ...base, actions: [{ action: "edit", resource: path.join(repo, "other.ts") }] }, NOW).digest).not.toBe(first.digest);
     expect(proposePlan({ ...scope(), project: "other" }, base, NOW).digest).not.toBe(first.digest);
     expect(proposePlan({ ...scope(), sessionID: "ses_other" }, base, NOW).digest).not.toBe(first.digest);
@@ -252,8 +308,10 @@ describe("nucleo: transiciones y binding del plan", () => {
   });
 
   test("rechaza entradas incompletas y acciones sin recurso exacto", () => {
+    const { presentation: _presentation, ...withoutPresentation } = input();
     expect(() => proposePlan({ ...scope(), sessionID: "" }, input(), NOW)).toThrow();
     expect(() => proposePlan({ ...scope(), policyRevision: "invalid" }, input(), NOW)).toThrow();
+    expect(() => proposePlan(scope(), withoutPresentation as PlanInput, NOW)).toThrow(/presentaci[oó]n/i);
     expect(() => proposePlan(scope(), { ...input(), steps: [] }, NOW)).toThrow();
     expect(() => proposePlan(scope(), { ...input(), actions: [{ action: "unknown", resource: "*" }] }, NOW)).toThrow();
     expect(() => proposePlan(scope(), { ...input(), actions: [{ action: "edit", resource: "" }] }, NOW)).toThrow();
@@ -281,6 +339,7 @@ describe("nucleo: transiciones y binding del plan", () => {
     const variants: unknown[] = [null, {},
       { ...active, digest: "f".repeat(64) },
       { ...active, version: 1 },
+      { ...active, version: 3 },
       { ...active, policyRevision: "b".repeat(32) },
       { ...active, expiresAt: active.createdAt + 31 * 60_000 },
       { ...active, plan: { ...active.plan, actions: [{ ...operation, resource: path.join(repo, "other.ts") }] } },
@@ -295,6 +354,31 @@ describe("nucleo: transiciones y binding del plan", () => {
     const presented = proposePlan(scope(), input(), NOW);
     const forged = { ...presented, authorizedAt: NOW };
     expect(planAllows(forged, scope(), presented.plan.actions[0]!, NOW)).toBe(false);
+  });
+});
+
+describe("persistencia planning v4 fail-closed", () => {
+  test("usa exclusivamente keys v4 para sesion, plan y revision", () => {
+    expect(planKey(SESSION)).toBe(`planning/v4/sessions/${SESSION}`);
+    expect(planRecordKey("a".repeat(32))).toBe(`planning/v4/plans/${"a".repeat(32)}`);
+    expect(planRevisionKey("a".repeat(32), "b".repeat(32)))
+      .toBe(`planning/v4/plans/${"a".repeat(32)}/revisions/${"b".repeat(32)}`);
+  });
+
+  test("un estado v3 nunca se acepta como estado v4 aunque conserve firma y payload", () => {
+    const current = proposePlan(scope(), input(), NOW);
+    expect(current.version).toBe(4);
+    expect(validState({ ...current, version: 3 })).toBe(false);
+  });
+
+  test("readPlan no descubre ni migra silenciosamente el key legado v3", async () => {
+    const current = proposePlan(scope(), input(), NOW);
+    const legacy = { ...current, version: 3 };
+    records.set(`planning/v3/sessions/${SESSION}`, legacy);
+    expect(await readPlan(storage, SESSION)).toBeUndefined();
+
+    records.set(planKey(SESSION), legacy);
+    expect(await readPlan(storage, SESSION)).toBeUndefined();
   });
 });
 
@@ -328,6 +412,36 @@ describe("nucleo: dependencias y control persistente", () => {
     const resumed = await controlPlan(childScope, "resume", adapter);
     expect(resumed.phase).toBe("running");
     expect(confirmations).toEqual(["run", "run", "complete", "resume"]);
+  });
+
+  test("requestPlanExecution inicia si la dependencia ya termino, pero authorizePlan directo la rechaza", async () => {
+    const active = new Map<string, PlanState>();
+    const plans = new Map<string, PlanState>();
+    const confirmations: string[] = [];
+    const adapter: PlanningAdapter = {
+      loadActive: async (sessionID) => active.get(sessionID),
+      loadPlan: async (planID) => plans.get(planID),
+      save: async (state) => { active.set(state.sessionID, state); plans.set(state.planID, state); },
+      confirm: async (kind) => { confirmations.push(kind); },
+    };
+    const parentScope = scope("executor");
+    const parent = await presentPlan(parentScope, input(), "msg-completed-parent-plan", adapter);
+    await requestPlanExecution(parentScope, parent.digest, "msg-completed-parent-run", adapter);
+    const completedParent = await controlPlan(parentScope, "complete", adapter);
+    expect(completedParent.phase).toBe("completed");
+
+    const childScope = { ...parentScope, sessionID: "ses_child_completed_dependency" };
+    const child = await presentPlan(childScope, {
+      ...input(),
+      dependencies: [{ planID: completedParent.planID, revision: completedParent.revision }],
+    }, "msg-completed-child-plan", adapter);
+
+    expect(() => authorizePlan(child, child.digest)).toThrow(/dependencias.*adaptador/i);
+    const running = await requestPlanExecution(childScope, child.digest, "msg-completed-child-run", adapter);
+    expect(running.phase).toBe("running");
+    expect(running.blockedBy).toBeUndefined();
+    expect(planAllows(running, childScope, child.plan.actions[0]!)).toBe(true);
+    expect(confirmations).toEqual(["run", "complete", "run"]);
   });
 
   test("rechaza ciclos al revisar un plan existente", async () => {
@@ -389,13 +503,15 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     expect(stale.effect).toBe("deny");
   });
 
-  test("confirmaciones vinculadas al hash siempre son ask; hash ajeno, orden inverso y deny del host no se rebajan", async () => {
+  test("revision y run reutilizan el renderer canonico completo; hash ajeno, orden inverso y deny no se rebajan", async () => {
     const plan = proposePlan(scope(), input(), Date.now());
     records.set(planKey(SESSION), plan);
     const review = { sessionID: SESSION, action: "malahor_plan_review", resources: [plan.digest], effect: "allow" } as Record<string, unknown>;
     await evaluatePlanningPermission(review, options, storage);
     expect(review.effect).toBe("ask");
     expect(review.message).toContain(plan.planID.slice(0, 12));
+    expect(String(review.message).endsWith(renderPlan(plan))).toBe(true);
+    expect(String(review.message).split(renderPlan(plan))).toHaveLength(2);
 
     const denied = { ...review, effect: "deny" };
     await evaluatePlanningPermission(denied, options, storage);
@@ -407,11 +523,14 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     await evaluatePlanningPermission(earlyRun, options, storage);
     expect(earlyRun.effect).toBe("deny");
 
-    records.set(planKey(SESSION), reviewPlan(plan, plan.digest));
+    const reviewed = reviewPlan(plan, plan.digest);
+    records.set(planKey(SESSION), reviewed);
     const run = { ...earlyRun, effect: "allow" };
     await evaluatePlanningPermission(run, options, storage);
     expect(run.effect).toBe("ask");
     expect(run.message).toContain(plan.planID.slice(0, 12));
+    expect(String(run.message).endsWith(renderPlan(reviewed))).toBe(true);
+    expect(String(run.message).split(renderPlan(reviewed))).toHaveLength(2);
     const hostDenied = { ...run, effect: "deny" };
     await evaluatePlanningPermission(hostDenied, options, storage);
     expect(hostDenied.effect).toBe("deny");
@@ -436,7 +555,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     await evaluatePlanningPermission(old, options, storage);
     expect(old.effect).toBe("ask");
     configure("acompanar");
-    const concept = proposePlan(scope("advisor"), { summary: "Idea", steps: [], actions: [] });
+    const concept = proposePlan(scope("advisor"), conceptInput("Idea"));
     records.set(planKey(SESSION), concept);
     const advisor = { ...request, effect: "allow", resources: [concept.digest] };
     await evaluatePlanningPermission(advisor, options, storage);
@@ -759,25 +878,60 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     }
   });
 
-  test("malahor_plan guarda estado v3 ligado al turno y renderiza el plan completo por secciones", async () => {
+  test("el contrato de malahor_plan exige la presentacion semantica sin retirar argumentos existentes", async () => {
+    const harness = await registeredTools();
+    const schema = harness.definitions.get("plan")?.input as {
+      required?: string[];
+      properties?: Record<string, { required?: string[]; properties?: Record<string, unknown> }>;
+    };
+    expect(schema.required).toEqual(["summary", "steps", "presentation", "actions"]);
+    expect(Object.keys(schema.properties ?? {})).toEqual(["summary", "steps", "presentation", "actions", "dependencies"]);
+    expect(schema.properties?.presentation?.required).toEqual([
+      "objective", "rationale", "steps", "changes", "exclusions", "completionCriteria",
+    ]);
+    const presentationProperties = schema.properties?.presentation?.properties ?? {};
+    expect(Object.keys(presentationProperties)).toEqual([
+      "objective", "rationale", "steps", "changes", "exclusions", "completionCriteria",
+    ]);
+    const presentationSteps = presentationProperties.steps as {
+      items?: { required?: string[]; properties?: Record<string, unknown> };
+    };
+    expect(presentationSteps.items?.required).toEqual(["title", "what", "why", "expected"]);
+    expect(Object.keys(presentationSteps.items?.properties ?? {})).toEqual(["title", "what", "why", "expected"]);
+  });
+
+  test("malahor_plan guarda estado v4 ligado al turno y rechaza estados v3", async () => {
     configure("ejecutar");
     const harness = await registeredTools();
     const planCall = call(SESSION, "malahor", "msg_executor_presentation");
-    const result = await harness.execute("plan", input(), planCall);
+    await harness.execute("plan", input(), planCall);
 
-    expect(planKey(SESSION)).toBe(`planning/v3/sessions/${SESSION}`);
+    expect(planKey(SESSION)).toBe(`planning/v4/sessions/${SESSION}`);
     expect(records.has(planKey(SESSION))).toBe(true);
     const state = records.get(planKey(SESSION)) as PlanState;
-    expect(state.version).toBe(3);
+    expect(state.version).toBe(4);
+    expect(state.plan.presentation).toEqual(input().presentation);
     expect(presentationIdentity(state)).toBe(planCall.messageID);
     expect(validState(state)).toBe(true);
     expect(harness.approvals).toHaveLength(0);
-    expect(result.content).toMatch(/^Resumen\b/im);
-    expect(result.content).toMatch(/^Pasos\b/im);
-    expect(result.content).toMatch(/^Acciones y efectos exactos\b/im);
-    expect(result.content).toMatch(/termina.*turno.*espera.*solicitud posterior/is);
-    expect(validState({ ...state, version: 2 })).toBe(false);
+    expect(validState({ ...state, version: 3 })).toBe(false);
     expect(validState(tamperPresentationIdentity(state))).toBe(false);
+  });
+
+  test("malahor_plan delimita un unico Markdown foreground y ordena copiarlo como mensaje normal", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    const result = await harness.execute("plan", input(), call(SESSION, "malahor", "msg_foreground_envelope"));
+    const state = records.get(planKey(SESSION)) as PlanState;
+
+    expect(result.content).toMatch(/copia (?:exactamente )?(?:el )?Markdown[\s\S]*mensaje normal[\s\S]*foreground/i);
+    expect(result.content).toMatch(/(?:traza|output)[\s\S]*(?:tool|t[eé]cnic)[\s\S]*background[\s\S]*no cuenta[\s\S]*presentaci[oó]n/i);
+    expect(foregroundMarkdown(result.content)).toBe(renderPlan(state));
+    expect(result.content.match(/malahor-plan-foreground:start/g) ?? []).toHaveLength(1);
+    expect(result.content.match(/malahor-plan-foreground:end/g) ?? []).toHaveLength(1);
+    expect(foregroundMarkdown(result.content)).toMatch(/^## Qué haremos$/m);
+    expect(foregroundMarkdown(result.content)).toMatch(/^## Por qué$/m);
+    expect(foregroundMarkdown(result.content)).toMatch(/^## Siguiente acción$/m);
   });
 
   test("asistente revisa el plan pero bloquea la segunda confirmacion en el mismo turno", async () => {
@@ -807,9 +961,11 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeUndefined();
 
     const runCall = call(SESSION, "malahor", "msg_assistant_go");
-    await harness.execute("run", { digest: presented.digest }, runCall);
+    const runResult = await harness.execute("run", { digest: presented.digest }, runCall);
     expect(phases[1]?.state?.authorizedAt).toBeUndefined();
-    expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeNumber();
+    const running = records.get(planKey(SESSION)) as PlanState;
+    expect(running.authorizedAt).toBeNumber();
+    expect(runResult.content).toBe(renderPlan(running));
     expect(harness.approvals.map((request) => request.action)).toEqual(["malahor_plan_review", "malahor_plan_run"]);
     const afterRun = { ...beforeRun, effect: "allow" };
     await evaluatePlanningPermission(afterRun, options, storage);
@@ -861,7 +1017,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await evaluatePlanningPermission(withOldApproval, options, storage);
     expect(withOldApproval.effect).toBe("deny");
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, options, storage)).rejects.toThrow();
-    await harness.execute("plan", { summary: "Concepto", steps: [], actions: [] });
+    await harness.execute("plan", conceptInput("Concepto"));
     expect(harness.approvals).toHaveLength(1);
     const concept = records.get(planKey(SESSION)) as PlanState;
     await expect(harness.execute("run", { digest: concept.digest })).rejects.toThrow();
@@ -878,12 +1034,18 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await harness.execute("plan", input(), call(SESSION, "malahor", "msg_control_plan"));
     const presented = records.get(planKey(SESSION)) as PlanState;
     await harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_control_go"));
-    await harness.execute("plan_control", { action: "pause" }, call(SESSION, "malahor", "msg_control_pause"));
-    expect((records.get(planKey(SESSION)) as PlanState).phase).toBe("paused");
-    await harness.execute("plan_control", { action: "resume" }, call(SESSION, "malahor", "msg_control_resume"));
-    expect((records.get(planKey(SESSION)) as PlanState).phase).toBe("running");
-    await harness.execute("plan_control", { action: "complete" }, call(SESSION, "malahor", "msg_control_complete"));
-    expect((records.get(planKey(SESSION)) as PlanState).phase).toBe("completed");
+    const pausedResult = await harness.execute("plan_control", { action: "pause" }, call(SESSION, "malahor", "msg_control_pause"));
+    const paused = records.get(planKey(SESSION)) as PlanState;
+    expect(paused.phase).toBe("paused");
+    expect(pausedResult.content).toBe(renderPlan(paused));
+    const resumedResult = await harness.execute("plan_control", { action: "resume" }, call(SESSION, "malahor", "msg_control_resume"));
+    const resumed = records.get(planKey(SESSION)) as PlanState;
+    expect(resumed.phase).toBe("running");
+    expect(resumedResult.content).toBe(renderPlan(resumed));
+    const completedResult = await harness.execute("plan_control", { action: "complete" }, call(SESSION, "malahor", "msg_control_complete"));
+    const completed = records.get(planKey(SESSION)) as PlanState;
+    expect(completed.phase).toBe("completed");
+    expect(completedResult.content).toBe(renderPlan(completed));
     expect(harness.approvals.map((item) => item.action)).toEqual([
       "malahor_plan_run", "malahor_plan_resume", "malahor_plan_complete",
     ]);
@@ -1057,10 +1219,12 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await injectPlanningInstructions(instructions, options, storage);
     await injectPlanningInstructions(instructions, options, storage);
     const text = (instructions.system as Array<{ text: string }>)[0]?.text ?? "";
-    expect(text.match(/malahor-planning:v3/g) ?? []).toHaveLength(1);
+    expect(text.match(/malahor-planning:v4/g) ?? []).toHaveLength(1);
+    expect(text).not.toContain("malahor-planning:v3");
     expect(text).not.toContain("malahor-planning:v1");
-    expect(text).toMatch(/plan completo/i);
-    expect(text).toMatch(/termina(?:r)? (?:este )?turno/i);
+    expect(text).toMatch(/presentaci[oó]n foreground[\s\S]*exactamente una vez[\s\S]*mensaje normal/i);
+    expect(text).toMatch(/(?:traza|output)[\s\S]*background[\s\S]*no cuenta[\s\S]*presentaci[oó]n/i);
+    expect(text).toMatch(/cop(?:ia|iar)[\s\S]*Markdown[\s\S]*termina(?:r)? (?:este )?turno/i);
     expect(text).toMatch(/solicitud posterior/i);
     expect(text).toMatch(/\bgo\b/i);
     expect(text).toMatch(/\bimplementa\b/i);
@@ -1075,6 +1239,31 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const specialist: Record<string, unknown> = { sessionID: SESSION, agent: "malahor-testing", system: [] };
     await injectPlanningInstructions(specialist, options, storage);
     expect(specialist.system).toEqual([]);
+  });
+
+  test("actualiza el marker v3 a v4 en vez de conservar instrucciones antiguas", async () => {
+    const legacy: Record<string, unknown> = {
+      sessionID: SESSION,
+      agent: "malahor",
+      system: [{ type: "text", text: "base\n\n<!-- malahor-planning:v3 -->\ninstrucciones antiguas" }],
+    };
+    await injectPlanningInstructions(legacy, options, storage);
+    const text = (legacy.system as Array<{ text: string }>)[0]?.text ?? "";
+    expect(text.match(/malahor-planning:v4/g) ?? []).toHaveLength(1);
+    expect(text).not.toContain("malahor-planning:v3");
+    expect(text).not.toContain("instrucciones antiguas");
+  });
+
+  test("el protocolo exige una sola presentacion foreground y terminar el turno antes de run", () => {
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(
+      /malahor_plan[\s\S]*presentaci[oó]n foreground[\s\S]*exactamente una vez[\s\S]*mensaje normal/i,
+    );
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(
+      /(?:traza|output)[\s\S]*(?:tool|t[eé]cnic)[\s\S]*background[\s\S]*no cuenta[\s\S]*presentaci[oó]n/i,
+    );
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(
+      /cop(?:ia|iar)[\s\S]*(?:Markdown|presentaci[oó]n)[\s\S]*termina(?:r)? (?:este )?turno[\s\S]*no invoques malahor_run/i,
+    );
   });
 
   test("plugin V2 registra tools y hooks con un host estructural sintético, sin instalacion", async () => {

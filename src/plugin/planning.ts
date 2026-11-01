@@ -49,6 +49,8 @@ const REVIEW_ACTION = "malahor_plan_review";
 const RUN_ACTION = "malahor_plan_run";
 const RESUME_ACTION = "malahor_plan_resume";
 const COMPLETE_ACTION = "malahor_plan_complete";
+const FOREGROUND_START = "<!-- malahor-plan-foreground:start -->";
+const FOREGROUND_END = "<!-- malahor-plan-foreground:end -->";
 const fallbackAuthority = DEFAULT_PLANNING_AUTHORITY;
 const READ_ONLY_TOOLS = new Set([
   "read", "glob", "grep", "webfetch", "websearch", "list", "question", "skill",
@@ -173,11 +175,29 @@ export async function registerPlanningTools(
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Presenta el plan completo y termina el turno. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion. Asesor solo permite concepto.",
+      description: "Registra el plan y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. La traza tecnica en background no cuenta. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
       input: {
         type: "object", properties: {
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
+          presentation: {
+            type: "object", properties: {
+              objective: { type: "string" },
+              rationale: { type: "string" },
+              steps: { type: "array", items: {
+                type: "object", properties: {
+                  title: { type: "string" }, what: { type: "string" },
+                  why: { type: "string" }, expected: { type: "string" },
+                },
+                required: ["title", "what", "why", "expected"], additionalProperties: false,
+              } },
+              changes: { type: "array", items: { type: "string" } },
+              exclusions: { type: "array", items: { type: "string" } },
+              completionCriteria: { type: "array", items: { type: "string" } },
+            },
+            required: ["objective", "rationale", "steps", "changes", "exclusions", "completionCriteria"],
+            additionalProperties: false,
+          },
           actions: { type: "array", items: {
             type: "object", properties: { action: { type: "string" }, resource: { type: "string" } },
             required: ["action", "resource"], additionalProperties: false,
@@ -186,7 +206,7 @@ export async function registerPlanningTools(
             type: "object", properties: { planID: { type: "string" }, revision: { type: "string" } },
             required: ["planID", "revision"], additionalProperties: false,
           } },
-        }, required: ["summary", "steps", "actions"], additionalProperties: false,
+        }, required: ["summary", "steps", "presentation", "actions"], additionalProperties: false,
       },
       options: { namespace: "malahor", codemode: false },
       execute: async (value: unknown, call: ToolCall) => {
@@ -202,7 +222,10 @@ export async function registerPlanningTools(
         const state = await presentPlan(
           resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority,
         );
-        return { content: `${renderPlan(state)}\nDigest completo: ${state.digest}` };
+        return { content: foregroundPlanResult(state), metadata: {
+          kind: "malahor.plan.presentation", version: 1,
+          planID: state.planID, revision: state.revision, phase: state.phase,
+        } };
       },
     });
     editor.add({
@@ -217,9 +240,10 @@ export async function registerPlanningTools(
         const state = await requestPlanExecution(
           resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call), authority,
         );
-        return { content: state.phase === "blocked"
-          ? `Plan ${state.planID.slice(0, 12)} autorizado pero bloqueado por dependencias. No se ejecutara automaticamente.`
-          : `Plan ${state.planID.slice(0, 12)} revision ${state.revision.slice(0, 12)} en ejecucion sin caducidad temporal. Solo operaciones declaradas; guardrails vigentes.` };
+        return { content: renderPlan(state), metadata: {
+          kind: "malahor.plan.state", version: 1,
+          planID: state.planID, revision: state.revision, phase: state.phase,
+        } };
       },
     });
     editor.add({
@@ -242,6 +266,20 @@ export async function registerPlanningTools(
       },
     });
   });
+}
+
+function foregroundPlanResult(state: PlanState): string {
+  return [
+    "Presentacion requerida: copia exactamente el Markdown delimitado como mensaje normal; esa sera la presentacion foreground canonica.",
+    "La traza tecnica del tool en background no cuenta como presentacion y no sustituye este contenido.",
+    "",
+    FOREGROUND_START,
+    renderPlan(state),
+    FOREGROUND_END,
+    "",
+    `Digest completo: ${state.digest}`,
+    "Despues de copiar el Markdown, termina este turno y espera una solicitud posterior del usuario.",
+  ].join("\n");
 }
 
 function planningAdapter(storage: PlanningStorage, port: ApprovalPort, call: ToolCall): PlanningAdapter {
@@ -275,12 +313,12 @@ async function delegatedSpecialist(
 
 export function planKey(sessionID: string): string {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID)) throw new Error("ID de sesion no evaluable.");
-  return `planning/v3/sessions/${sessionID}`;
+  return `planning/v4/sessions/${sessionID}`;
 }
 
 export function planRecordKey(planID: string): string {
   if (!/^[a-f0-9]{32}$/.test(planID)) throw new Error("ID de plan no evaluable.");
-  return `planning/v3/plans/${planID}`;
+  return `planning/v4/plans/${planID}`;
 }
 
 export function planRevisionKey(planID: string, revision: string): string {
@@ -300,12 +338,13 @@ export async function injectPlanningInstructions(
   const instructions = !resolved || !storage
     ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host."
     : mode === "advisor"
-      ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps y actions vacios."
+      ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps, presentation.steps, presentation.changes y actions van vacios."
       : [
         `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
         mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar."
           : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
-        "Despues de malahor_plan, muestra el plan completo y termina este turno; no invoques malahor_run en la misma respuesta.",
+        "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
+        "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
         "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
         "Un go previo a la presentacion no aprueba un plan todavia no visto.",
         "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
@@ -316,18 +355,22 @@ export async function injectPlanningInstructions(
           : "Estado: sin plan vigente.",
       ].join("\n");
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v3 -->";
-  const previousMarker = "<!-- malahor-planning:v2 -->";
-  const legacyMarker = "<!-- malahor-planning:v1 -->";
+  const marker = "<!-- malahor-planning:v4 -->";
+  const previousMarkers = [
+    "<!-- malahor-planning:v3 -->",
+    "<!-- malahor-planning:v2 -->",
+    "<!-- malahor-planning:v1 -->",
+  ];
   for (const part of system) {
     if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") continue;
-    if (part.text.includes(marker)) {
+    const text = part.text;
+    if (text.includes(marker)) {
       input.system = system;
       return;
     }
-    const legacyIndex = Math.max(part.text.indexOf(previousMarker), part.text.indexOf(legacyMarker));
+    const legacyIndex = Math.max(...previousMarkers.map((previous) => text.indexOf(previous)));
     if (legacyIndex >= 0) {
-      part.text = `${part.text.slice(0, legacyIndex).trimEnd()}\n\n${marker}\n${instructions}`;
+      part.text = `${text.slice(0, legacyIndex).trimEnd()}\n\n${marker}\n${instructions}`;
       input.system = system;
       return;
     }

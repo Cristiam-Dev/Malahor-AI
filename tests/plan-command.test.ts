@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 
-import { authorizePlan, proposePlan, type PlanScope, type PlanState } from "../src/cli/core/planning";
+import { authorizePlan, proposePlan, renderPlan, type PlanScope, type PlanState } from "../src/cli/core/planning";
 import { createPlanningAuthority } from "../src/cli/core/planning-authority";
 import type { PluginAdapterOptions } from "../src/cli/core/hooks/plugin-adapter";
 import { registerPlanCommand, type PlanCommandHost } from "../src/plugin/plan-command";
@@ -31,7 +31,24 @@ describe("/malahor-plan", () => {
   test("status, pause, resume y revoke usan el mismo estado firmado", async () => {
     const authority = createPlanningAuthority(Buffer.alloc(32, 7));
     const scope: PlanScope = { sessionID: SESSION, project: "demo", mode: "executor", policyRevision: "1".repeat(32) };
-    const presented = proposePlan(scope, { summary: "fixture", steps: ["editar"], actions: [{ action: "edit", resource: path.join(repo, "a.ts") }] }, Date.now(), "msg-plan", undefined, authority);
+    const presented = proposePlan(scope, {
+      summary: "fixture",
+      steps: ["editar"],
+      presentation: {
+        objective: "Editar exclusivamente el fixture declarado.",
+        rationale: "El comando debe mostrar el mismo plan humano que el resto de adaptadores.",
+        steps: [{
+          title: "Editar el fixture",
+          what: "Modificar a.ts.",
+          why: "Es el unico recurso incluido en el plan.",
+          expected: "a.ts queda actualizado sin tocar otras rutas.",
+        }],
+        changes: ["a.ts"],
+        exclusions: ["Cualquier otra ruta"],
+        completionCriteria: ["El estado refleja la transicion solicitada"],
+      },
+      actions: [{ action: "edit", resource: path.join(repo, "a.ts") }],
+    }, Date.now(), "msg-plan", undefined, authority);
     const running = authorizePlan(presented, presented.digest, Date.now(), authority);
     const records = new Map<string, unknown>();
     const storage: PlanningStorage = { get: async (key) => records.get(key), set: async (key, value) => { records.set(key, value); } };
@@ -59,13 +76,18 @@ describe("/malahor-plan", () => {
     const invoke = (action: string) => execute({ sessionID: SESSION, prompt: { text: `/malahor-plan ${action}` }, delivery: "steer" });
 
     await invoke("status");
-    expect(messages.at(-1)).toContain("Estado: running");
+    expect(messages.at(-1)).toBe(renderPlan(records.get(planKey(SESSION)) as PlanState));
+    expect(messages.at(-1)).toMatch(/^## Qué haremos$/m);
+    expect(messages.at(-1)).toMatch(/^## Por qué$/m);
     await invoke("pause");
+    expect(messages.at(-1)).toBe(renderPlan(records.get(planKey(SESSION)) as PlanState));
     expect(messages.at(-1)).toContain("Estado: paused");
     await invoke("resume");
+    expect(messages.at(-1)).toBe(renderPlan(records.get(planKey(SESSION)) as PlanState));
     expect(messages.at(-1)).toContain("Estado: running");
     expect(permissions).toEqual(["malahor_plan_resume"]);
     await invoke("revoke");
+    expect(messages.at(-1)).toBe(renderPlan(records.get(planKey(SESSION)) as PlanState));
     expect(messages.at(-1)).toContain("Estado: revoked");
     await expect(invoke("resume")).rejects.toThrow();
   });

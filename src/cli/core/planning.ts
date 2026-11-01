@@ -4,6 +4,12 @@ import {
   createEphemeralPlanningAuthority,
   type PlanningAuthority,
 } from "./planning-authority";
+import {
+  normalizePlanPresentation,
+  renderPlanPresentation,
+  validPlanPresentation,
+  type PlanPresentationInput,
+} from "./plan-presentation";
 
 export interface PlannedAction {
   action: string;
@@ -18,6 +24,7 @@ export interface PlanDependency {
 export interface PlanInput {
   summary: string;
   steps: string[];
+  presentation: PlanPresentationInput;
   actions: PlannedAction[];
   dependencies?: PlanDependency[];
 }
@@ -27,7 +34,7 @@ export type PlanPhase = "presented" | "reviewed" | "running" | "paused" | "block
 export type PlanControl = "status" | "pause" | "resume" | "revoke" | "complete";
 
 export interface PlanState {
-  version: 3;
+  version: 4;
   planID: string;
   sessionID: string;
   project: string;
@@ -128,7 +135,7 @@ export async function requestPlanExecution(
     const pending = await pendingDependencies(fresh, adapter, authority);
     const next = pending.length > 0
       ? blockPlan(fresh, pending, Date.now(), authority)
-      : authorizePlan(fresh, fresh.digest, Date.now(), authority);
+      : authorizePlanAfterDependencyValidation(fresh, fresh.digest, Date.now(), authority);
     await adapter.save(next);
     return next;
   });
@@ -213,7 +220,7 @@ export function proposePlan(
   const revision = randomID();
   const digest = digestPlan(scope, plan, planID, revision, presentationInteractionID);
   return seal({
-    version: 3, planID, ...scope, presentationInteractionID, plan, digest, revision,
+    version: 4, planID, ...scope, presentationInteractionID, plan, digest, revision,
     phase: "presented", createdAt: now, updatedAt: now, proof: "",
   }, authority);
 }
@@ -236,10 +243,29 @@ export function authorizePlan(
   authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
 ): PlanState {
   assertCurrent(state, digest, now, authority);
+  assertReadyForAuthorization(state);
+  if (state.plan.dependencies.length > 0) throw new Error("Las dependencias deben validarse mediante el adaptador antes de ejecutar.");
+  return startPlan(state, now, authority);
+}
+
+function authorizePlanAfterDependencyValidation(
+  state: PlanState,
+  digest: string,
+  now: number,
+  authority: PlanningAuthority,
+): PlanState {
+  assertCurrent(state, digest, now, authority);
+  assertReadyForAuthorization(state);
+  return startPlan(state, now, authority);
+}
+
+function assertReadyForAuthorization(state: PlanState): void {
   if (state.mode === "advisor" || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) {
     throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
   }
-  if (state.plan.dependencies.length > 0) throw new Error("Las dependencias deben validarse mediante el adaptador antes de ejecutar.");
+}
+
+function startPlan(state: PlanState, now: number, authority: PlanningAuthority): PlanState {
   return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
 }
 
@@ -258,7 +284,7 @@ export function planAllows(
 export function validState(state: unknown, authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY): state is PlanState {
   if (!state || typeof state !== "object" || Array.isArray(state)) return false;
   const value = state as Record<string, unknown>;
-  if (value.version !== 3 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID)
+  if (value.version !== 4 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID)
     || typeof value.sessionID !== "string" || typeof value.project !== "string"
     || !["advisor", "assistant", "executor"].includes(String(value.mode))
     || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision)
@@ -268,7 +294,7 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
     || typeof value.phase !== "string" || !PHASES.has(value.phase as PlanPhase)
     || !validTime(value.createdAt) || !validTime(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number)
     || !validOptionalTimes(value)
-    || !validPlan(value.plan)
+    || !validPlan(value.plan, value.mode as MalahorMode)
     || typeof value.proof !== "string") return false;
   const plan = value.plan as Required<PlanInput>;
   const expected = digestPlan({
@@ -280,31 +306,7 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
 }
 
 export function renderPlan(state: PlanState): string {
-  const dependencies = state.plan.dependencies.length > 0
-    ? state.plan.dependencies.map((item) => `- ${item.planID}@${item.revision.slice(0, 12)}`)
-    : ["- Ninguna."];
-  return [
-    `Plan Malahor (${state.mode}) · ${state.planID.slice(0, 12)} · revision ${state.revision.slice(0, 12)}`,
-    `Estado: ${state.phase}`,
-    "",
-    "Resumen",
-    state.plan.summary,
-    "",
-    "Pasos",
-    ...(state.plan.steps.length > 0 ? state.plan.steps.map((step, index) => `${index + 1}. ${step}`) : ["- Sin pasos ejecutables."]),
-    "",
-    "Dependencias",
-    ...dependencies,
-    "",
-    "Acciones y efectos exactos",
-    ...(state.plan.actions.length > 0
-      ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`)
-      : ["- Ninguna accion ejecutable."]),
-    "",
-    "Vigencia: sin caducidad temporal; cambia solo por revision, estado, proyecto, modo o politica.",
-    state.mode === "advisor" ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto."
-      : "Siguiente: muestra el plan completo y termina este turno. Espera una solicitud posterior del usuario antes de pedir aprobacion.",
-  ].join("\n");
+  return renderPlanPresentation(state);
 }
 
 function normalizePlan(mode: MalahorMode, input: PlanInput): Required<PlanInput> {
@@ -329,9 +331,10 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): Required<PlanInput>
     throw new Error("Dependencia de plan invalida.");
   }
   if (JSON.stringify(input).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
+  const presentation = normalizePlanPresentation(input.presentation, mode);
   const actions = uniqueSorted(input.actions, (item) => `${item.action}\0${item.resource}`);
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\0${item.revision}`);
-  return { summary: input.summary.trim(), steps: [...input.steps], actions, dependencies: normalizedDependencies };
+  return { summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies };
 }
 
 async function assertDependencyGraph(state: PlanState, adapter: PlanningAdapter, authority: PlanningAuthority): Promise<void> {
@@ -399,11 +402,12 @@ function samePlanScope(state: PlanState, scope: PlanScope): boolean {
     && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
 }
 
-function validPlan(value: unknown): value is Required<PlanInput> {
+function validPlan(value: unknown, mode: MalahorMode): value is Required<PlanInput> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const plan = value as Record<string, unknown>;
   return typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions)
     && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string")
+    && validPlanPresentation(plan.presentation, mode)
     && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
       && ACTIONS.has(String((entry as Record<string, unknown>).action))
       && typeof (entry as Record<string, unknown>).resource === "string")

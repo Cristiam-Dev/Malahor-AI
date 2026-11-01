@@ -4324,8 +4324,11 @@ function recordValue3(value) {
 }
 
 // src/plugin/protocol.ts
-var MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v2 -->";
-var LEGACY_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v1 -->";
+var MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v3 -->";
+var LEGACY_PROTOCOL_MARKERS = [
+  "<!-- malahor-runtime-protocol:v2 -->",
+  "<!-- malahor-runtime-protocol:v1 -->"
+];
 var MALAHOR_RUNTIME_PROTOCOL = `${MALAHOR_PROTOCOL_MARKER}
 PROTOCOLO OPERATIVO MALAHOR
 
@@ -4348,7 +4351,7 @@ Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
 - Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
 - Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. La autorización del plan no caduca por tiempo; si cambian revisión, efectos, proyecto, modo o política, deja de autorizar.
-- En asistente y ejecutor, despues de malahor_plan muestra el plan completo y termina el turno. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
+- En asistente y ejecutor, despues de malahor_plan copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno. Una traza u output tecnico del tool en background no cuenta como presentacion. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
@@ -4416,7 +4419,7 @@ function injectMalahorProtocol(input) {
   for (const part of system) {
     if (!isTextPart3(part))
       continue;
-    const legacyAt = part.text.indexOf(LEGACY_PROTOCOL_MARKER);
+    const legacyAt = Math.max(...LEGACY_PROTOCOL_MARKERS.map((marker) => part.text.indexOf(marker)));
     if (legacyAt >= 0) {
       part.text = `${part.text.slice(0, legacyAt).trimEnd()}
 
@@ -6111,6 +6114,209 @@ function hash(input) {
 
 // src/cli/core/planning.ts
 import { createHash as createHash6, randomBytes as randomBytes4 } from "node:crypto";
+
+// src/cli/core/plan-presentation.ts
+var MAX_STEPS = 30;
+var MAX_ITEMS = 30;
+function normalizePlanPresentation(value, mode) {
+  if (!isRecord5(value))
+    throw new Error("El plan necesita una presentacion humana estructurada.");
+  const objective = normalizedText(value.objective, "objetivo", 1000);
+  const rationale = normalizedText(value.rationale, "motivo", 2000);
+  const steps = normalizedSteps(value.steps);
+  const changes = normalizedList(value.changes, "cambios");
+  const exclusions = normalizedList(value.exclusions, "exclusiones");
+  const completionCriteria = normalizedList(value.completionCriteria, "criterios de finalizacion");
+  if (mode === "advisor") {
+    if (steps.length !== 0 || changes.length !== 0) {
+      throw new Error("Asesor solo presenta concepto: sin pasos ni cambios ejecutables.");
+    }
+  } else if (steps.length === 0) {
+    throw new Error("La presentacion del plan requiere pasos explicados.");
+  }
+  if (exclusions.length === 0) {
+    throw new Error("La presentacion debe declarar que queda fuera del alcance.");
+  }
+  if (completionCriteria.length === 0) {
+    throw new Error("La presentacion debe declarar criterios de finalizacion.");
+  }
+  if (mode !== "advisor" && changes.length === 0) {
+    throw new Error("La presentacion debe declarar que cambiara.");
+  }
+  return { objective, rationale, steps, changes, exclusions, completionCriteria };
+}
+function validPlanPresentation(value, mode) {
+  try {
+    if (!isRecord5(value))
+      return false;
+    return samePresentation(value, normalizePlanPresentation(value, mode));
+  } catch {
+    return false;
+  }
+}
+function renderPlanPresentation(state) {
+  const presentation = state.plan.presentation;
+  const dependencies = state.plan.dependencies.length > 0 ? state.plan.dependencies.map(({ planID, revision }) => `- ${planID}@${revision}`) : ["- Ninguna."];
+  const actions = state.plan.actions.length > 0 ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${JSON.stringify(resource)}`) : ["- Ninguna acción ejecutable."];
+  const steps = presentation.steps.length > 0 ? presentation.steps.flatMap((step, index) => [
+    `### ${index + 1}. ${step.title}`,
+    `- **Qué:** ${step.what}`,
+    `- **Por qué:** ${step.why}`,
+    `- **Resultado esperado:** ${step.expected}`
+  ]) : ["- Sin pasos ejecutables."];
+  return [
+    `Plan Malahor (${state.mode}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`,
+    `Estado: ${state.phase}`,
+    "",
+    "## Qué haremos",
+    presentation.objective,
+    "",
+    "## Por qué",
+    presentation.rationale,
+    "",
+    "## Pasos",
+    ...steps,
+    "",
+    "## Qué cambiará",
+    ...listOrNone(presentation.changes),
+    "",
+    "## Qué no cambiará",
+    ...listOrNone(presentation.exclusions),
+    "",
+    "## Aprobaciones",
+    ...approvalLines(state),
+    "",
+    "## Cómo sabremos que terminó",
+    ...presentation.completionCriteria.map((item) => `- ${item}`),
+    "",
+    "## Dependencias",
+    ...dependencies,
+    "",
+    "## Efectos exactos",
+    ...actions,
+    "",
+    "## Siguiente acción",
+    nextAction(state),
+    "",
+    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política."
+  ].join(`
+`);
+}
+function approvalLines(state) {
+  if (["completed", "revoked", "superseded"].includes(state.phase)) {
+    return [`- No hay ninguna aprobación pendiente; el plan está ${phaseLabel(state.phase)}.`];
+  }
+  if (state.mode === "advisor") {
+    return ["- No requiere aprobación: el modo asesor no ejecuta acciones."];
+  }
+  if (state.phase === "running" || state.phase === "paused" || state.phase === "blocked") {
+    return ["- La ejecución ya fue autorizada para esta revisión y únicamente para sus efectos exactos."];
+  }
+  if (state.mode === "executor") {
+    return ["- Requiere una aprobación previa en un turno posterior antes de ejecutar los efectos exactos."];
+  }
+  if (state.phase === "presented") {
+    return [
+      "- Primera confirmación: revisar este plan; no autoriza la ejecución.",
+      "- Segunda confirmación: en un turno posterior, autorizar únicamente sus efectos exactos."
+    ];
+  }
+  return [
+    "- Primera confirmación completada: el plan fue revisado sin autorizar su ejecución.",
+    "- Falta la segunda confirmación para ejecutar únicamente sus efectos exactos."
+  ];
+}
+function nextAction(state) {
+  if (state.phase === "completed")
+    return "Plan terminado; no hay ninguna acción pendiente.";
+  if (state.phase === "revoked")
+    return "Plan revocado; no hay ninguna acción ejecutable.";
+  if (state.phase === "superseded")
+    return "Plan reemplazado por una revisión posterior; no lo ejecutes.";
+  if (state.phase === "paused")
+    return "Solicita reanudar este mismo plan cuando corresponda.";
+  if (state.phase === "blocked")
+    return "Resuelve sus dependencias y solicita reanudarlo; nunca arrancará automáticamente.";
+  if (state.phase === "running")
+    return "Ejecuta únicamente los efectos exactos declarados y conserva los demás guardrails.";
+  if (state.mode === "advisor")
+    return "Ninguna ejecución: presenta el concepto y termina el turno.";
+  if (state.mode === "assistant" && state.phase === "presented") {
+    return "Completa la primera confirmación de revisión; no ejecutes acciones en este turno.";
+  }
+  return "Muestra esta presentación completa y termina el turno. En un turno posterior, el usuario puede responder `go` o `implementa` para solicitar la aprobación correspondiente.";
+}
+function phaseLabel(phase) {
+  if (phase === "completed")
+    return "completado";
+  if (phase === "revoked")
+    return "revocado";
+  return "reemplazado";
+}
+function normalizedSteps(value) {
+  if (!Array.isArray(value) || value.length > MAX_STEPS) {
+    throw new Error("Pasos de presentacion invalidos o demasiado extensos.");
+  }
+  return value.map((step) => {
+    if (!isRecord5(step))
+      throw new Error("Paso de presentacion invalido.");
+    return {
+      title: normalizedText(step.title, "titulo de paso", 200),
+      what: normalizedText(step.what, "que del paso", 1200),
+      why: normalizedText(step.why, "por que del paso", 1200),
+      expected: normalizedText(step.expected, "resultado esperado", 1200)
+    };
+  });
+}
+function normalizedList(value, label) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw new Error(`Lista de ${label} invalida o demasiado extensa.`);
+  }
+  return value.map((item) => normalizedText(item, label, 1000));
+}
+function normalizedText(value, label, max) {
+  if (typeof value !== "string")
+    throw new Error(`Campo de ${label} invalido.`);
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized || normalized.length > max)
+    throw new Error(`Campo de ${label} invalido o demasiado extenso.`);
+  return normalized;
+}
+function listOrNone(items) {
+  return items.length > 0 ? items.map((item) => `- ${item}`) : ["- Ninguno."];
+}
+function samePresentation(value, normalized) {
+  if (!hasExactKeys(value, [
+    "objective",
+    "rationale",
+    "steps",
+    "changes",
+    "exclusions",
+    "completionCriteria"
+  ]))
+    return false;
+  return value.objective === normalized.objective && value.rationale === normalized.rationale && sameSteps(value.steps, normalized.steps) && sameStrings(value.changes, normalized.changes) && sameStrings(value.exclusions, normalized.exclusions) && sameStrings(value.completionCriteria, normalized.completionCriteria);
+}
+function sameSteps(value, normalized) {
+  return Array.isArray(value) && value.length === normalized.length && value.every((step, index) => {
+    if (!isRecord5(step) || !hasExactKeys(step, ["title", "what", "why", "expected"]))
+      return false;
+    const expected = normalized[index];
+    return step.title === expected.title && step.what === expected.what && step.why === expected.why && step.expected === expected.expected;
+  });
+}
+function sameStrings(value, normalized) {
+  return Array.isArray(value) && value.length === normalized.length && value.every((item, index) => item === normalized[index]);
+}
+function hasExactKeys(value, expected) {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+function isRecord5(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/cli/core/planning.ts
 var ACTIONS = new Set(["edit", "shell", "subagent"]);
 var PHASES = new Set([
   "presented",
@@ -6168,7 +6374,7 @@ async function requestPlanExecution(scope, digest, executionInteractionID, adapt
     if (!sameRevision(fresh, stored, authority))
       throw new Error("El plan cambio durante la orden: vuelve a presentarlo.");
     const pending = await pendingDependencies(fresh, adapter, authority);
-    const next = pending.length > 0 ? blockPlan(fresh, pending, Date.now(), authority) : authorizePlan(fresh, fresh.digest, Date.now(), authority);
+    const next = pending.length > 0 ? blockPlan(fresh, pending, Date.now(), authority) : authorizePlanAfterDependencyValidation(fresh, fresh.digest, Date.now(), authority);
     await adapter.save(next);
     return next;
   });
@@ -6258,7 +6464,7 @@ function proposePlan(scope, input, now = Date.now(), presentationInteractionID =
   const revision = randomID();
   const digest = digestPlan(scope, plan, planID, revision, presentationInteractionID);
   return seal({
-    version: 3,
+    version: 4,
     planID,
     ...scope,
     presentationInteractionID,
@@ -6277,13 +6483,17 @@ function reviewPlan(state, digest, now = Date.now(), authority = DEFAULT_PLANNIN
     throw new Error("Revision de plan no aplicable.");
   return seal({ ...state, phase: "reviewed", reviewedAt: now, updatedAt: now }, authority);
 }
-function authorizePlan(state, digest, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
+function authorizePlanAfterDependencyValidation(state, digest, now, authority) {
   assertCurrent(state, digest, now, authority);
+  assertReadyForAuthorization(state);
+  return startPlan(state, now, authority);
+}
+function assertReadyForAuthorization(state) {
   if (state.mode === "advisor" || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) {
     throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
   }
-  if (state.plan.dependencies.length > 0)
-    throw new Error("Las dependencias deben validarse mediante el adaptador antes de ejecutar.");
+}
+function startPlan(state, now, authority) {
   return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
 }
 function planAllows(state, scope, operation, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
@@ -6295,7 +6505,7 @@ function validState(state, authority = DEFAULT_PLANNING_AUTHORITY) {
   if (!state || typeof state !== "object" || Array.isArray(state))
     return false;
   const value = state;
-  if (value.version !== 3 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || !validPlan(value.plan) || typeof value.proof !== "string")
+  if (value.version !== 4 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || !validPlan(value.plan, value.mode) || typeof value.proof !== "string")
     return false;
   const plan = value.plan;
   const expected = digestPlan({
@@ -6309,27 +6519,7 @@ function validState(state, authority = DEFAULT_PLANNING_AUTHORITY) {
   return authority.verify(statePayload(value), value.proof);
 }
 function renderPlan(state) {
-  const dependencies = state.plan.dependencies.length > 0 ? state.plan.dependencies.map((item) => `- ${item.planID}@${item.revision.slice(0, 12)}`) : ["- Ninguna."];
-  return [
-    `Plan Malahor (${state.mode}) · ${state.planID.slice(0, 12)} · revision ${state.revision.slice(0, 12)}`,
-    `Estado: ${state.phase}`,
-    "",
-    "Resumen",
-    state.plan.summary,
-    "",
-    "Pasos",
-    ...state.plan.steps.length > 0 ? state.plan.steps.map((step, index) => `${index + 1}. ${step}`) : ["- Sin pasos ejecutables."],
-    "",
-    "Dependencias",
-    ...dependencies,
-    "",
-    "Acciones y efectos exactos",
-    ...state.plan.actions.length > 0 ? state.plan.actions.map(({ action, resource }) => `- ${action}: ${resource}`) : ["- Ninguna accion ejecutable."],
-    "",
-    "Vigencia: sin caducidad temporal; cambia solo por revision, estado, proyecto, modo o politica.",
-    state.mode === "advisor" ? "Siguiente: ninguna ejecucion; el modo asesor solo permite concepto." : "Siguiente: muestra el plan completo y termina este turno. Espera una solicitud posterior del usuario antes de pedir aprobacion."
-  ].join(`
-`);
+  return renderPlanPresentation(state);
 }
 function normalizePlan(mode, input) {
   if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
@@ -6354,9 +6544,10 @@ function normalizePlan(mode, input) {
   }
   if (JSON.stringify(input).length > 12000)
     throw new Error("El plan es demasiado grande para una revision visible.");
+  const presentation = normalizePlanPresentation(input.presentation, mode);
   const actions = uniqueSorted(input.actions, (item) => `${item.action}\x00${item.resource}`);
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\x00${item.revision}`);
-  return { summary: input.summary.trim(), steps: [...input.steps], actions, dependencies: normalizedDependencies };
+  return { summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies };
 }
 async function assertDependencyGraph(state, adapter, authority) {
   const visit2 = async (dependencies, trail) => {
@@ -6415,11 +6606,11 @@ function sameRevision(value, expected, authority) {
 function samePlanScope(state, scope) {
   return state.sessionID === scope.sessionID && state.project === scope.project && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
 }
-function validPlan(value) {
+function validPlan(value, mode) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     return false;
   const plan = value;
-  return typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions) && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string") && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && ACTIONS.has(String(entry.action)) && typeof entry.resource === "string") && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && /^[a-f0-9]{32}$/.test(String(entry.planID)) && /^[a-f0-9]{32}$/.test(String(entry.revision)));
+  return typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions) && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string") && validPlanPresentation(plan.presentation, mode) && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && ACTIONS.has(String(entry.action)) && typeof entry.resource === "string") && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && /^[a-f0-9]{32}$/.test(String(entry.planID)) && /^[a-f0-9]{32}$/.test(String(entry.revision)));
 }
 function validPhase(value) {
   const phase = value.phase;
@@ -6479,6 +6670,8 @@ var REVIEW_ACTION = "malahor_plan_review";
 var RUN_ACTION = "malahor_plan_run";
 var RESUME_ACTION = "malahor_plan_resume";
 var COMPLETE_ACTION = "malahor_plan_complete";
+var FOREGROUND_START = "<!-- malahor-plan-foreground:start -->";
+var FOREGROUND_END = "<!-- malahor-plan-foreground:end -->";
 var fallbackAuthority = DEFAULT_PLANNING_AUTHORITY;
 var READ_ONLY_TOOLS = new Set([
   "read",
@@ -6596,12 +6789,35 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Presenta el plan completo y termina el turno. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion. Asesor solo permite concepto.",
+      description: "Registra el plan y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. La traza tecnica en background no cuenta. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
       input: {
         type: "object",
         properties: {
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
+          presentation: {
+            type: "object",
+            properties: {
+              objective: { type: "string" },
+              rationale: { type: "string" },
+              steps: { type: "array", items: {
+                type: "object",
+                properties: {
+                  title: { type: "string" },
+                  what: { type: "string" },
+                  why: { type: "string" },
+                  expected: { type: "string" }
+                },
+                required: ["title", "what", "why", "expected"],
+                additionalProperties: false
+              } },
+              changes: { type: "array", items: { type: "string" } },
+              exclusions: { type: "array", items: { type: "string" } },
+              completionCriteria: { type: "array", items: { type: "string" } }
+            },
+            required: ["objective", "rationale", "steps", "changes", "exclusions", "completionCriteria"],
+            additionalProperties: false
+          },
           actions: { type: "array", items: {
             type: "object",
             properties: { action: { type: "string" }, resource: { type: "string" } },
@@ -6615,7 +6831,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             additionalProperties: false
           } }
         },
-        required: ["summary", "steps", "actions"],
+        required: ["summary", "steps", "presentation", "actions"],
         additionalProperties: false
       },
       options: { namespace: "malahor", codemode: false },
@@ -6632,8 +6848,13 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority);
-        return { content: `${renderPlan(state)}
-Digest completo: ${state.digest}` };
+        return { content: foregroundPlanResult(state), metadata: {
+          kind: "malahor.plan.presentation",
+          version: 1,
+          planID: state.planID,
+          revision: state.revision,
+          phase: state.phase
+        } };
       }
     });
     editor.add({
@@ -6647,7 +6868,13 @@ Digest completo: ${state.digest}` };
           throw new Error("Solo el primario puede solicitar ejecucion.");
         const digest = text(value.digest);
         const state = await requestPlanExecution(resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call), authority);
-        return { content: state.phase === "blocked" ? `Plan ${state.planID.slice(0, 12)} autorizado pero bloqueado por dependencias. No se ejecutara automaticamente.` : `Plan ${state.planID.slice(0, 12)} revision ${state.revision.slice(0, 12)} en ejecucion sin caducidad temporal. Solo operaciones declaradas; guardrails vigentes.` };
+        return { content: renderPlan(state), metadata: {
+          kind: "malahor.plan.state",
+          version: 1,
+          planID: state.planID,
+          revision: state.revision,
+          phase: state.phase
+        } };
       }
     });
     editor.add({
@@ -6670,6 +6897,20 @@ Digest completo: ${state.digest}` };
       }
     });
   });
+}
+function foregroundPlanResult(state) {
+  return [
+    "Presentacion requerida: copia exactamente el Markdown delimitado como mensaje normal; esa sera la presentacion foreground canonica.",
+    "La traza tecnica del tool en background no cuenta como presentacion y no sustituye este contenido.",
+    "",
+    FOREGROUND_START,
+    renderPlan(state),
+    FOREGROUND_END,
+    "",
+    `Digest completo: ${state.digest}`,
+    "Despues de copiar el Markdown, termina este turno y espera una solicitud posterior del usuario."
+  ].join(`
+`);
 }
 function planningAdapter(storage, port, call) {
   return {
@@ -6699,12 +6940,12 @@ async function delegatedSpecialist(sessionID, scope, options, storage, authority
 function planKey(sessionID) {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
     throw new Error("ID de sesion no evaluable.");
-  return `planning/v3/sessions/${sessionID}`;
+  return `planning/v4/sessions/${sessionID}`;
 }
 function planRecordKey(planID) {
   if (!/^[a-f0-9]{32}$/.test(planID))
     throw new Error("ID de plan no evaluable.");
-  return `planning/v3/plans/${planID}`;
+  return `planning/v4/plans/${planID}`;
 }
 function planRevisionKey(planID, revision) {
   if (!/^[a-f0-9]{32}$/.test(revision))
@@ -6717,10 +6958,11 @@ async function injectPlanningInstructions(input, options, storage, authority = f
   const resolved = await resolvePlanningScope(input.sessionID, options);
   const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
   const mode = resolved?.scope.mode;
-  const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps y actions vacios." : [
+  const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps, presentation.steps, presentation.changes y actions van vacios." : [
     `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
     mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar." : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
-    "Despues de malahor_plan, muestra el plan completo y termina este turno; no invoques malahor_run en la misma respuesta.",
+    "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
+    "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
     "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
     "Un go previo a la presentacion no aprueba un plan todavia no visto.",
     "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
@@ -6731,19 +6973,23 @@ async function injectPlanningInstructions(input, options, storage, authority = f
   ].join(`
 `);
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v3 -->";
-  const previousMarker = "<!-- malahor-planning:v2 -->";
-  const legacyMarker = "<!-- malahor-planning:v1 -->";
+  const marker = "<!-- malahor-planning:v4 -->";
+  const previousMarkers = [
+    "<!-- malahor-planning:v3 -->",
+    "<!-- malahor-planning:v2 -->",
+    "<!-- malahor-planning:v1 -->"
+  ];
   for (const part of system) {
-    if (!isRecord5(part) || part.type !== "text" || typeof part.text !== "string")
+    if (!isRecord6(part) || part.type !== "text" || typeof part.text !== "string")
       continue;
-    if (part.text.includes(marker)) {
+    const text = part.text;
+    if (text.includes(marker)) {
       input.system = system;
       return;
     }
-    const legacyIndex = Math.max(part.text.indexOf(previousMarker), part.text.indexOf(legacyMarker));
+    const legacyIndex = Math.max(...previousMarkers.map((previous) => text.indexOf(previous)));
     if (legacyIndex >= 0) {
-      part.text = `${part.text.slice(0, legacyIndex).trimEnd()}
+      part.text = `${text.slice(0, legacyIndex).trimEnd()}
 
 ${marker}
 ${instructions}`;
@@ -6752,7 +6998,7 @@ ${instructions}`;
     }
   }
   const last = system.at(-1);
-  if (isRecord5(last) && last.type === "text" && typeof last.text === "string") {
+  if (isRecord6(last) && last.type === "text" && typeof last.text === "string") {
     last.text += `
 
 ${marker}
@@ -6829,7 +7075,7 @@ async function resolvePlanningScope(value, options) {
   }
 }
 function toolActions(tool, value, directory) {
-  const args = isRecord5(value) ? value : {};
+  const args = isRecord6(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
     if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path17.resolve(directory, cwd) !== path17.resolve(directory))))
       return;
@@ -6892,7 +7138,7 @@ function inside2(target, root) {
 function text(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord5(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function deny(input, message) {
@@ -7201,10 +7447,10 @@ async function writePending(options, sessionID, canonicalKey, kind, candidates, 
 }
 async function readRecord2(storage, sessionID) {
   const value = await storage.get(projectAffinityKey(sessionID));
-  if (!isRecord6(value) || value.schema !== 1 || value.sessionID !== sessionID)
+  if (!isRecord7(value) || value.schema !== 1 || value.sessionID !== sessionID)
     return;
   const canonicalKey = stringValue5(value.canonicalKey);
-  const pendingValue = isRecord6(value.pending) ? value.pending : undefined;
+  const pendingValue = isRecord7(value.pending) ? value.pending : undefined;
   const kind = pendingValue?.kind === "ambiguous" || pendingValue?.kind === "conflict" ? pendingValue.kind : undefined;
   const candidates = Array.isArray(pendingValue?.candidates) ? pendingValue.candidates.filter((item) => typeof item === "string") : [];
   return {
@@ -7235,7 +7481,7 @@ Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${r
 Proyecto ambiguo. Pregunta UNA sola vez cual proyecto usar entre: ${candidates}. La respuesta fijara la afinidad de esta sesion. No pidas claves tecnicas ni ejecutes operaciones protegidas antes de resolverlo.`;
 }
 function promptText(input) {
-  const prompt = isRecord6(input.prompt) ? input.prompt : undefined;
+  const prompt = isRecord7(input.prompt) ? input.prompt : undefined;
   return [stringValue5(prompt?.text), stringValue5(input.text), stringValue5(input.message)].filter(Boolean).join(`
 `);
 }
@@ -7253,7 +7499,7 @@ function collectPaths(value, output, depth) {
     value.forEach((item) => collectPaths(item, output, depth + 1));
     return;
   }
-  if (!isRecord6(value))
+  if (!isRecord7(value))
     return;
   for (const [key, item] of Object.entries(value)) {
     if (["path", "filePath", "file_path", "directory", "cwd", "workdir", "uri"].includes(key) && typeof item === "string") {
@@ -7313,15 +7559,15 @@ function stringValue5(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 function isTextPart4(value) {
-  return isRecord6(value) && value.type === "text" && typeof value.text === "string";
+  return isRecord7(value) && value.type === "text" && typeof value.text === "string";
 }
-function isRecord6(value) {
+function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/plugin/index.ts
 var PLUGIN_ID = "malahor";
-var PLUGIN_VERSION = "0.4.0";
+var PLUGIN_VERSION = "0.5.0";
 var STATE_SCHEMA = 1;
 var SESSION_HOOKS = [
   "session.prompt.before",
@@ -7335,12 +7581,12 @@ var SESSION_HOOKS = [
 ];
 var BLOCKING_SHELL_ASK_IDS = ["MAL-HOOK-PUSH-CLI-EVIDENCE"];
 function detectHost(value) {
-  if (!isRecord7(value))
+  if (!isRecord8(value))
     return "unknown";
-  const isV2 = isRecord7(value.session) && typeof value.session.hook === "function" || isRecord7(value.mcp) && typeof value.mcp.transform === "function" || isRecord7(value.agent) && typeof value.agent.transform === "function";
+  const isV2 = isRecord8(value.session) && typeof value.session.hook === "function" || isRecord8(value.mcp) && typeof value.mcp.transform === "function" || isRecord8(value.agent) && typeof value.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord7(value.client) && isRecord7(value.project) && typeof value.directory === "string";
+  const isV1 = isRecord8(value.client) && isRecord8(value.project) && typeof value.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -7358,7 +7604,7 @@ async function setupV2(context) {
   const criticalGaps = [];
   const domain = (name) => {
     const value = context[name];
-    if (!isRecord7(value) || typeof value.hook !== "function")
+    if (!isRecord8(value) || typeof value.hook !== "function")
       return;
     return value;
   };
@@ -7393,8 +7639,8 @@ async function setupV2(context) {
     };
     options.resolveParentSession = async (sessionID) => {
       const raw = await session.get?.({ sessionID });
-      const value = isRecord7(raw) && isRecord7(raw.data) ? raw.data : raw;
-      return isRecord7(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
+      const value = isRecord8(raw) && isRecord8(raw.data) ? raw.data : raw;
+      return isRecord8(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
     };
   }
   const affinityStorage = storage && typeof storage.get === "function" ? storage : undefined;
@@ -7440,7 +7686,7 @@ async function setupV2(context) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord7(input.env)) {
+      if (isRecord8(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -7483,27 +7729,27 @@ async function setupV2(context) {
     if (!freshnessRegistered)
       degraded.push("memory.freshness");
     const planningTools = typeof tool.transform === "function" ? tool : undefined;
-    const approvalPort = isRecord7(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
+    const approvalPort = isRecord8(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
     if (planningTools && approvalPort && planStorage && planningAuthority && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function")
           cleanups.push(() => registration.dispose?.());
-        capabilities["planning.v2"] = true;
+        capabilities["planning.v4"] = true;
       } catch (error) {
         warn(`herramientas de planeacion no registradas: ${error.message}`);
       }
     }
-    if (!capabilities["planning.v2"])
-      criticalGaps.push("planning.v2");
+    if (!capabilities["planning.v4"])
+      criticalGaps.push("planning.v4");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
-    criticalGaps.push("planning.v2");
+    criticalGaps.push("planning.v4");
   }
-  const modeHost = isRecord7(context.command) && typeof context.command.transform === "function" && isRecord7(context.session) && typeof context.session.synthetic === "function" && isRecord7(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const modeHost = isRecord8(context.command) && typeof context.command.transform === "function" && isRecord8(context.session) && typeof context.session.synthetic === "function" && isRecord8(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (modeHost) {
     try {
       const registration = await registerModeCommand(modeHost, options);
@@ -7516,7 +7762,7 @@ async function setupV2(context) {
   }
   if (!capabilities["mode.command"])
     degraded.push("mode.command");
-  const planCommandHost = isRecord7(context.command) && typeof context.command.transform === "function" && isRecord7(context.session) && typeof context.session.synthetic === "function" && isRecord7(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const planCommandHost = isRecord8(context.command) && typeof context.command.transform === "function" && isRecord8(context.session) && typeof context.session.synthetic === "function" && isRecord8(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (planCommandHost && planStorage && planningAuthority) {
     try {
       const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
@@ -7623,7 +7869,7 @@ async function setupV2(context) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord7(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
+    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord8(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -7654,12 +7900,12 @@ async function setupV2(context) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord7(input.client),
-    project: isRecord7(input.project),
+    client: isRecord8(input.client),
+    project: isRecord8(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord7(input.experimental_workspace)
+    workspace: isRecord8(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -7708,7 +7954,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback, cleanups) {
   try {
     const registration = await domain.hook(name, callback);
-    if (isRecord7(registration) && typeof registration.dispose === "function") {
+    if (isRecord8(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -7737,28 +7983,28 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context) {
-  const location = isRecord7(context.location) ? context.location : undefined;
+  const location = isRecord8(context.location) ? context.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function locationCanonical(context) {
-  const location = isRecord7(context.location) ? context.location : undefined;
-  const project = location && isRecord7(location.project) ? location.project : undefined;
+  const location = isRecord8(context.location) ? context.location : undefined;
+  const project = location && isRecord8(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function transformDomain(value) {
-  if (!isRecord7(value) || typeof value.transform !== "function")
+  if (!isRecord8(value) || typeof value.transform !== "function")
     return;
   return value;
 }
 function storageDomain(value) {
-  if (!isRecord7(value) || typeof value.set !== "function")
+  if (!isRecord8(value) || typeof value.set !== "function")
     return;
   return value;
 }
 function eventDomain(value) {
-  if (!isRecord7(value) || typeof value.subscribe !== "function")
+  if (!isRecord8(value) || typeof value.subscribe !== "function")
     return;
   return value;
 }
@@ -7845,7 +8091,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
         });
       }
     });
-    if (isRecord7(registration) && typeof registration.dispose === "function") {
+    if (isRecord8(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -7870,18 +8116,18 @@ function isMalahorDocs(config, paths) {
   return command.some((item) => path19.resolve(paths.opencodeDir, item) === path19.resolve(paths.docsIndex));
 }
 function sessionLocationDirectory(value) {
-  const response = isRecord7(value) && isRecord7(value.data) ? value.data : value;
-  if (!isRecord7(response))
+  const response = isRecord8(value) && isRecord8(value.data) ? value.data : value;
+  if (!isRecord8(response))
     return;
-  const location = isRecord7(response.location) ? response.location : undefined;
+  const location = isRecord8(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function sessionLocationProject(value) {
-  const response = isRecord7(value) && isRecord7(value.data) ? value.data : value;
-  if (!isRecord7(response))
+  const response = isRecord8(value) && isRecord8(value.data) ? value.data : value;
+  if (!isRecord8(response))
     return;
-  const location = isRecord7(response.location) ? response.location : undefined;
-  const project = location && isRecord7(location.project) ? location.project : undefined;
+  const location = isRecord8(response.location) ? response.location : undefined;
+  const project = location && isRecord8(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : typeof project?.name === "string" ? project.name : typeof project?.id === "string" ? project.id : undefined;
 }
 function recordState(inspection) {
@@ -7933,7 +8179,7 @@ function warn(message) {
 function unique2(values) {
   return [...new Set(values)];
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export {

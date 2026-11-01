@@ -33,7 +33,24 @@ describe("autoridad persistente de planning", () => {
     expect(second.verify("otro", proof)).toBe(false);
     const state = proposePlan({
       sessionID: "ses_authority_restart", project: "demo", mode: "executor", policyRevision: "1".repeat(32),
-    }, { summary: "persistente", steps: ["validar"], actions: [{ action: "shell", resource: "echo ok" }] },
+    }, {
+      summary: "persistente",
+      steps: ["validar"],
+      presentation: {
+        objective: "Validar la autoridad persistente del plan.",
+        rationale: "La firma debe seguir siendo verificable despues de recargar la clave.",
+        steps: [{
+          title: "Validar la firma",
+          what: "Recargar la autoridad y verificar el estado firmado.",
+          why: "Demuestra continuidad sin aceptar estados adulterados.",
+          expected: "El estado conserva una firma valida tras el reinicio.",
+        }],
+        changes: ["El fixture de autoridad"],
+        exclusions: ["No se modifican claves externas"],
+        completionCriteria: ["La segunda autoridad verifica el estado firmado por la primera"],
+      },
+      actions: [{ action: "shell", resource: "echo ok" }],
+    },
     Date.now(), "msg-authority", undefined, first);
     expect(validState(state, second)).toBe(true);
     expect(fs.lstatSync(planningKeyPath(directory)).isFile()).toBe(true);

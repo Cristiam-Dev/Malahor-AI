@@ -44,7 +44,7 @@ import {
 } from "./project-affinity";
 
 const PLUGIN_ID = "malahor";
-const PLUGIN_VERSION = "0.4.0";
+const PLUGIN_VERSION = "0.5.0";
 const STATE_SCHEMA = 1;
 
 type HostKind = "v1" | "v2" | "unknown";
@@ -268,18 +268,18 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
-        capabilities["planning.v2"] = true;
+        capabilities["planning.v4"] = true;
       } catch (error) {
         warn(`herramientas de planeacion no registradas: ${(error as Error).message}`);
       }
     }
-    if (!capabilities["planning.v2"]) criticalGaps.push("planning.v2");
+    if (!capabilities["planning.v4"]) criticalGaps.push("planning.v4");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
-    criticalGaps.push("planning.v2");
+    criticalGaps.push("planning.v4");
   }
 
   const modeHost = isRecord(context.command) && typeof context.command.transform === "function"

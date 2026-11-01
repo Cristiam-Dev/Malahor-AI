@@ -1,5 +1,8 @@
-export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v2 -->";
-const LEGACY_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v1 -->";
+export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v3 -->";
+const LEGACY_PROTOCOL_MARKERS = [
+  "<!-- malahor-runtime-protocol:v2 -->",
+  "<!-- malahor-runtime-protocol:v1 -->",
+];
 
 export const MALAHOR_RUNTIME_PROTOCOL = `${MALAHOR_PROTOCOL_MARKER}
 PROTOCOLO OPERATIVO MALAHOR
@@ -23,7 +26,7 @@ Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
 - Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
 - Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. La autorización del plan no caduca por tiempo; si cambian revisión, efectos, proyecto, modo o política, deja de autorizar.
-- En asistente y ejecutor, despues de malahor_plan muestra el plan completo y termina el turno. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
+- En asistente y ejecutor, despues de malahor_plan copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno. Una traza u output tecnico del tool en background no cuenta como presentacion. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
@@ -91,7 +94,7 @@ export function injectMalahorProtocol(input: Record<string, unknown>): boolean {
 
   for (const part of system) {
     if (!isTextPart(part)) continue;
-    const legacyAt = part.text.indexOf(LEGACY_PROTOCOL_MARKER);
+    const legacyAt = Math.max(...LEGACY_PROTOCOL_MARKERS.map((marker) => part.text.indexOf(marker)));
     if (legacyAt >= 0) {
       part.text = `${part.text.slice(0, legacyAt).trimEnd()}\n\n${MALAHOR_RUNTIME_PROTOCOL}`;
       input.system = system;

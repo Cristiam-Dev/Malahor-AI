@@ -166,7 +166,22 @@ describe("modo portable: configuracion de Malahor", () => {
       sessionID: SESSION, project: "project", mode: "assistant", policyRevision: INITIAL_REVISION,
     };
     const presented = proposePlan(originalScope, {
-      summary: "Plan previo", steps: ["Editar"], actions: [operation],
+      summary: "Plan previo",
+      steps: ["Editar"],
+      presentation: {
+        objective: "Editar exclusivamente el archivo declarado.",
+        rationale: "El cambio de modo debe invalidar este plan sin ampliar sus efectos.",
+        steps: [{
+          title: "Editar el archivo",
+          what: "Modificar solo file.ts.",
+          why: "Es el unico recurso autorizado por el plan.",
+          expected: "El archivo cambia sin tocar otros recursos.",
+        }],
+        changes: ["file.ts"],
+        exclusions: ["Cualquier otro archivo o comando"],
+        completionCriteria: ["El cambio permanece ligado a la revision de politica original"],
+      },
+      actions: [operation],
     });
     const active = authorizePlan(reviewPlan(presented, presented.digest), presented.digest);
 

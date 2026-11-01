@@ -95,7 +95,7 @@ describe("scaffold del plugin", () => {
       storage: true,
       "permission.evaluate": true,
       "tool.execute.before": true,
-      "planning.v2": true,
+      "planning.v4": true,
       "planning.authority": true,
       "mode.command": true,
       "plan.command": true,
@@ -110,7 +110,7 @@ describe("scaffold del plugin", () => {
     }
   });
 
-  test("bundle expone planning.v2 e instruye separar presentacion y aprobacion en turnos", async () => {
+  test("bundle exige una unica presentacion foreground y separa presentacion de aprobacion", async () => {
     const repo = path.join(home, "repo");
     const sessionID = "ses_bundle_planning";
     fs.mkdirSync(repo, { recursive: true });
@@ -149,13 +149,15 @@ describe("scaffold del plugin", () => {
 
       const state = readState();
       const capabilities = state.capabilities as Record<string, unknown>;
-      expect(capabilities["planning.v2"]).toBe(true);
+      expect(capabilities["planning.v4"]).toBe(true);
       expect(capabilities["planning.v1"]).toBeUndefined();
       const text = (input.system as Array<{ text: string }>).map((item) => item.text).join("\n");
-      expect(text.match(/malahor-planning:v3/g) ?? []).toHaveLength(1);
+      expect(text.match(/malahor-planning:v4/g) ?? []).toHaveLength(1);
+      expect(text).not.toContain("malahor-planning:v3");
       expect(text).not.toContain("malahor-planning:v1");
-      expect(text).toMatch(/plan completo/i);
-      expect(text).toMatch(/termina(?:r)? (?:este )?turno/i);
+      expect(text).toMatch(/presentaci[oó]n foreground[\s\S]*exactamente una vez[\s\S]*mensaje normal/i);
+      expect(text).toMatch(/(?:traza|output)[\s\S]*(?:tool|t[eé]cnic)[\s\S]*background[\s\S]*no cuenta[\s\S]*presentaci[oó]n/i);
+      expect(text).toMatch(/cop(?:ia|iar)[\s\S]*Markdown[\s\S]*termina(?:r)? (?:este )?turno/i);
       expect(text).toMatch(/solicitud posterior/i);
       expect(text).toMatch(/\bgo\b/i);
       expect(text).toMatch(/\bimplementa\b/i);
@@ -173,7 +175,7 @@ describe("scaffold del plugin", () => {
     });
 
     const state = readState();
-    expect(state.criticalGaps).toContain("planning.v2");
+    expect(state.criticalGaps).toContain("planning.v4");
     expect(state.degraded).toContain("mcp");
     expect(state.degraded).toContain("storage");
   });
