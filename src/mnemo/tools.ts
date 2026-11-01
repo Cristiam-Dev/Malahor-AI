@@ -1,6 +1,6 @@
 import { toolDefinitions } from "./tool-definitions";
 import { resolveRegisteredProject } from "../cli/core/context";
-import { auditHookResult, runHooks } from "../cli/core/hooks/engine";
+import { assertHooksAllowed, auditHookResult, runHooks } from "../cli/core/hooks/engine";
 import { loadHookPolicy, parseHookProfile } from "../cli/core/hooks/policy-loader";
 import { usesFilesystemResources } from "../cli/core/hooks/resources";
 import { HOOK_RESOURCE_KINDS, type HookEvent, type HookResourceKind } from "../cli/core/hooks/types";
@@ -91,6 +91,7 @@ function checkMalahorHooks(args: Record<string, unknown>): unknown {
   const targetPaths = stringListArg(args.paths);
   const resourceKind = hookResourceKindArg(args.resourceKind);
   const metadata = recordArg(args.metadata);
+  const approval = optionalStringArg(args.approval);
   const project = resolveRegisteredProject(paths, {}, {
     override: optionalStringArg(metadata.project),
     targetPaths: usesFilesystemResources(resourceKind) ? targetPaths : [],
@@ -112,9 +113,10 @@ function checkMalahorHooks(args: Record<string, unknown>): unknown {
     resourceKind,
     targetPaths,
     confirmation: optionalStringArg(args.confirm),
+    approval,
     metadata,
   };
-  return auditHookResult(context, runHooks(context));
+  return approval ? assertHooksAllowed(context) : auditHookResult(context, runHooks(context));
 }
 
 function stringArg(value: unknown, fallback?: string): string {

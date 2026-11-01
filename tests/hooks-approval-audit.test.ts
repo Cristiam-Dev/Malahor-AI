@@ -199,6 +199,34 @@ describe("assert with approvals and audit", () => {
     expect(() => assertHooksAllowed({ ...ctx, approval: record.nonce })).toThrow(/consumida|ASK pendiente/);
   });
 
+  test("infraestructura exige un ASK separado y consume un nonce exacto", () => {
+    const home = temporaryHome();
+    const target = path.join(home, ".github", "workflows", "ci.yml");
+    const ctx = context(home, {
+      event: "file.write.before",
+      profile: "off",
+      command: "",
+      resourceKind: "filesystem",
+      targetPaths: [target],
+      confirmation: "USER_REQUESTED_COMMIT",
+      metadata: {
+        planID: "plan-fixture",
+        revision: "revision-fixture",
+        userExplicitlyRequestedCommit: true,
+      },
+    });
+
+    expect(runHooks(ctx).decision).toBe("ask");
+    expect(runHooks(ctx).violations.some((violation) => violation.id === "MAL-HOOK-INFRA-APPROVAL")).toBe(true);
+    expect(() => assertHooksAllowed(ctx)).toThrow(/ASK pendiente/);
+
+    const record = grantApproval(ctx, { channel: "cli-tty" });
+    const result = assertHooksAllowed({ ...ctx, approval: record.nonce });
+    expect(result.decision).toBe("allow");
+    expect(result.approvalRef).toBe(record.nonce);
+    expect(() => assertHooksAllowed({ ...ctx, approval: record.nonce })).toThrow(/consumida|ASK pendiente/);
+  });
+
   test("deny no se convierte en allow por aprobacion", () => {
     const home = temporaryHome();
     const ctx = context(home, {

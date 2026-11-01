@@ -520,6 +520,8 @@ function permissionDetails(
   if (["edit", "write", "patch", "create"].includes(normalized) && deferToolWrite) {
     return {
       event: "plugin.permission.before",
+      resourceKind: "filesystem",
+      targetPaths: resources,
       metadata: { ...metadata, knownTool: true, deferredToToolHook: true },
     };
   }
@@ -551,6 +553,7 @@ function permissionDetails(
   if (normalized === "task" || isMcpToolName(normalized)) {
     return {
       event: "tool.execute.before",
+      command: action.replace(/[_.:/-]+/g, " "),
       metadata: { ...metadata, tool: normalized === "task" ? "task" : action },
     };
   }
@@ -563,6 +566,14 @@ function permissionDetails(
   // en ask: su mediacion real ocurre en tool/shell/file cuando aplica.
   if (KNOWN_TOOLS.has(normalized)) {
     return { event: "plugin.permission.before", metadata: { ...metadata, action, knownTool: true } };
+  }
+
+  if (deferToolWrite) {
+    return {
+      event: "tool.execute.before",
+      command: action.replace(/[_.:/-]+/g, " "),
+      metadata: { ...metadata, tool: action, deferredToToolHook: true },
+    };
   }
 
   return { event: "plugin.permission.before", metadata: { ...metadata, action } };
@@ -616,7 +627,11 @@ function toolDetails(tool: string, input: unknown, options: PluginAdapterOptions
     };
   }
 
-  return { event: "tool.execute.before", metadata: { tool } };
+  return {
+    event: "tool.execute.before",
+    command: tool.replace(/[_.:/-]+/g, " "),
+    metadata: { tool },
+  };
 }
 
 const KNOWN_TOOLS = new Set([

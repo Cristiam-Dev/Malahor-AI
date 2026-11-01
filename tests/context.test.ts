@@ -175,6 +175,14 @@ describe("raíces registradas por proyecto", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/dependencia.*no hereda permisos.*nunca inicia autom[aá]ticamente/is);
   });
 
+  test("el protocolo hace estructural la frontera de infraestructura", () => {
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/CI\/CD, IaC, publicaci[oó]n y despliegue.*solo lectura por defecto/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/aprobaci[oó]n de plan, implementaci[oó]n, stage, commit o push no autoriza/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/ASK humano separado.*vinculado a operaci[oó]n, proyecto, recursos o comando y policy hash/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/preflight de solo lectura.*diferido.*no consume ni sustituye el ASK nativo/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/Sin esa aprobaci[oó]n verificable.*leer, analizar y proponer/is);
+  });
+
   test("resuelve la raíz registrada al trabajar desde otra ubicación", () => {
     const { projects, paths } = fixture();
     registerProjectRoot(projects, "malahor", paths.cwd, false);

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { runHooks } from "../src/cli/core/hooks/engine";
-import { composeCommitMessage } from "../src/cli/core/git-workflow";
+import {
+  composeCommitMessage,
+  gitWorkflowExitCode,
+  isDeferredValidationApproval,
+} from "../src/cli/core/git-workflow";
+import type { HookResult } from "../src/cli/core/hooks/types";
 
 describe("git workflow asistido", () => {
   test("genera mensaje Malahor valido con tipo y scope explicitos", () => {
@@ -44,5 +49,38 @@ describe("git workflow asistido", () => {
     });
 
     expect(message).toBe("✅ test(hook-policy): agrega validaciones nuevas");
+  });
+
+  test("difiere solo el ASK de infraestructura en preflight sin autorizar el efecto", () => {
+    const result = runHooks({
+      event: "git.commit.before",
+      harness: "cli",
+      profile: "standard",
+      cwd: process.cwd(),
+      projectRoot: process.cwd(),
+      malahorHome: `${process.cwd()}/.sandbox/home/.malahor`,
+      project: "malahor",
+      command: "git commit -m '🔧 ci(typecheck): alinea la validación'",
+      targetPaths: [".github/workflows/ci.yml"],
+      metadata: { validationOnly: true },
+    });
+
+    expect(result.decision).toBe("ask");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-INFRA-APPROVAL")).toBe(true);
+    expect(isDeferredValidationApproval("precommit", result)).toBe(true);
+    expect(gitWorkflowExitCode({ action: "precommit", hookResult: result })).toBe(0);
+    expect(gitWorkflowExitCode({ action: "prepush", hookResult: result })).toBe(3);
+
+    const unrelatedAsk: HookResult = {
+      ...result,
+      violations: [{
+        id: "MAL-HOOK-OTHER-ASK",
+        decision: "ask",
+        message: "requiere otra aprobacion",
+        fix: "No diferir.",
+      }],
+    };
+    expect(isDeferredValidationApproval("precommit", unrelatedAsk)).toBe(false);
+    expect(gitWorkflowExitCode({ action: "precommit", hookResult: unrelatedAsk })).toBe(3);
   });
 });

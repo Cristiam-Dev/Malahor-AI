@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { loadConfig } from "./config";
-import { auditHookResult, runHooks } from "./hooks/engine";
+import { auditHookResult, hookExitCode, runHooks } from "./hooks/engine";
 import { loadHookPolicy, parseHookProfile } from "./hooks/policy-loader";
 import type { HookContext, HookEvent, HookResult } from "./hooks/types";
 import { isSandbox } from "./paths";
@@ -30,10 +30,31 @@ export interface GitWorkflowResult {
   message?: string;
   command?: string;
   hookResult?: HookResult;
+  approvalDeferred: boolean;
   notes: string[];
 }
 
+const VALIDATION_ONLY_APPROVALS = new Set(["MAL-HOOK-INFRA-APPROVAL"]);
+
 export { composeCommitMessage };
+
+export function isDeferredValidationApproval(
+  action: GitWorkflowResult["action"],
+  hookResult: HookResult | undefined,
+): boolean {
+  if (!hookResult || hookResult.decision !== "ask") return false;
+  if (action !== "precommit" && action !== "commit-message") return false;
+  const asks = hookResult.violations.filter((violation) => violation.decision === "ask");
+  return asks.length > 0 && asks.every((violation) => VALIDATION_ONLY_APPROVALS.has(violation.id));
+}
+
+export function gitWorkflowExitCode(
+  result: Pick<GitWorkflowResult, "action" | "hookResult">,
+): number {
+  if (!result.hookResult) return 0;
+  if (isDeferredValidationApproval(result.action, result.hookResult)) return 0;
+  return hookExitCode(result.hookResult.decision);
+}
 
 export function runGitWorkflow(options: GitWorkflowOptions): GitWorkflowResult {
   switch (options.action) {
@@ -162,6 +183,10 @@ function workflowResult(
   message?: string,
   command?: string,
 ): GitWorkflowResult {
+  const approvalDeferred = isDeferredValidationApproval(action, hookResult);
+  const effectiveNotes = approvalDeferred
+    ? [...notes, "Aprobacion de infraestructura diferida al efecto real; este preflight no autoriza stage ni commit."]
+    : notes;
   return {
     action,
     project: context.projectKey,
@@ -173,7 +198,8 @@ function workflowResult(
     message: message || undefined,
     command,
     hookResult,
-    notes,
+    approvalDeferred,
+    notes: effectiveNotes,
   };
 }
 

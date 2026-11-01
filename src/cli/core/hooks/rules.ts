@@ -5,6 +5,11 @@ import { loadProjectsFile } from "../context";
 import { filesystemTargetPaths, hookResourceIssues } from "./resources";
 import { CODE_MODE_TOOL_NAMES, isMcpToolName, type HookContext, type HookEvent, type HookProfile, type HookRule, type HookViolation } from "./types";
 import {
+  classifyInfrastructureCommand,
+  classifyInfrastructurePath,
+  type InfrastructureClassification,
+} from "../infrastructure-boundary";
+import {
   classifyDocumentationPath,
   isRemovalOperation,
   type DocumentationOperation,
@@ -14,6 +19,7 @@ export const builtInHookRules: HookRule[] = [
   { id: "policy-integrity", run: policyIntegrityGuard },
   { id: "resource-contract", run: resourceContractGuard },
   { id: "repo-boundary", run: repoBoundaryGuard },
+  { id: "infrastructure-boundary", run: infrastructureBoundaryGuard },
   { id: "documentation-boundary", run: documentationBoundaryGuard },
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
@@ -82,6 +88,153 @@ function repoBoundaryGuard(context: HookContext): HookViolation[] {
     message: `Malahor no debe escribir memoria/configuracion/grafos/assets dentro del repo: ${unsafe.join(", ")}`,
     fix: "Escribe datos operativos en ~/.malahor o usa MALAHOR_HOME fuera del repo.",
   }];
+}
+
+interface InfrastructureTargetResolution {
+  paths: string[];
+  unresolved: boolean;
+}
+
+function infrastructureBoundaryGuard(context: HookContext): HookViolation[] {
+  const relevant = context.event === "plugin.permission.before"
+    ? context.metadata?.deferredToToolHook === true
+    : context.event === "file.write.before"
+      || context.event === "file.stage.before"
+      || context.event === "git.commit.before"
+      || context.event === "git.push.before"
+      || context.event === "shell.exec.before"
+      || context.event === "tool.execute.before";
+  if (!relevant) return [];
+
+  const command = (context.command ?? "").trim();
+  const commandMatch = context.event === "shell.exec.before" || context.event === "tool.execute.before"
+    ? classifyInfrastructureCommand(command)
+    : { protected: false } satisfies InfrastructureClassification;
+  const resolution = infrastructureTargetPaths(context, command);
+  const pathMatches = resolution.paths
+    .map((targetPath) => classifyInfrastructurePath(context.projectRoot, path.resolve(context.cwd, targetPath)))
+    .filter((classification) => classification.protected);
+
+  if (!commandMatch.protected && pathMatches.length === 0 && !resolution.unresolved) return [];
+
+  const evidence = [...new Set([
+    ...(commandMatch.evidence ? [commandMatch.evidence] : []),
+    ...pathMatches.map((classification) => classification.relativePath ?? classification.evidence ?? "recurso protegido"),
+    ...(resolution.unresolved ? ["recursos no delimitables de forma segura"] : []),
+  ])];
+  return [{
+    id: "MAL-HOOK-INFRA-APPROVAL",
+    decision: "ask",
+    message: `CI/CD, IaC, publicacion y despliegue son solo lectura sin aprobacion separada: ${evidence.join(", ")}`,
+    fix: "Solicita un ASK humano específico y vinculado a esta operacion y recursos. Plan, implementacion, stage, commit, push, confirmaciones Git o Allow always no lo sustituyen.",
+  }];
+}
+
+function infrastructureTargetPaths(context: HookContext, command: string): InfrastructureTargetResolution {
+  const explicit = filesystemTargetPaths(context);
+  if (explicit.length > 0) return { paths: explicit, unresolved: false };
+
+  if (context.event === "plugin.permission.before" && context.metadata?.deferredToToolHook === true) {
+    return { paths: [], unresolved: true };
+  }
+  if (context.event === "file.write.before") return { paths: [], unresolved: true };
+  if (context.event === "file.stage.before") return gitResolution(changedPaths(context.projectRoot));
+  if (context.event === "git.commit.before") return gitResolution(stagedPaths(context.projectRoot));
+  if (context.event === "git.push.before") return gitResolution(outgoingPaths(context.projectRoot));
+  if (context.event === "tool.execute.before") return { paths: [], unresolved: false };
+  if (context.event !== "shell.exec.before" || !command) return { paths: [], unresolved: false };
+
+  if (isGitCommandOperation(command, "add")) return gitAddResolution(context, command);
+  if (isGitCommandOperation(command, "commit")) return gitResolution(stagedPaths(context.projectRoot));
+  if (isGitCommandOperation(command, "push")) {
+    if (/(?:^|\s)--dry-run(?:\s|$)/.test(command)) return { paths: [], unresolved: false };
+    return gitResolution(outgoingPaths(context.projectRoot));
+  }
+  if (isPotentialFilesystemMutation(command)) {
+    return { paths: shellPathCandidates(command), unresolved: false };
+  }
+  return { paths: [], unresolved: false };
+}
+
+function gitAddResolution(context: HookContext, command: string): InfrastructureTargetResolution {
+  const segment = command.split(/(?:&&|\|\||[;|\n])/).find((item) => isGitCommandOperation(item, "add"));
+  if (!segment || /\bgit\s+-c\b|\bgit\s+-C\b|--pathspec-from-file|(?:^|\s)-(?:p|i)(?:\s|$)/.test(segment)) {
+    return { paths: [], unresolved: true };
+  }
+
+  const tokens = shellTokens(segment);
+  const git = tokens.findIndex((token) => token === "git");
+  const add = tokens.findIndex((token, index) => index > git && token === "add");
+  if (git < 0 || add < 0) return { paths: [], unresolved: true };
+
+  const args = tokens.slice(add + 1);
+  if (args.some((token) => ["-a", "-A", "--all", "-u", "--update", ".", ":/"].includes(token))) {
+    return gitResolution(changedPaths(context.projectRoot));
+  }
+  const targets = args.filter((token) => token !== "--" && !token.startsWith("-"));
+  if (targets.some((target) => /[*?\[\]$`]/.test(target))) return { paths: [], unresolved: true };
+  return { paths: targets, unresolved: targets.length === 0 };
+}
+
+function isGitCommandOperation(command: string, operation: "add" | "commit" | "push"): boolean {
+  return command.split(/(?:&&|\|\||[;|\n])/).some((segment) => (
+    new RegExp(`\\bgit\\b[^;&|\\n]*\\b${operation}\\b`).test(segment)
+  ));
+}
+
+function shellTokens(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      else current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (current) tokens.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (escaped || quote) return [];
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function isPotentialFilesystemMutation(command: string): boolean {
+  return /(?:^|[;&|]\s*)(?:sudo\s+)?(?:rm|mv|cp|install|touch|mkdir|truncate|chmod|chown|ln|tee)\b/.test(command)
+    || /(?:^|[;&|]\s*)(?:sudo\s+)?(?:sed\s+-[^\s]*i|perl\s+-[^\s]*i)\b/.test(command)
+    || /(^|[^<])>{1,2}(?!=)/.test(command);
+}
+
+function shellPathCandidates(command: string): string[] {
+  const expanded = command.replace(/(>>?|<)/g, " $1 ");
+  return shellTokens(expanded)
+    .filter((token) => ![">", ">>", "<"].includes(token) && !token.startsWith("-"))
+    .map((token) => token.includes("=") ? token.slice(token.indexOf("=") + 1) : token)
+    .map((token) => token.replace(/^[([{]+|[\])},]+$/g, ""))
+    .filter((token) => token.length > 0 && !token.includes("://"));
+}
+
+function gitResolution(paths: string[] | null): InfrastructureTargetResolution {
+  return paths === null ? { paths: [], unresolved: true } : { paths, unresolved: false };
 }
 
 function documentationBoundaryGuard(context: HookContext): HookViolation[] {
@@ -194,12 +347,38 @@ function metadataOperations(value: unknown): DocumentationOperation[] | undefine
 }
 
 function stagedPaths(cwd: string): string[] | null {
+  return gitPathQuery(cwd, ["diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z"]);
+}
+
+function changedPaths(cwd: string): string[] | null {
+  const queries = [
+    gitPathQuery(cwd, ["diff", "--name-only", "--diff-filter=ACMRD", "-z"]),
+    gitPathQuery(cwd, ["diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z"]),
+    gitPathQuery(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]),
+  ];
+  const available = queries.filter((items): items is string[] => items !== null);
+  if (available.length === 0) return null;
+  return [...new Set(available.flat())];
+}
+
+function outgoingPaths(cwd: string): string[] | null {
+  const upstream = gitPathQuery(cwd, ["diff", "--name-only", "--diff-filter=ACMRD", "-z", "@{u}...HEAD"]);
+  if (upstream !== null) return upstream;
+
+  // Una rama sin upstream puede publicar cualquier archivo de su primer push.
+  // Se usa el arbol completo de HEAD en lugar de presumir que no hay recursos.
+  const initialPush = gitPathQuery(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]);
+  if (initialPush !== null) return initialPush;
+  return changedPaths(cwd);
+}
+
+function gitPathQuery(cwd: string, args: string[]): string[] | null {
   try {
-    return execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMRD"], {
+    return execFileSync("git", args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    }).split("\n").map((item) => item.trim()).filter(Boolean);
+    }).split("\0").map((item) => item.trim()).filter(Boolean);
   } catch {
     return null;
   }

@@ -345,6 +345,86 @@ describe("adaptador de plugin V2", () => {
     expect(unattributed.result.violations.some((violation) => violation.id === "MAL-HOOK-DOCS-EXTERNAL")).toBe(true);
   });
 
+  test("permission conserva targets diferidos y pide aprobacion antes de tocar infraestructura", async () => {
+    const options = {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: true,
+      toolRegistered: true,
+      env,
+    };
+    const protectedInput: Record<string, unknown> = {
+      action: "edit",
+      resources: [".github/workflows/ci.yml"],
+      effect: "allow",
+      source: { type: "tool", messageID: "msg_infra", id: "call_infra" },
+    };
+    const protectedWrite = await evaluatePermission(protectedInput, options);
+    const ordinaryWrite = await evaluatePermission({
+      action: "edit",
+      resources: ["src/app.ts"],
+      effect: "allow",
+      source: { type: "tool", messageID: "msg_source", id: "call_source" },
+    }, options);
+    const toolCheck = await evaluateToolHook({
+      tool: "edit",
+      input: { path: ".github/workflows/ci.yml" },
+    }, options);
+
+    expect(protectedWrite.effect).toBe("ask");
+    expect(protectedInput.effect).toBe("ask");
+    expect(protectedWrite.result.violations.some((violation) => violation.id === "MAL-HOOK-INFRA-APPROVAL")).toBe(true);
+    expect(ordinaryWrite.effect).toBe("allow");
+    expect(toolCheck.decision).toBe("ask");
+  });
+
+  test("permission shell pide aprobacion separada para publicar", async () => {
+    const input: Record<string, unknown> = {
+      action: "bash",
+      resources: ["npm publish"],
+      effect: "allow",
+    };
+
+    const result = await evaluatePermission(input, {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: true,
+      env,
+    });
+
+    expect(result.effect).toBe("ask");
+    expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-INFRA-APPROVAL")).toBe(true);
+  });
+
+  test("permission media tools de despliegue sin depender de shell", async () => {
+    const mcp = await evaluatePermission({
+      action: "mcp_acme_deploy_prod",
+      resources: [],
+      effect: "allow",
+    }, {
+      cwd: repo,
+      permissionRegistered: true,
+      toolRegistered: true,
+      env,
+    });
+    const custom = await evaluatePermission({
+      action: "deploy_prod",
+      resources: [],
+      effect: "allow",
+      source: { type: "tool", messageID: "msg_deploy", id: "call_deploy" },
+    }, {
+      cwd: repo,
+      permissionRegistered: true,
+      toolRegistered: true,
+      env,
+    });
+
+    for (const result of [mcp, custom]) {
+      expect(result.effect).toBe("ask");
+      expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-INFRA-APPROVAL")).toBe(true);
+    }
+  });
+
   test("tool patch permite delete documental y bloquea update", async () => {
     const options = {
       cwd: repo,

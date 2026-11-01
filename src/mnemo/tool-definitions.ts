@@ -223,6 +223,7 @@ export const toolDefinitions = [
         paths: { type: "array", items: { type: "string" }, description: "Rutas fisicas objetivo a revisar." },
         resourceKind: { type: "string", enum: ["filesystem"], description: "Tipo de paths; default y unico valor admitido: filesystem." },
         confirm: { type: "string", description: "Confirmacion exacta para operaciones destructivas; CHECKS_OK no autoriza una operacion ask." },
+        approval: { type: "string", description: "Nonce humano de un solo uso para consumir un ASK exacto; no se sustituye con confirm, plan o metadata." },
         metadata: { type: "object", description: "Metadatos del evento (previewToken, requiresConfirmation, writesMalahorData, etc.)." },
       },
       required: ["event"],

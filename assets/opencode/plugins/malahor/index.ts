@@ -1,9 +1,9 @@
 // malahor-managed
 // @ts-nocheck bundle generado desde src/plugin/index.ts; el source se typechequea con tsconfig.json
 // src/plugin/index.ts
-import fs13 from "node:fs";
+import fs14 from "node:fs";
 import os2 from "node:os";
-import path18 from "node:path";
+import path19 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -1921,7 +1921,7 @@ function recordValue2(value) {
 }
 
 // src/cli/core/hooks/plugin-adapter.ts
-import path14 from "node:path";
+import path15 from "node:path";
 
 // src/cli/core/hooks/approvals.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
@@ -2296,11 +2296,289 @@ function isRecord3(value) {
 
 // src/cli/core/hooks/rules.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
+import fs10 from "node:fs";
+import path14 from "node:path";
+
+// src/cli/core/infrastructure-boundary.ts
 import fs9 from "node:fs";
-import path13 from "node:path";
+import path12 from "node:path";
+var CI_DIRECTORIES = [
+  ".github/workflows",
+  ".github/actions",
+  ".gitlab/ci",
+  ".circleci",
+  ".buildkite",
+  ".azure-pipelines",
+  ".drone",
+  ".tekton",
+  "tekton"
+];
+var INFRASTRUCTURE_DIRECTORIES = new Map([
+  ["infra", "iac"],
+  ["infrastructure", "iac"],
+  ["terraform", "iac"],
+  ["tofu", "iac"],
+  ["pulumi", "iac"],
+  ["cloudformation", "iac"],
+  ["cdk", "iac"],
+  ["deploy", "deployment"],
+  ["deployment", "deployment"],
+  ["k8s", "deployment"],
+  ["kubernetes", "deployment"],
+  ["helm", "deployment"],
+  ["charts", "deployment"],
+  ["argocd", "deployment"],
+  [".argocd", "deployment"],
+  ["flux", "deployment"],
+  [".flux", "deployment"]
+]);
+var CI_FILES = [
+  /^\.gitlab-ci\.ya?ml$/,
+  /^azure-pipelines(?:[._-].*)?\.ya?ml$/,
+  /^jenkinsfile(?:\..*)?$/,
+  /^bitbucket-pipelines\.ya?ml$/,
+  /^\.drone\.ya?ml$/,
+  /^\.travis\.ya?ml$/,
+  /^cloudbuild(?:[._-].*)?\.ya?ml$/,
+  /^appveyor\.ya?ml$/
+];
+var IAC_FILES = [
+  /\.tf(?:\.json)?$/,
+  /\.tfvars(?:\.json)?$/,
+  /\.bicep$/,
+  /^\.terraform\.lock\.hcl$/,
+  /^pulumi(?:\..+)?\.ya?ml$/,
+  /^cdk\.json$/,
+  /^samconfig\.toml$/
+];
+var DEPLOYMENT_FILES = [
+  /^chart\.ya?ml$/,
+  /^kustomization\.ya?ml$/,
+  /^skaffold\.ya?ml$/,
+  /^tiltfile$/,
+  /^serverless\.ya?ml$/,
+  /^helmfile\.ya?ml$/,
+  /^values(?:[._-].*)?\.ya?ml$/,
+  /^dockerfile(?:\..*)?$/,
+  /^containerfile(?:\..*)?$/,
+  /^(?:docker-)?compose(?:[._-].*)?\.ya?ml$/,
+  /^vercel\.json$/,
+  /^netlify\.toml$/,
+  /^fly\.toml$/,
+  /^firebase\.json$/,
+  /^railway\.(?:json|toml)$/,
+  /^appspec\.ya?ml$/,
+  /^render\.ya?ml$/
+];
+var RELEASE_FILES = [
+  /^\.npmrc$/,
+  /^\.releaserc(?:\..*)?$/,
+  /^release\.config\.[a-z0-9]+$/,
+  /^\.changeset\/config\.json$/
+];
+var DEPLOYMENT_SCRIPT = /^(?:deploy|release|publish)(?:[._-].*)?\.(?:sh|bash|zsh|ps1|cmd|bat|js|mjs|cjs|ts|py|rb)$/;
+function classifyInfrastructurePath(projectRoot, targetPath) {
+  for (const relativePath of relativeCandidates(projectRoot, targetPath)) {
+    const classification = classifyRelativePath(relativePath);
+    if (classification.protected)
+      return { ...classification, relativePath };
+  }
+  const markerScoped = classifyMarkerScopedPath(projectRoot, targetPath);
+  if (markerScoped.protected)
+    return markerScoped;
+  return { protected: false };
+}
+function classifyInfrastructureCommand(command) {
+  for (const segment of commandSegments(command)) {
+    const classification = classifyCommandSegment(segment);
+    if (classification.protected)
+      return classification;
+  }
+  return { protected: false };
+}
+function classifyRelativePath(relativePath) {
+  const normalized = normalizeRelative(relativePath);
+  if (!normalized)
+    return { protected: false };
+  if (CI_DIRECTORIES.some((directory) => normalized === directory || normalized.startsWith(`${directory}/`))) {
+    return protectedMatch("ci-cd", "directorio de automatizacion CI/CD");
+  }
+  const segments = normalized.split("/");
+  const first = segments[0] ?? "";
+  const base = segments.at(-1) ?? "";
+  const directorySurface = INFRASTRUCTURE_DIRECTORIES.get(first);
+  if (directorySurface)
+    return protectedMatch(directorySurface, `directorio raiz ${first}`);
+  if (CI_FILES.some((pattern) => pattern.test(base))) {
+    return protectedMatch("ci-cd", `definicion CI/CD ${base}`);
+  }
+  if (segments.length === 1 && /^template\.(?:ya?ml|json)$/.test(base)) {
+    return protectedMatch("iac", `plantilla declarativa ${base}`);
+  }
+  if (IAC_FILES.some((pattern) => pattern.test(base))) {
+    return protectedMatch("iac", `infraestructura como codigo ${base}`);
+  }
+  if (DEPLOYMENT_FILES.some((pattern) => pattern.test(base))) {
+    return protectedMatch("deployment", `configuracion de despliegue ${base}`);
+  }
+  if (RELEASE_FILES.some((pattern) => pattern.test(normalized) || pattern.test(base))) {
+    return protectedMatch("release", `configuracion de publicacion ${normalized}`);
+  }
+  if ((segments.length === 1 || segments.length === 2 && segments[0] === "scripts") && DEPLOYMENT_SCRIPT.test(base)) {
+    return protectedMatch("deployment", `script operativo ${normalized}`);
+  }
+  return { protected: false };
+}
+function classifyCommandSegment(segment) {
+  const normalized = segment.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized)
+    return { protected: false };
+  const dryRun = /(?:^|\s)--dry-run(?:=(?:true|client|server))?(?:\s|$)/.test(normalized);
+  if (isDirectPublish(normalized) && !dryRun)
+    return protectedMatch("release", "publicacion de paquete o artefacto");
+  if (isCiOrReleaseTrigger(normalized))
+    return protectedMatch("ci-cd", "disparo o modificacion de workflow/release");
+  if (isContainerPublish(normalized))
+    return protectedMatch("release", "publicacion de imagen o chart");
+  if (isTerraformMutation(normalized))
+    return protectedMatch("iac", "operacion mutante de Terraform/OpenTofu");
+  if (isPulumiMutation(normalized))
+    return protectedMatch("iac", "operacion mutante de Pulumi");
+  if (isKubectlMutation(normalized) && !dryRun)
+    return protectedMatch("deployment", "operacion mutante de kubectl");
+  if (isHelmMutation(normalized) && !dryRun)
+    return protectedMatch("deployment", "operacion mutante de Helm");
+  if (isCloudDeployment(normalized))
+    return protectedMatch("deployment", "operacion de despliegue cloud");
+  if (isDeploymentTask(normalized) && !(dryRun && isDirectPublish(normalized))) {
+    return protectedMatch("deployment", "tarea o script de deploy/release/publish");
+  }
+  return { protected: false };
+}
+function isDirectPublish(command) {
+  return /\b(?:npm|pnpm|bun)\b[^;&|]*\bpublish\b/.test(command) || /\byarn\b[^;&|]*\bpublish\b/.test(command) || /\bsemantic-release\b/.test(command) || /\bchangeset\s+publish\b/.test(command) || /\bcargo\s+publish\b/.test(command) || /\bmvn(?:w)?\b[^;&|]*\bdeploy\b/.test(command) || /\bgradle(?:w)?\b[^;&|]*\bpublish\b/.test(command) || /\bdotnet\s+nuget\s+push\b/.test(command) || /\btwine\s+upload\b/.test(command) || /\bgem\s+push\b/.test(command);
+}
+function isCiOrReleaseTrigger(command) {
+  return /\bgh\b[^;&|]*\bworkflow\s+run\b/.test(command) || /\bgh\b[^;&|]*\brun\s+rerun\b/.test(command) || /\bgh\b[^;&|]*\brelease\s+(?:create|upload|edit|delete)\b/.test(command) || /\bglab\b[^;&|]*\b(?:ci\s+run|pipeline\s+(?:run|retry|cancel))\b/.test(command);
+}
+function isContainerPublish(command) {
+  return /\b(?:docker|podman)\b[^;&|]*\bpush\b/.test(command) || /\bdocker\b[^;&|]*\bbuildx\s+build\b[^;&|]*\s--push(?:\s|$)/.test(command) || /\bhelm\b[^;&|]*\bpush\b/.test(command);
+}
+function isTerraformMutation(command) {
+  if (!/\b(?:terraform|tofu)\b/.test(command))
+    return false;
+  if (/\bfmt\b/.test(command))
+    return !/(?:^|\s)-(?:check|-check)(?:\s|$)/.test(command);
+  if (/\binit\b/.test(command)) {
+    return /(?:^|\s)-(?:upgrade|-upgrade|migrate-state|-migrate-state|reconfigure|-reconfigure)(?:\s|$)/.test(command);
+  }
+  return /\b(?:apply|destroy|import|taint|untaint|force-unlock)\b/.test(command) || /\bstate\s+(?:mv|rm|push|replace-provider)\b/.test(command) || /\bworkspace\s+(?:new|delete)\b/.test(command);
+}
+function isPulumiMutation(command) {
+  return /\bpulumi\b[^;&|]*\b(?:up|destroy|import|refresh|cancel)\b/.test(command) || /\bpulumi\b[^;&|]*\bstate\s+(?:delete|move|repair|unprotect)\b/.test(command);
+}
+function isKubectlMutation(command) {
+  return /\bkubectl\b[^;&|]*\b(?:apply|create|delete|replace|patch|edit|set|scale|rollout|annotate|label|taint|drain|cordon|uncordon|expose|autoscale|exec|cp)\b/.test(command);
+}
+function isHelmMutation(command) {
+  return /\bhelm\b[^;&|]*\b(?:install|upgrade|uninstall|rollback)\b/.test(command);
+}
+function isCloudDeployment(command) {
+  return /\baws\b[^;&|]*\bcloudformation\s+(?:deploy|create-stack|update-stack|delete-stack|create-change-set|execute-change-set)\b/.test(command) || /\baz\b[^;&|]*\bdeployment\b[^;&|]*\b(?:create|delete)\b/.test(command) || /\bgcloud\b[^;&|]*\b(?:run\s+deploy|app\s+deploy|functions\s+deploy|deploy\s+releases\s+create)\b/.test(command) || /\b(?:firebase|vercel|netlify|fly|flyctl|railway|serverless|sls|sam|cdk)\b[^;&|]*\b(?:deploy|remove|destroy|up|promote|rollback|publish)\b/.test(command) || /\bheroku\b[^;&|]*\b(?:container:(?:push|release)|releases:rollback)\b/.test(command);
+}
+function isDeploymentTask(command) {
+  return /\b(?:npm|pnpm|yarn|bun)\b[^;&|]*\b(?:run\s+)?(?:deploy|release|publish)(?::[a-z0-9._-]+)?\b/.test(command) || /\b(?:make|just|task)\s+(?:deploy|release|publish)(?::[a-z0-9._-]+)?\b/.test(command) || /(?:^|\s)(?:\.\/)?(?:scripts\/)?(?:deploy|release|publish)(?:[._-][^\s;&|]+)?(?:\s|$)/.test(command);
+}
+function commandSegments(command) {
+  return command.split(/(?:&&|\|\||[;|\n])/).map((segment) => segment.trim()).filter(Boolean);
+}
+function protectedMatch(surface, evidence) {
+  return { protected: true, surface, evidence };
+}
+function relativeCandidates(projectRoot, targetPath) {
+  const lexicalRoot = path12.resolve(projectRoot);
+  const lexicalTarget = path12.resolve(targetPath);
+  const canonicalRoot = canonicalPlannedPath(lexicalRoot);
+  const canonicalTarget = canonicalPlannedPath(lexicalTarget);
+  const candidates = [
+    relativeInside(lexicalRoot, lexicalTarget),
+    relativeInside(canonicalRoot, canonicalTarget)
+  ].filter((value) => value !== undefined);
+  return [...new Set(candidates)];
+}
+function classifyMarkerScopedPath(projectRoot, targetPath) {
+  const pairs = [
+    [path12.resolve(projectRoot), path12.resolve(targetPath)],
+    [canonicalPlannedPath(projectRoot), canonicalPlannedPath(targetPath)]
+  ];
+  for (const [root, target] of pairs) {
+    if (relativeInside(root, target) === undefined)
+      continue;
+    let current = fs9.existsSync(target) && fs9.statSync(target).isDirectory() ? target : path12.dirname(target);
+    while (relativeInside(root, current) !== undefined) {
+      if (fileExistsAny(current, ["Chart.yaml", "Chart.yml"])) {
+        return { ...protectedMatch("deployment", "archivo dentro de un chart Helm"), relativePath: normalizeRelative(path12.relative(root, target)) };
+      }
+      if (fileExistsAny(current, ["Pulumi.yaml", "Pulumi.yml"])) {
+        return { ...protectedMatch("iac", "archivo dentro de un proyecto Pulumi"), relativePath: normalizeRelative(path12.relative(root, target)) };
+      }
+      if (fs9.existsSync(path12.join(current, "cdk.json"))) {
+        const relative = normalizeRelative(path12.relative(current, target));
+        const first = relative.split("/")[0] ?? "";
+        if (["bin", "lib", "src", "stacks"].includes(first)) {
+          return { ...protectedMatch("iac", "codigo de infraestructura AWS CDK"), relativePath: normalizeRelative(path12.relative(root, target)) };
+        }
+      }
+      if (current === root)
+        break;
+      const parent = path12.dirname(current);
+      if (parent === current)
+        break;
+      current = parent;
+    }
+  }
+  return { protected: false };
+}
+function fileExistsAny(directory, names) {
+  return names.some((name) => {
+    try {
+      return fs9.statSync(path12.join(directory, name)).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+function relativeInside(root, target) {
+  const relative = path12.relative(root, target);
+  if (relative === "")
+    return "";
+  if (relative.startsWith("..") || path12.isAbsolute(relative))
+    return;
+  return relative;
+}
+function canonicalPlannedPath(value) {
+  const resolved = path12.resolve(value);
+  let current = resolved;
+  const suffix = [];
+  while (!fs9.existsSync(current)) {
+    const parent = path12.dirname(current);
+    if (parent === current)
+      break;
+    suffix.unshift(path12.basename(current));
+    current = parent;
+  }
+  try {
+    return path12.resolve(fs9.realpathSync(current), ...suffix);
+  } catch {
+    return resolved;
+  }
+}
+function normalizeRelative(value) {
+  return value.split(path12.sep).join("/").replace(/^\.\//, "").toLowerCase();
+}
 
 // src/cli/core/documentation-boundary.ts
-import path12 from "node:path";
+import path13 from "node:path";
 var MARKDOWN_EXTENSIONS = new Set([".md", ".mdx", ".markdown", ".adoc", ".rst"]);
 var ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
   "assets",
@@ -2325,15 +2603,15 @@ var ALLOWED_NESTED_DIRECTORIES = new Set([
 ]);
 var PUBLIC_DOCUMENT_STEMS = /^(?:readme|license|licence|notice|changelog|contributing|security|support|governance|code[-_]of[-_]conduct|third[-_]party[-_]notices|agents|claude)(?:[._-][a-z0-9-]+)*$/i;
 function classifyDocumentationPath(projectRoot, targetPath) {
-  const root = path12.resolve(projectRoot);
-  const absolute = path12.resolve(root, targetPath);
-  const relative = path12.relative(root, absolute);
-  if (relative === "" || relative.startsWith("..") || path12.isAbsolute(relative))
+  const root = path13.resolve(projectRoot);
+  const absolute = path13.resolve(root, targetPath);
+  const relative = path13.relative(root, absolute);
+  if (relative === "" || relative.startsWith("..") || path13.isAbsolute(relative))
     return { protected: false };
-  const portable = relative.split(path12.sep).join("/");
+  const portable = relative.split(path13.sep).join("/");
   const segments = portable.split("/");
   const basename = segments.at(-1) ?? "";
-  const extension = path12.extname(basename).toLowerCase();
+  const extension = path13.extname(basename).toLowerCase();
   if (!MARKDOWN_EXTENSIONS.has(extension))
     return { protected: false, relativePath: portable };
   const stem = basename.slice(0, -extension.length);
@@ -2395,6 +2673,7 @@ var builtInHookRules = [
   { id: "policy-integrity", run: policyIntegrityGuard },
   { id: "resource-contract", run: resourceContractGuard },
   { id: "repo-boundary", run: repoBoundaryGuard },
+  { id: "infrastructure-boundary", run: infrastructureBoundaryGuard },
   { id: "documentation-boundary", run: documentationBoundaryGuard },
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
@@ -2446,7 +2725,7 @@ function repoBoundaryGuard(context) {
   const targets = filesystemTargetPaths(context);
   if (!writesMalahorData || targets.length === 0)
     return [];
-  const unsafe = targets.map((targetPath) => path13.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
+  const unsafe = targets.map((targetPath) => path14.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
   if (unsafe.length === 0)
     return [];
   return [{
@@ -2456,13 +2735,140 @@ function repoBoundaryGuard(context) {
     fix: "Escribe datos operativos en ~/.malahor o usa MALAHOR_HOME fuera del repo."
   }];
 }
+function infrastructureBoundaryGuard(context) {
+  const relevant = context.event === "plugin.permission.before" ? context.metadata?.deferredToToolHook === true : context.event === "file.write.before" || context.event === "file.stage.before" || context.event === "git.commit.before" || context.event === "git.push.before" || context.event === "shell.exec.before" || context.event === "tool.execute.before";
+  if (!relevant)
+    return [];
+  const command = (context.command ?? "").trim();
+  const commandMatch = context.event === "shell.exec.before" || context.event === "tool.execute.before" ? classifyInfrastructureCommand(command) : { protected: false };
+  const resolution = infrastructureTargetPaths(context, command);
+  const pathMatches = resolution.paths.map((targetPath) => classifyInfrastructurePath(context.projectRoot, path14.resolve(context.cwd, targetPath))).filter((classification) => classification.protected);
+  if (!commandMatch.protected && pathMatches.length === 0 && !resolution.unresolved)
+    return [];
+  const evidence = [...new Set([
+    ...commandMatch.evidence ? [commandMatch.evidence] : [],
+    ...pathMatches.map((classification) => classification.relativePath ?? classification.evidence ?? "recurso protegido"),
+    ...resolution.unresolved ? ["recursos no delimitables de forma segura"] : []
+  ])];
+  return [{
+    id: "MAL-HOOK-INFRA-APPROVAL",
+    decision: "ask",
+    message: `CI/CD, IaC, publicacion y despliegue son solo lectura sin aprobacion separada: ${evidence.join(", ")}`,
+    fix: "Solicita un ASK humano específico y vinculado a esta operacion y recursos. Plan, implementacion, stage, commit, push, confirmaciones Git o Allow always no lo sustituyen."
+  }];
+}
+function infrastructureTargetPaths(context, command) {
+  const explicit = filesystemTargetPaths(context);
+  if (explicit.length > 0)
+    return { paths: explicit, unresolved: false };
+  if (context.event === "plugin.permission.before" && context.metadata?.deferredToToolHook === true) {
+    return { paths: [], unresolved: true };
+  }
+  if (context.event === "file.write.before")
+    return { paths: [], unresolved: true };
+  if (context.event === "file.stage.before")
+    return gitResolution(changedPaths(context.projectRoot));
+  if (context.event === "git.commit.before")
+    return gitResolution(stagedPaths(context.projectRoot));
+  if (context.event === "git.push.before")
+    return gitResolution(outgoingPaths(context.projectRoot));
+  if (context.event === "tool.execute.before")
+    return { paths: [], unresolved: false };
+  if (context.event !== "shell.exec.before" || !command)
+    return { paths: [], unresolved: false };
+  if (isGitCommandOperation(command, "add"))
+    return gitAddResolution(context, command);
+  if (isGitCommandOperation(command, "commit"))
+    return gitResolution(stagedPaths(context.projectRoot));
+  if (isGitCommandOperation(command, "push")) {
+    if (/(?:^|\s)--dry-run(?:\s|$)/.test(command))
+      return { paths: [], unresolved: false };
+    return gitResolution(outgoingPaths(context.projectRoot));
+  }
+  if (isPotentialFilesystemMutation(command)) {
+    return { paths: shellPathCandidates(command), unresolved: false };
+  }
+  return { paths: [], unresolved: false };
+}
+function gitAddResolution(context, command) {
+  const segment = command.split(/(?:&&|\|\||[;|\n])/).find((item) => isGitCommandOperation(item, "add"));
+  if (!segment || /\bgit\s+-c\b|\bgit\s+-C\b|--pathspec-from-file|(?:^|\s)-(?:p|i)(?:\s|$)/.test(segment)) {
+    return { paths: [], unresolved: true };
+  }
+  const tokens = shellTokens(segment);
+  const git = tokens.findIndex((token) => token === "git");
+  const add = tokens.findIndex((token, index) => index > git && token === "add");
+  if (git < 0 || add < 0)
+    return { paths: [], unresolved: true };
+  const args = tokens.slice(add + 1);
+  if (args.some((token) => ["-a", "-A", "--all", "-u", "--update", ".", ":/"].includes(token))) {
+    return gitResolution(changedPaths(context.projectRoot));
+  }
+  const targets = args.filter((token) => token !== "--" && !token.startsWith("-"));
+  if (targets.some((target) => /[*?\[\]$`]/.test(target)))
+    return { paths: [], unresolved: true };
+  return { paths: targets, unresolved: targets.length === 0 };
+}
+function isGitCommandOperation(command, operation) {
+  return command.split(/(?:&&|\|\||[;|\n])/).some((segment) => new RegExp(`\\bgit\\b[^;&|\\n]*\\b${operation}\\b`).test(segment));
+}
+function shellTokens(command) {
+  const tokens = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (current)
+        tokens.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (escaped || quote)
+    return [];
+  if (current)
+    tokens.push(current);
+  return tokens;
+}
+function isPotentialFilesystemMutation(command) {
+  return /(?:^|[;&|]\s*)(?:sudo\s+)?(?:rm|mv|cp|install|touch|mkdir|truncate|chmod|chown|ln|tee)\b/.test(command) || /(?:^|[;&|]\s*)(?:sudo\s+)?(?:sed\s+-[^\s]*i|perl\s+-[^\s]*i)\b/.test(command) || /(^|[^<])>{1,2}(?!=)/.test(command);
+}
+function shellPathCandidates(command) {
+  const expanded = command.replace(/(>>?|<)/g, " $1 ");
+  return shellTokens(expanded).filter((token) => ![">", ">>", "<"].includes(token) && !token.startsWith("-")).map((token) => token.includes("=") ? token.slice(token.indexOf("=") + 1) : token).map((token) => token.replace(/^[([{]+|[\])},]+$/g, "")).filter((token) => token.length > 0 && !token.includes("://"));
+}
+function gitResolution(paths) {
+  return paths === null ? { paths: [], unresolved: true } : { paths, unresolved: false };
+}
 function documentationBoundaryGuard(context) {
   const commit = context.event === "git.commit.before" || context.event === "shell.exec.before" && /\bgit\s+commit\b/.test(context.command ?? "");
   const relevant = context.event === "file.write.before" || context.event === "file.stage.before" || commit;
   if (!relevant)
     return [];
   if (context.event === "file.write.before") {
-    const directTargets = filesystemTargetPaths(context).map((targetPath) => path13.resolve(context.cwd, targetPath));
+    const directTargets = filesystemTargetPaths(context).map((targetPath) => path14.resolve(context.cwd, targetPath));
     let docsRoots;
     try {
       docsRoots = managedDocsRoots(context.malahorHome);
@@ -2474,7 +2880,7 @@ function documentationBoundaryGuard(context) {
         fix: "Repara projects.json con malahor-ai doctor antes de escribir archivos."
       }];
     }
-    const directVaultWrites = directTargets.filter((target) => docsRoots.some((root) => isInside(target, root) || isInside(canonicalPlannedPath(target), canonicalPlannedPath(root))));
+    const directVaultWrites = directTargets.filter((target) => docsRoots.some((root) => isInside(target, root) || isInside(canonicalPlannedPath2(target), canonicalPlannedPath2(root))));
     if (directVaultWrites.length > 0) {
       return [{
         id: "MAL-HOOK-DOCS-MCP-ONLY",
@@ -2509,7 +2915,7 @@ function documentationBoundaryGuard(context) {
   const unsafe = operations.filter((operation) => {
     if (isRemovalOperation(operation.kind))
       return false;
-    return classifyDocumentationPath(context.projectRoot, path13.resolve(context.cwd, operation.path)).protected;
+    return classifyDocumentationPath(context.projectRoot, path14.resolve(context.cwd, operation.path)).protected;
   });
   if (unsafe.length === 0)
     return [];
@@ -2521,28 +2927,28 @@ function documentationBoundaryGuard(context) {
   }];
 }
 function managedDocsRoots(malahorHome) {
-  const projects = loadProjectsFile(path13.join(malahorHome, "projects.json"));
+  const projects = loadProjectsFile(path14.join(malahorHome, "projects.json"));
   return [...new Set([
-    path13.join(malahorHome, "vault"),
+    path14.join(malahorHome, "vault"),
     ...Object.values(projects).flatMap((entry) => entry.docs?.path ? [entry.docs.path] : [])
-  ].map((value) => path13.resolve(value)))];
+  ].map((value) => path14.resolve(value)))];
 }
-function canonicalPlannedPath(value) {
-  const resolved = path13.resolve(value);
+function canonicalPlannedPath2(value) {
+  const resolved = path14.resolve(value);
   let current = resolved;
   const suffix = [];
-  while (!fs9.existsSync(current)) {
-    const parent = path13.dirname(current);
+  while (!fs10.existsSync(current)) {
+    const parent = path14.dirname(current);
     if (parent === current)
       break;
-    suffix.unshift(path13.basename(current));
+    suffix.unshift(path14.basename(current));
     current = parent;
   }
   let canonical = current;
   try {
-    canonical = fs9.realpathSync(current);
+    canonical = fs10.realpathSync(current);
   } catch {}
-  return path13.resolve(canonical, ...suffix);
+  return path14.resolve(canonical, ...suffix);
 }
 function metadataOperations(value) {
   if (!Array.isArray(value))
@@ -2556,13 +2962,35 @@ function metadataOperations(value) {
   return valid.length === value.length ? valid : undefined;
 }
 function stagedPaths(cwd) {
+  return gitPathQuery(cwd, ["diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z"]);
+}
+function changedPaths(cwd) {
+  const queries = [
+    gitPathQuery(cwd, ["diff", "--name-only", "--diff-filter=ACMRD", "-z"]),
+    gitPathQuery(cwd, ["diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z"]),
+    gitPathQuery(cwd, ["ls-files", "--others", "--exclude-standard", "-z"])
+  ];
+  const available = queries.filter((items) => items !== null);
+  if (available.length === 0)
+    return null;
+  return [...new Set(available.flat())];
+}
+function outgoingPaths(cwd) {
+  const upstream = gitPathQuery(cwd, ["diff", "--name-only", "--diff-filter=ACMRD", "-z", "@{u}...HEAD"]);
+  if (upstream !== null)
+    return upstream;
+  const initialPush = gitPathQuery(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]);
+  if (initialPush !== null)
+    return initialPush;
+  return changedPaths(cwd);
+}
+function gitPathQuery(cwd, args) {
   try {
-    return execFileSync2("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMRD"], {
+    return execFileSync2("git", args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
-    }).split(`
-`).map((item) => item.trim()).filter(Boolean);
+    }).split("\x00").map((item) => item.trim()).filter(Boolean);
   } catch {
     return null;
   }
@@ -2574,11 +3002,11 @@ function isExactStagedRemoval(context, targetPath) {
   return isExactGitRemoval(context, targetPath, true);
 }
 function isExactGitRemoval(context, targetPath, cached) {
-  const projectRoot = path13.resolve(context.projectRoot);
-  const absoluteTarget = path13.resolve(context.cwd, targetPath);
+  const projectRoot = path14.resolve(context.projectRoot);
+  const absoluteTarget = path14.resolve(context.cwd, targetPath);
   if (absoluteTarget === projectRoot || !isInside(absoluteTarget, projectRoot))
     return false;
-  const relativeTarget = path13.relative(projectRoot, absoluteTarget);
+  const relativeTarget = path14.relative(projectRoot, absoluteTarget);
   try {
     const output = execFileSync2("git", [
       "diff",
@@ -2596,7 +3024,7 @@ function isExactGitRemoval(context, targetPath, cached) {
       stdio: ["ignore", "pipe", "ignore"]
     });
     const removals = output.split("\x00").filter(Boolean);
-    return removals.length === 1 && path13.resolve(projectRoot, removals[0]) === absoluteTarget;
+    return removals.length === 1 && path14.resolve(projectRoot, removals[0]) === absoluteTarget;
   } catch {
     return false;
   }
@@ -2822,13 +3250,13 @@ function fileBoundaryGuard(context) {
   if (context.event !== "file.read.before" && context.event !== "file.write.before")
     return [];
   const controls = context.security?.files;
-  const paths = filesystemTargetPaths(context).map((target) => path13.resolve(context.cwd, target));
+  const paths = filesystemTargetPaths(context).map((target) => path14.resolve(context.cwd, target));
   if (paths.length === 0)
     return [];
   const violations = [];
   const write = context.event === "file.write.before";
   const roots = (write ? controls?.allowedWriteRoots : controls?.allowedReadRoots) ?? [];
-  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path13.resolve(context.cwd, root));
+  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path14.resolve(context.cwd, root));
   const enforceRoots = controls?.enforceRoots === true;
   for (const target of paths) {
     const canonical = resolveTargetPath(target, controls?.resolveSymlinks !== false);
@@ -2850,7 +3278,7 @@ function fileBoundaryGuard(context) {
         fix: "Limita la operacion al proyecto/raiz aprobada o genera aprobacion vinculada."
       });
     }
-    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path13.basename(canonical)));
+    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path14.basename(canonical)));
     if (denied) {
       violations.push({
         id: "MAL-HOOK-FILE-DENYLIST",
@@ -3065,25 +3493,25 @@ function isIndirectExecution(command) {
 }
 function resolveTargetPath(target, followSymlinks) {
   try {
-    if (fs9.existsSync(target)) {
-      return followSymlinks ? fs9.realpathSync(target) : path13.resolve(target);
+    if (fs10.existsSync(target)) {
+      return followSymlinks ? fs10.realpathSync(target) : path14.resolve(target);
     }
-    let parent = path13.dirname(target);
-    while (!fs9.existsSync(parent)) {
-      const next = path13.dirname(parent);
+    let parent = path14.dirname(target);
+    while (!fs10.existsSync(parent)) {
+      const next = path14.dirname(parent);
       if (next === parent)
         return null;
       parent = next;
     }
-    const canonicalParent = followSymlinks ? fs9.realpathSync(parent) : path13.resolve(parent);
-    return path13.join(canonicalParent, path13.relative(parent, target));
+    const canonicalParent = followSymlinks ? fs10.realpathSync(parent) : path14.resolve(parent);
+    return path14.join(canonicalParent, path14.relative(parent, target));
   } catch {
     return null;
   }
 }
 function isSecretPath(target) {
   const normalized = target.replaceAll("\\", "/");
-  const base = path13.basename(normalized);
+  const base = path14.basename(normalized);
   if (base === ".env.example")
     return false;
   return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
@@ -3103,7 +3531,7 @@ function parseHttpUrl(value) {
 function programmingQualityGuard(context) {
   const violations = [];
   const files = filesystemTargetPaths(context);
-  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path13.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path14.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -3124,7 +3552,7 @@ function programmingQualityGuard(context) {
   return violations;
 }
 function readableTargetPaths(context) {
-  return filesystemTargetPaths(context).map((targetPath) => path13.resolve(context.cwd, targetPath)).filter((targetPath) => fs9.existsSync(targetPath) && fs9.statSync(targetPath).isFile() && fs9.statSync(targetPath).size <= 512 * 1024);
+  return filesystemTargetPaths(context).map((targetPath) => path14.resolve(context.cwd, targetPath)).filter((targetPath) => fs10.existsSync(targetPath) && fs10.statSync(targetPath).isFile() && fs10.statSync(targetPath).size <= 512 * 1024);
 }
 function scanStagedSecrets(cwd, includeWorktree = false) {
   const commands = [
@@ -3146,8 +3574,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
       return null;
     }
     for (const relative of output.split("\x00").filter(Boolean)) {
-      const file = path13.resolve(cwd, relative);
-      if (!fs9.existsSync(file))
+      const file = path14.resolve(cwd, relative);
+      if (!fs10.existsSync(file))
         continue;
       try {
         leaks.push(...scanFileForSecrets(file));
@@ -3160,8 +3588,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
 }
 var PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function scanFileForSecrets(filePath) {
-  const basename = path13.basename(filePath);
-  const content = fs9.readFileSync(filePath, "utf8");
+  const basename = path14.basename(filePath);
+  const content = fs10.readFileSync(filePath, "utf8");
   const patterns = [
     [PRIVATE_KEY_PATTERN, "private-key"],
     [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
@@ -3188,7 +3616,7 @@ function strictness(profile, fallback) {
 }
 function fileSize(filePath) {
   try {
-    return fs9.statSync(filePath).size;
+    return fs10.statSync(filePath).size;
   } catch {
     return 0;
   }
@@ -3218,12 +3646,12 @@ function controlAffectsEvent(gap, event) {
   return true;
 }
 function isWithin2(targetPath, rootPath) {
-  const relative = path13.relative(path13.resolve(rootPath), path13.resolve(targetPath));
-  return relative === "" || !relative.startsWith("..") && !path13.isAbsolute(relative);
+  const relative = path14.relative(path14.resolve(rootPath), path14.resolve(targetPath));
+  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
 }
 function isInside(targetPath, rootPath) {
-  const relative = path13.relative(path13.resolve(rootPath), path13.resolve(targetPath));
-  return Boolean(relative) && !relative.startsWith("..") && !path13.isAbsolute(relative);
+  const relative = path14.relative(path14.resolve(rootPath), path14.resolve(targetPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path14.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/engine.ts
@@ -3516,8 +3944,8 @@ function evaluate(context) {
   return auditHookResult(context, runHooks(context));
 }
 async function resolveEvaluationScope(input, options, operationCwd, targetPaths, resourceKind, allowUnbound = false) {
-  const fallback = path14.resolve(options.cwd);
-  const operationDirectory = operationCwd ? path14.resolve(fallback, operationCwd) : undefined;
+  const fallback = path15.resolve(options.cwd);
+  const operationDirectory = operationCwd ? path15.resolve(fallback, operationCwd) : undefined;
   const sessionID = stringValue4(input.sessionID);
   if (options.resolveSessionProject && sessionID) {
     try {
@@ -3540,7 +3968,7 @@ async function resolveEvaluationScope(input, options, operationCwd, targetPaths,
           error: `el directorio de operacion no pertenece al proyecto ${project.canonicalKey}`
         };
       }
-      const cwd = operationDirectory ?? path14.resolve(project.root);
+      const cwd = operationDirectory ?? path15.resolve(project.root);
       const conflict = conflictingProjectTarget(cwd, targetPaths, resourceKind, project, options);
       if (conflict) {
         return {
@@ -3578,7 +4006,7 @@ async function resolveEvaluationScope(input, options, operationCwd, targetPaths,
         error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
       };
     }
-    return { options: { ...options, cwd: path14.resolve(directory) } };
+    return { options: { ...options, cwd: path15.resolve(directory) } };
   } catch (error) {
     return {
       options: { ...options, cwd: fallback },
@@ -3587,7 +4015,7 @@ async function resolveEvaluationScope(input, options, operationCwd, targetPaths,
   }
 }
 function buildContext(event, options, details, boundProject) {
-  const cwd = path14.resolve(options.cwd);
+  const cwd = path15.resolve(options.cwd);
   const env = options.env ?? process.env;
   try {
     const paths = pluginPaths(cwd, env);
@@ -3632,7 +4060,7 @@ function policyFailure(event, options, detail, boundProject) {
     }]
   };
   try {
-    const cwd = path14.resolve(options.cwd);
+    const cwd = path15.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
     const project = boundProject ? { ...resolveProject(boundProject.root), canonicalKey: boundProject.canonicalKey, root: boundProject.root } : resolveProject(cwd);
     const context = {
@@ -3656,7 +4084,7 @@ function pluginPaths(cwd, env) {
 }
 function resolveOperationProject(cwd, resourceKind, targetPaths, paths) {
   const candidates = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
-  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path14.resolve(cwd, target)) : [];
+  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path15.resolve(cwd, target)) : [];
   const candidate = candidates.find((entry) => isWithinPath2(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath2(target, entry.root)));
   if (!candidate)
     return resolveProject(cwd);
@@ -3668,12 +4096,12 @@ function conflictingProjectTarget(cwd, targetPaths, resourceKind, project, optio
     return;
   const paths = pluginPaths(cwd, options.env ?? process.env);
   const roots = registeredProjectRoots(paths.projectsFile);
-  const targets = targetPaths.map((target) => path14.resolve(cwd, target));
+  const targets = targetPaths.map((target) => path15.resolve(cwd, target));
   return roots.find((entry) => entry.canonicalKey !== project.canonicalKey && targets.some((target) => isWithinPath2(target, entry.root)))?.canonicalKey;
 }
 function isWithinPath2(value, root) {
-  const relative = path14.relative(path14.resolve(root), path14.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
+  const relative = path15.relative(path15.resolve(root), path15.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path15.isAbsolute(relative);
 }
 function permissionDetails(action, resources, metadata, deferToolWrite) {
   const normalized = action.toLowerCase();
@@ -3691,6 +4119,8 @@ function permissionDetails(action, resources, metadata, deferToolWrite) {
   if (["edit", "write", "patch", "create"].includes(normalized) && deferToolWrite) {
     return {
       event: "plugin.permission.before",
+      resourceKind: "filesystem",
+      targetPaths: resources,
       metadata: { ...metadata, knownTool: true, deferredToToolHook: true }
     };
   }
@@ -3717,6 +4147,7 @@ function permissionDetails(action, resources, metadata, deferToolWrite) {
   if (normalized === "task" || isMcpToolName(normalized)) {
     return {
       event: "tool.execute.before",
+      command: action.replace(/[_.:/-]+/g, " "),
       metadata: { ...metadata, tool: normalized === "task" ? "task" : action }
     };
   }
@@ -3725,6 +4156,13 @@ function permissionDetails(action, resources, metadata, deferToolWrite) {
   }
   if (KNOWN_TOOLS.has(normalized)) {
     return { event: "plugin.permission.before", metadata: { ...metadata, action, knownTool: true } };
+  }
+  if (deferToolWrite) {
+    return {
+      event: "tool.execute.before",
+      command: action.replace(/[_.:/-]+/g, " "),
+      metadata: { ...metadata, tool: action, deferredToToolHook: true }
+    };
   }
   return { event: "plugin.permission.before", metadata: { ...metadata, action } };
 }
@@ -3770,7 +4208,11 @@ function toolDetails(tool, input, options) {
       metadata: { tool, url: stringValue4(args.url) }
     };
   }
-  return { event: "tool.execute.before", metadata: { tool } };
+  return {
+    event: "tool.execute.before",
+    command: tool.replace(/[_.:/-]+/g, " "),
+    metadata: { tool }
+  };
 }
 var KNOWN_TOOLS = new Set([
   "todowrite",
@@ -3946,6 +4388,13 @@ Construcción y SDD
 - La verificación completa (diagnóstico, testing y build) se ejecuta al pedir commit o cuando el usuario la solicite explícitamente, no en cada interacción.
 - No selecciones ni detectes modelos automáticamente; la elección de modelo queda a criterio del usuario y del host.
 
+Infraestructura, entrega y despliegue
+- CI/CD, IaC, publicación y despliegue son superficies protegidas y solo lectura por defecto en todo repositorio gestionado, incluido Malahor.
+- Una aprobación de plan, implementación, stage, commit o push no autoriza modificar esas superficies ni ejecutar publicación o despliegue. Tampoco lo hacen perfiles, metadata del agente, confirmaciones Git ni Allow always.
+- Cada escritura, stage, commit o push que las afecte y cada comando mutante de publicación/despliegue requiere un ASK humano separado, específico y vinculado a operación, proyecto, recursos o comando y policy hash.
+- Un preflight de solo lectura puede informar MAL-HOOK-INFRA-APPROVAL como diferido y completar la validación; no consume ni sustituye el ASK nativo del stage, commit, push, publicación o despliegue real.
+- Sin esa aprobación verificable, limita la actuación a leer, analizar y proponer; no edites archivos protegidos ni ejecutes la operación.
+
 Principio de socio
 - No seas complaciente: cuestiona supuestos y propuestas con razones, riesgos y alternativas concretas.
 - Si el usuario insiste después de una discrepancia informada, procede dentro de los guardrails y registra la decisión/discrepancia cuando sea relevante.
@@ -3998,12 +4447,12 @@ function isRecord4(value) {
 }
 
 // src/plugin/planning.ts
-import fs12 from "node:fs";
-import path16 from "node:path";
+import fs13 from "node:fs";
+import path17 from "node:path";
 
 // src/cli/core/config.ts
 import { createHash as createHash4 } from "node:crypto";
-import fs10 from "node:fs";
+import fs11 from "node:fs";
 
 // src/docs/client.ts
 var DOCS_CLIENTS = ["system", "vscode", "obsidian"];
@@ -4063,10 +4512,10 @@ function modeForIntervention(intervention) {
   }
 }
 function readConfigFile(filePath) {
-  if (!fs10.existsSync(filePath)) {
+  if (!fs11.existsSync(filePath)) {
     return {};
   }
-  const raw = fs10.readFileSync(filePath, "utf8").trim();
+  const raw = fs11.readFileSync(filePath, "utf8").trim();
   if (!raw)
     return {};
   try {
@@ -4169,8 +4618,8 @@ function readOptionalBoolean(value, key) {
 
 // src/cli/core/mode.ts
 import { createHash as createHash5, randomBytes as randomBytes3 } from "node:crypto";
-import fs11 from "node:fs";
-import path15 from "node:path";
+import fs12 from "node:fs";
+import path16 from "node:path";
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
 function createScanner(text, ignoreTrivia = false) {
@@ -4972,12 +5421,12 @@ function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
   }
   return result;
 }
-function findNodeAtLocation(root, path15) {
+function findNodeAtLocation(root, path16) {
   if (!root) {
     return;
   }
   let node = root;
-  for (let segment of path15) {
+  for (let segment of path16) {
     if (typeof segment === "string") {
       if (node.type !== "object" || !Array.isArray(node.children)) {
         return;
@@ -5278,14 +5727,14 @@ function getNodeType(value) {
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/edit.js
 function setProperty(text, originalPath, value, options) {
-  const path15 = originalPath.slice();
+  const path16 = originalPath.slice();
   const errors = [];
   const root = parseTree(text, errors);
   let parent = undefined;
   let lastSegment = undefined;
-  while (path15.length > 0) {
-    lastSegment = path15.pop();
-    parent = findNodeAtLocation(root, path15);
+  while (path16.length > 0) {
+    lastSegment = path16.pop();
+    parent = findNodeAtLocation(root, path16);
     if (parent === undefined && value !== undefined) {
       if (typeof lastSegment === "string") {
         value = { [lastSegment]: value };
@@ -5471,8 +5920,8 @@ var ParseErrorCode;
   ParseErrorCode2[ParseErrorCode2["InvalidEscapeCharacter"] = 15] = "InvalidEscapeCharacter";
   ParseErrorCode2[ParseErrorCode2["InvalidCharacter"] = 16] = "InvalidCharacter";
 })(ParseErrorCode || (ParseErrorCode = {}));
-function modify(text, path15, value, options) {
-  return setProperty(text, path15, value, options);
+function modify(text, path16, value, options) {
+  return setProperty(text, path16, value, options);
 }
 function applyEdits(text, edits) {
   let sortedEdits = edits.slice(0).sort((a, b) => {
@@ -5557,13 +6006,13 @@ function applyModeChange(target, expectedVersion, beforeWrite, env = process.env
     return { mode: plan.target, backup: null, configFile: plan.configFile };
   const config = loadConfig(env, cwd);
   beforeWrite(plan.configFile, config.paths.backupsDir);
-  fs11.mkdirSync(path15.dirname(plan.configFile), { recursive: true, mode: 448 });
+  fs12.mkdirSync(path16.dirname(plan.configFile), { recursive: true, mode: 448 });
   assertSafePath(plan.configFile);
   assertSafePath(config.paths.backupsDir);
   const lock = `${plan.configFile}.mode.lock`;
   let lockFd;
   try {
-    lockFd = fs11.openSync(lock, "wx", 384);
+    lockFd = fs12.openSync(lock, "wx", 384);
   } catch (error) {
     throw new Error(`Cambio de modo bloqueado (lock activo o directorio inexistente): ${error.message}`);
   }
@@ -5575,38 +6024,38 @@ function applyModeChange(target, expectedVersion, beforeWrite, env = process.env
     const raw = readConfig(plan.configFile);
     const revision = randomBytes3(16).toString("hex");
     const after = editExecution(raw, target, revision);
-    const backup = fs11.existsSync(plan.configFile) ? path15.join(config.paths.backupsDir, `${path15.basename(plan.configFile)}.${timestamp()}.${randomBytes3(6).toString("hex")}.bak`) : null;
+    const backup = fs12.existsSync(plan.configFile) ? path16.join(config.paths.backupsDir, `${path16.basename(plan.configFile)}.${timestamp()}.${randomBytes3(6).toString("hex")}.bak`) : null;
     if (backup) {
-      fs11.mkdirSync(config.paths.backupsDir, { recursive: true, mode: 448 });
+      fs12.mkdirSync(config.paths.backupsDir, { recursive: true, mode: 448 });
       assertSafePath(config.paths.backupsDir);
-      fs11.copyFileSync(plan.configFile, backup, fs11.constants.COPYFILE_EXCL);
-      fs11.chmodSync(backup, 384);
+      fs12.copyFileSync(plan.configFile, backup, fs12.constants.COPYFILE_EXCL);
+      fs12.chmodSync(backup, 384);
     }
     temporary = `${plan.configFile}.${randomBytes3(8).toString("hex")}.tmp`;
-    fs11.writeFileSync(temporary, after, { flag: "wx", mode: 384 });
+    fs12.writeFileSync(temporary, after, { flag: "wx", mode: 384 });
     if (readConfig(plan.configFile) !== raw)
       throw new Error("La configuracion cambio durante el respaldo: no se aplica.");
-    fs11.renameSync(temporary, plan.configFile);
+    fs12.renameSync(temporary, plan.configFile);
     temporary = undefined;
     return { mode: modeName(target), backup, configFile: plan.configFile };
   } finally {
     if (temporary)
-      fs11.rmSync(temporary, { force: true });
-    fs11.closeSync(lockFd);
-    fs11.unlinkSync(lock);
+      fs12.rmSync(temporary, { force: true });
+    fs12.closeSync(lockFd);
+    fs12.unlinkSync(lock);
   }
 }
 function readConfig(file) {
   assertSafePath(file);
   try {
-    if (!fs11.lstatSync(file).isFile())
+    if (!fs12.lstatSync(file).isFile())
       throw new Error("La configuracion de Malahor debe ser archivo regular, no symlink.");
   } catch (error) {
     if (error.code === "ENOENT")
       return "";
     throw error;
   }
-  return fs11.readFileSync(file, "utf8");
+  return fs12.readFileSync(file, "utf8");
 }
 function hasConfiguredIntervention(file) {
   const raw = readConfig(file);
@@ -5619,15 +6068,15 @@ function hasConfiguredIntervention(file) {
   return parsed?.execution?.intervention !== undefined;
 }
 function assertSafePath(file) {
-  for (let current = path15.resolve(file);; current = path15.dirname(current)) {
+  for (let current = path16.resolve(file);; current = path16.dirname(current)) {
     try {
-      if (fs11.lstatSync(current).isSymbolicLink())
+      if (fs12.lstatSync(current).isSymbolicLink())
         throw new Error(`Ruta con symlink no permitida: ${current}`);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
     }
-    if (path15.dirname(current) === current)
+    if (path16.dirname(current) === current)
       break;
   }
 }
@@ -6179,7 +6628,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
           throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
-        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs12.existsSync(item.resource));
+        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs13.existsSync(item.resource));
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority);
@@ -6348,7 +6797,7 @@ async function resolvePlanningScope(value, options) {
       const project = await options.resolveSessionProject(value);
       if (!project)
         return;
-      const directory2 = path16.resolve(project.root);
+      const directory2 = path17.resolve(project.root);
       const env2 = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
       const config2 = loadConfig(env2, directory2);
       return { scope: {
@@ -6382,7 +6831,7 @@ async function resolvePlanningScope(value, options) {
 function toolActions(tool, value, directory) {
   const args = isRecord5(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
-    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path16.resolve(directory, cwd) !== path16.resolve(directory))))
+    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path17.resolve(directory, cwd) !== path17.resolve(directory))))
       return;
     return typeof args.command === "string" && args.command.trim() ? [{ action: "shell", resource: args.command }] : undefined;
   }
@@ -6402,7 +6851,7 @@ function toolActions(tool, value, directory) {
   return;
 }
 function normalizeAction(action, resource, directory) {
-  return { action, resource: action === "edit" ? path16.resolve(directory, resource) : resource };
+  return { action, resource: action === "edit" ? path17.resolve(directory, resource) : resource };
 }
 function permissionResourcesAllowed(state, scope, action, resources, directory, authority) {
   if (resources.length === 0 || resources.some((item) => typeof item !== "string"))
@@ -6437,8 +6886,8 @@ function planningProjectRoot(project, directory, env) {
   return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside2(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
 }
 function inside2(target, root) {
-  const relative = path16.relative(path16.resolve(root), path16.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path16.isAbsolute(relative);
+  const relative = path17.relative(path17.resolve(root), path17.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path17.isAbsolute(relative);
 }
 function text(value) {
   return typeof value === "string" ? value : "";
@@ -6571,7 +7020,7 @@ async function registerPlanCommand(host, storage, authority, options) {
 }
 
 // src/plugin/project-affinity.ts
-import path17 from "node:path";
+import path18 from "node:path";
 import { fileURLToPath } from "node:url";
 var PROJECT_AFFINITY_MARKER = "<!-- malahor-project-affinity:v1 -->";
 function createProjectAffinityResolver(options) {
@@ -6681,7 +7130,7 @@ function loadRegistry(options) {
     for (const root of roots) {
       const info = resolveProject(root, config.projects.aliases);
       names.add(info.name);
-      names.add(path17.basename(root));
+      names.add(path18.basename(root));
       for (const alias of info.aliases)
         names.add(alias);
     }
@@ -6825,9 +7274,9 @@ function normalizedPath(value, base) {
       return;
     }
   }
-  if (!path17.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
+  if (!path18.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
     return;
-  return path17.resolve(base, plain);
+  return path18.resolve(base, plain);
 }
 function resolved(project) {
   return { canonicalKey: project.canonicalKey, root: project.roots[0] };
@@ -6851,8 +7300,8 @@ ${text2}`;
     system.push({ type: "text", text: text2 });
 }
 function inside3(value, root) {
-  const relative = path17.relative(path17.resolve(root), path17.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path17.isAbsolute(relative);
+  const relative = path18.relative(path18.resolve(root), path18.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
 }
 function timestamp2(options) {
   return new Date((options.now ?? Date.now)()).toISOString();
@@ -7326,16 +7775,16 @@ function captureSubagentsOptIn(cwd, env, canonicalKey) {
 async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
-  if (!fs13.existsSync(paths.mnemoIndex)) {
+  if (!fs14.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   }
-  if (!fs13.existsSync(paths.docsIndex)) {
+  if (!fs14.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs13.existsSync(paths.mnemoIndex)) {
+      if (fs14.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
@@ -7349,7 +7798,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
         }
       }
       const existingDocs = editor.get("docs");
-      if (fs13.existsSync(paths.docsIndex)) {
+      if (fs14.existsSync(paths.docsIndex)) {
         if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
           editor.set("docs", {
             ...existingDocs ?? {},
@@ -7364,7 +7813,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
       }
       let target;
       try {
-        const registered = canonical2 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs13.realpathSync(entry.root) === fs13.realpathSync(canonical2)) : undefined;
+        const registered = canonical2 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs14.realpathSync(entry.root) === fs14.realpathSync(canonical2)) : undefined;
         if (!canonical2 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
@@ -7406,19 +7855,19 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path18.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path19.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path18.resolve(paths.opencodeDir, item) === path18.resolve(paths.mnemoIndex));
+  return command.some((item) => path19.resolve(paths.opencodeDir, item) === path19.resolve(paths.mnemoIndex));
 }
 function isMalahorDocs(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path18.resolve(paths.opencodeDir, item) === path18.resolve(paths.docsIndex));
+  return command.some((item) => path19.resolve(paths.opencodeDir, item) === path19.resolve(paths.docsIndex));
 }
 function sessionLocationDirectory(value) {
   const response = isRecord7(value) && isRecord7(value.data) ? value.data : value;
@@ -7437,7 +7886,7 @@ function sessionLocationProject(value) {
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path18.join(directory, "plugin-state.json");
+  const file = path19.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -7449,15 +7898,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs13.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path18.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs13.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs14.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path19.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs14.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs13.chmodSync(temporary, 384);
-    fs13.renameSync(temporary, file);
+    fs14.chmodSync(temporary, 384);
+    fs14.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -7467,8 +7916,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path18.resolve(override);
-  return path18.join(os2.homedir(), ".malahor");
+    return path19.resolve(override);
+  return path19.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))

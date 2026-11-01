@@ -1,6 +1,5 @@
 import { formatHookResult } from "../core/hooks/engine";
-import type { HookResult } from "../core/hooks/types";
-import { runGitWorkflow, type GitWorkflowResult } from "../core/git-workflow";
+import { gitWorkflowExitCode, runGitWorkflow, type GitWorkflowResult } from "../core/git-workflow";
 
 export interface GitOptions {
   action: string;
@@ -37,7 +36,7 @@ export function runGitCommand(options: GitOptions): void {
 function printWorkflowResult(result: GitWorkflowResult, json: boolean): void {
   if (json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    applyExitCode(result.hookResult);
+    applyExitCode(result);
     return;
   }
 
@@ -52,15 +51,15 @@ function printWorkflowResult(result: GitWorkflowResult, json: boolean): void {
   if (result.message) process.stdout.write(`Message: ${result.message}\n`);
   if (result.command) process.stdout.write(`Suggested command: ${result.command}\n`);
   if (result.hookResult) process.stdout.write(`${formatHookResult(result.hookResult)}\n`);
+  if (result.approvalDeferred) process.stdout.write("Aprobacion: diferida al prompt nativo del efecto real\n");
   if (result.notes.length > 0) process.stdout.write(`Notas:\n- ${result.notes.join("\n- ")}\n`);
 
-  applyExitCode(result.hookResult);
+  applyExitCode(result);
 }
 
-function applyExitCode(result: HookResult | undefined): void {
-  if (!result) return;
-  if (result.decision === "deny") process.exitCode = 2;
-  if (result.decision === "ask") process.exitCode = 3;
+function applyExitCode(result: GitWorkflowResult): void {
+  const exitCode = gitWorkflowExitCode(result);
+  if (exitCode !== 0) process.exitCode = exitCode;
 }
 
 function printGitHelp(): void {
@@ -78,6 +77,7 @@ Ejemplos:
 Notas:
   - No ejecuta git add, git commit ni git push.
   - DENY devuelve exit 2; ASK devuelve exit 3 y requiere aprobacion verificable.
+  - En precommit/commit-message, solo MAL-HOOK-INFRA-APPROVAL puede diferirse al prompt nativo del efecto real y devolver exit 0.
   - CHECKS_OK no autoriza por si solo una operacion ASK.
 `);
 }

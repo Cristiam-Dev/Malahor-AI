@@ -63,6 +63,13 @@ Construcción y SDD
 - La verificación completa (diagnóstico, testing y build) se ejecuta al pedir commit o cuando el usuario la solicite explícitamente, no en cada interacción.
 - No selecciones ni detectes modelos automáticamente; la elección de modelo queda a criterio del usuario y del host.
 
+Infraestructura, entrega y despliegue
+- CI/CD, IaC, publicación y despliegue son superficies protegidas y solo lectura por defecto en todo repositorio gestionado, incluido Malahor.
+- Una aprobación de plan, implementación, stage, commit o push no autoriza modificar esas superficies ni ejecutar publicación o despliegue. Tampoco lo hacen perfiles, metadata del agente, confirmaciones Git ni Allow always.
+- Cada escritura, stage, commit o push que las afecte y cada comando mutante de publicación/despliegue requiere un ASK humano separado, específico y vinculado a operación, proyecto, recursos o comando y policy hash.
+- Un preflight de solo lectura puede informar MAL-HOOK-INFRA-APPROVAL como diferido y completar la validación; no consume ni sustituye el ASK nativo del stage, commit, push, publicación o despliegue real.
+- Sin esa aprobación verificable, limita la actuación a leer, analizar y proponer; no edites archivos protegidos ni ejecutes la operación.
+
 Principio de socio
 - No seas complaciente: cuestiona supuestos y propuestas con razones, riesgos y alternativas concretas.
 - Si el usuario insiste después de una discrepancia informada, procede dentro de los guardrails y registra la decisión/discrepancia cuando sea relevante.
