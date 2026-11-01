@@ -5,6 +5,7 @@ import path from "node:path";
 import { loadConfig, type MalahorIntervention, type MalahorMode } from "../src/cli/core/config";
 import type { PluginAdapterOptions } from "../src/cli/core/hooks/plugin-adapter";
 import { MODE_CHANGE_ACTION, previewModeChange } from "../src/cli/core/mode";
+import type { PlanningAuthority } from "../src/cli/core/planning-authority";
 import {
   authorizePlan, controlPlan, planAllows, presentPlan, proposePlan, renderPlan, requestPlanExecution, reviewPlan, validState,
   type PlanInput, type PlanningAdapter, type PlanScope, type PlanState,
@@ -104,22 +105,24 @@ function input(action: "edit" | "shell" | "subagent" = "edit"): PlanInput {
     steps: ["Presentar plan", "Cambiar solo lo declarado"],
     presentation: {
       objective: "Cambiar exclusivamente la ruta declarada por el plan.",
-      rationale: "El cambio debe permanecer acotado y ser verificable antes de aprobarlo.",
+      outcome: "La ruta queda actualizada y verificada sin ampliar el alcance autorizado.",
       steps: [
         {
           title: "Presentar el plan",
-          what: "Mostrar el objetivo, alcance y efectos exactos.",
-          why: "La persona necesita comprender el cambio antes de aprobar.",
-          expected: "El plan queda visible como un mensaje normal y completo.",
+          description: "Mostrar una vista breve antes de pedir cualquier aprobación.",
         },
         {
           title: "Cambiar solo lo declarado",
-          what: "Ejecutar unicamente la accion y el recurso enumerados.",
-          why: "Evita ampliar silenciosamente los efectos autorizados.",
-          expected: "No se toca ningun recurso fuera del plan.",
+          description: "Ejecutar únicamente la acción y el recurso del anexo técnico.",
         },
       ],
-      changes: ["La ruta declarada en acciones"],
+      impact: [{ area: "Código", description: "Solo cambia la ruta declarada en acciones." }],
+      risk: {
+        level: "low",
+        categories: [],
+        summary: "Cambio acotado al fixture.",
+        details: "La autorización conserva exactamente el recurso declarado.",
+      },
       exclusions: ["Cualquier otro archivo, comando o subagente"],
       completionCriteria: ["La accion declarada queda verificada sin ampliar el alcance"],
     },
@@ -133,9 +136,15 @@ function conceptInput(summary = "Alternativas"): PlanInput {
     steps: [],
     presentation: {
       objective: summary,
-      rationale: "Comparar opciones sin ejecutar cambios.",
+      outcome: "Las alternativas quedan comparadas sin ejecutar cambios.",
       steps: [],
-      changes: [],
+      impact: [],
+      risk: {
+        level: "low",
+        categories: [],
+        summary: "Análisis conceptual sin efectos ejecutables.",
+        details: "No se modifican recursos ni permisos.",
+      },
       exclusions: ["No se ejecutaran acciones ni se modificaran recursos"],
       completionCriteria: ["Las alternativas y sus implicaciones quedan explicadas"],
     },
@@ -154,6 +163,14 @@ function foregroundMarkdown(content: string): string {
   expect(start).toBeGreaterThan(FOREGROUND_START.length - 1);
   expect(end).toBeGreaterThan(start);
   return content.slice(start, end).trim();
+}
+
+function expectProgressiveDisclosureContract(text: string): void {
+  expect(text).toMatch(/(?:divulgaci[oó]n progresiva|resumen[\s\S]{0,240}anexo t[eé]cnico)/i);
+  expect(text).toContain("/malahor-plan detalles");
+  expect(text).toMatch(
+    /(?:riesgo alto|categor[ií]a(?:s)? cr[ií]tica(?:s)?)[\s\S]{0,300}(?:visible|abiert[oa]|expandid[oa])[\s\S]{0,120}(?:por defecto|sin interacci[oó]n)/i,
+  );
 }
 
 function authorized(mode: "assistant" | "executor" = "assistant", now = Date.now()): PlanState {
@@ -212,7 +229,10 @@ async function registeredTools(onApproval?: (request: ApprovalRequest) => Promis
   const execute = async (name: "plan" | "run" | "plan_control", value: unknown, context = call()) => {
     const definition = definitions.get(name);
     if (!definition || typeof definition.execute !== "function") throw new Error(`Tool ${name} no registrada`);
-    return (definition.execute as (value: unknown, context: ReturnType<typeof call>) => Promise<{ content: string }>)(value, context);
+    return (definition.execute as (value: unknown, context: ReturnType<typeof call>) => Promise<{
+      content: string;
+      metadata?: { planID?: string; revision?: string; phase?: string };
+    }>)(value, context);
   };
   return { approvals, definitions, execute, registration };
 }
@@ -285,7 +305,7 @@ describe("nucleo: transiciones y binding del plan", () => {
     expect(planAllows(authorizePlan(plan, plan.digest, NOW), scope("executor"), input("shell").actions[0]!, NOW)).toBe(true);
   });
 
-  test("acciones canonicas sin duplicados; hash ligado a presentacion, recursos y scope", () => {
+  test("acciones canonicas sin duplicados; hash ligado a resultado, impacto, riesgo, recursos y scope", () => {
     const base = input();
     const first = proposePlan(scope(), { ...base, actions: [base.actions[0]!, { action: "shell", resource: "echo fixture" }] }, NOW);
     const reordered = proposePlan(scope(), { ...base, actions: [
@@ -296,10 +316,28 @@ describe("nucleo: transiciones y binding del plan", () => {
     expect(first.plan.actions).toHaveLength(2);
     expect(first.plan.presentation).toEqual(base.presentation);
     expect(proposePlan(scope(), { ...base, steps: ["Distinto"] }, NOW).digest).not.toBe(first.digest);
-    expect(proposePlan(scope(), {
-      ...base,
-      presentation: { ...base.presentation, rationale: "Una razon materialmente distinta." },
-    }, NOW).digest).not.toBe(first.digest);
+    const digestOnlyAuthority: PlanningAuthority = {
+      fingerprint: "digest-only-test",
+      sign: () => "proof",
+      verify: () => true,
+    };
+    const bound = proposePlan(scope(), base, NOW, "msg_digest_binding", "f".repeat(32), digestOnlyAuthority);
+    for (const changedPresentation of [
+      { ...bound.plan.presentation, outcome: "Un resultado materialmente distinto." },
+      {
+        ...bound.plan.presentation,
+        impact: [{ area: "Operación", description: "Un impacto materialmente distinto." }],
+      },
+      {
+        ...bound.plan.presentation,
+        risk: {
+          level: "high", categories: ["architecture"],
+          summary: "Riesgo materialmente distinto.", details: "Requiere revisión arquitectónica.",
+        },
+      },
+    ]) {
+      expect(validState({ ...bound, plan: { ...bound.plan, presentation: changedPresentation } }, digestOnlyAuthority)).toBe(false);
+    }
     expect(proposePlan(scope(), { ...base, actions: [{ action: "edit", resource: path.join(repo, "other.ts") }] }, NOW).digest).not.toBe(first.digest);
     expect(proposePlan({ ...scope(), project: "other" }, base, NOW).digest).not.toBe(first.digest);
     expect(proposePlan({ ...scope(), sessionID: "ses_other" }, base, NOW).digest).not.toBe(first.digest);
@@ -343,6 +381,20 @@ describe("nucleo: transiciones y binding del plan", () => {
       { ...active, policyRevision: "b".repeat(32) },
       { ...active, expiresAt: active.createdAt + 31 * 60_000 },
       { ...active, plan: { ...active.plan, actions: [{ ...operation, resource: path.join(repo, "other.ts") }] } },
+      { ...active, plan: { ...active.plan, presentation: {
+        ...active.plan.presentation, outcome: "Resultado adulterado.",
+      } } },
+      { ...active, plan: { ...active.plan, presentation: {
+        ...active.plan.presentation,
+        impact: [{ area: "Datos", description: "Impacto adulterado." }],
+      } } },
+      { ...active, plan: { ...active.plan, presentation: {
+        ...active.plan.presentation,
+        risk: {
+          level: "high", categories: ["data"],
+          summary: "Riesgo adulterado.", details: "No pertenece a la revisión firmada.",
+        },
+      } } },
     ];
     for (const variant of variants) {
       expect(validState(variant)).toBe(false);
@@ -878,39 +930,67 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     }
   });
 
-  test("el contrato de malahor_plan exige la presentacion semantica sin retirar argumentos existentes", async () => {
+  test("el schema de malahor_plan exige la nueva presentación estricta sin retirar argumentos existentes", async () => {
     const harness = await registeredTools();
-    const schema = harness.definitions.get("plan")?.input as {
+    type Schema = {
+      type?: string;
       required?: string[];
-      properties?: Record<string, { required?: string[]; properties?: Record<string, unknown> }>;
+      properties?: Record<string, Schema>;
+      items?: Schema;
+      enum?: string[];
+      maxItems?: number;
+      uniqueItems?: boolean;
+      additionalProperties?: boolean;
     };
-    expect(schema.required).toEqual(["summary", "steps", "presentation", "actions"]);
-    expect(Object.keys(schema.properties ?? {})).toEqual(["summary", "steps", "presentation", "actions", "dependencies"]);
-    expect(schema.properties?.presentation?.required).toEqual([
-      "objective", "rationale", "steps", "changes", "exclusions", "completionCriteria",
-    ]);
+    const schema = harness.definitions.get("plan")?.input as Schema;
+    const sorted = (items: string[] | undefined) => [...(items ?? [])].sort();
+    expect(sorted(schema.required)).toEqual(sorted(["summary", "steps", "presentation", "actions"]));
+    expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted(["summary", "steps", "presentation", "actions", "dependencies"]));
+    expect(schema.additionalProperties).toBe(false);
+    expect(sorted(schema.properties?.presentation?.required)).toEqual(sorted([
+      "objective", "outcome", "steps", "impact", "risk", "exclusions", "completionCriteria",
+    ]));
+    expect(schema.properties?.presentation?.additionalProperties).toBe(false);
     const presentationProperties = schema.properties?.presentation?.properties ?? {};
-    expect(Object.keys(presentationProperties)).toEqual([
-      "objective", "rationale", "steps", "changes", "exclusions", "completionCriteria",
-    ]);
-    const presentationSteps = presentationProperties.steps as {
-      items?: { required?: string[]; properties?: Record<string, unknown> };
-    };
-    expect(presentationSteps.items?.required).toEqual(["title", "what", "why", "expected"]);
-    expect(Object.keys(presentationSteps.items?.properties ?? {})).toEqual(["title", "what", "why", "expected"]);
+    expect(sorted(Object.keys(presentationProperties))).toEqual(sorted([
+      "objective", "outcome", "steps", "impact", "risk", "exclusions", "completionCriteria",
+    ]));
+    const presentationSteps = presentationProperties.steps!;
+    expect(presentationSteps.maxItems).toBe(5);
+    expect(sorted(presentationSteps.items?.required)).toEqual(sorted(["title", "description"]));
+    expect(sorted(Object.keys(presentationSteps.items?.properties ?? {}))).toEqual(sorted(["title", "description"]));
+    expect(presentationSteps.items?.additionalProperties).toBe(false);
+
+    const impact = presentationProperties.impact!;
+    expect(sorted(impact.items?.required)).toEqual(sorted(["area", "description"]));
+    expect(sorted(Object.keys(impact.items?.properties ?? {}))).toEqual(sorted(["area", "description"]));
+    expect(impact.items?.additionalProperties).toBe(false);
+
+    const risk = presentationProperties.risk!;
+    expect(sorted(risk.required)).toEqual(sorted(["level", "categories", "summary", "details"]));
+    expect(sorted(Object.keys(risk.properties ?? {}))).toEqual(sorted(["level", "categories", "summary", "details"]));
+    expect(risk.additionalProperties).toBe(false);
+    expect(sorted(risk.properties?.level?.enum)).toEqual(sorted(["low", "medium", "high"]));
+    expect(sorted(risk.properties?.categories?.items?.enum)).toEqual(sorted([
+      "security", "data", "architecture", "destructive",
+    ]));
+    expect(risk.properties?.categories?.uniqueItems).toBe(true);
   });
 
   test("malahor_plan guarda estado v4 ligado al turno y rechaza estados v3", async () => {
     configure("ejecutar");
     const harness = await registeredTools();
     const planCall = call(SESSION, "malahor", "msg_executor_presentation");
-    await harness.execute("plan", input(), planCall);
+    const planResult = await harness.execute("plan", input(), planCall);
 
     expect(planKey(SESSION)).toBe(`planning/v4/sessions/${SESSION}`);
     expect(records.has(planKey(SESSION))).toBe(true);
     const state = records.get(planKey(SESSION)) as PlanState;
     expect(state.version).toBe(4);
     expect(state.plan.presentation).toEqual(input().presentation);
+    expect(planResult.metadata).toMatchObject({
+      planID: state.planID, revision: state.revision, phase: state.phase,
+    });
     expect(presentationIdentity(state)).toBe(planCall.messageID);
     expect(validState(state)).toBe(true);
     expect(harness.approvals).toHaveLength(0);
@@ -929,9 +1009,10 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(foregroundMarkdown(result.content)).toBe(renderPlan(state));
     expect(result.content.match(/malahor-plan-foreground:start/g) ?? []).toHaveLength(1);
     expect(result.content.match(/malahor-plan-foreground:end/g) ?? []).toHaveLength(1);
-    expect(foregroundMarkdown(result.content)).toMatch(/^## Qué haremos$/m);
-    expect(foregroundMarkdown(result.content)).toMatch(/^## Por qué$/m);
-    expect(foregroundMarkdown(result.content)).toMatch(/^## Siguiente acción$/m);
+    expect(foregroundMarkdown(result.content)).toMatch(/^## Objetivo$/m);
+    expect(foregroundMarkdown(result.content)).toMatch(/^## Al terminar$/m);
+    expect(foregroundMarkdown(result.content)).toMatch(/^## Acción requerida$/m);
+    expect(foregroundMarkdown(result.content)).toContain("/malahor-plan detalles");
   });
 
   test("asistente revisa el plan pero bloquea la segunda confirmacion en el mismo turno", async () => {
@@ -965,7 +1046,16 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(phases[1]?.state?.authorizedAt).toBeUndefined();
     const running = records.get(planKey(SESSION)) as PlanState;
     expect(running.authorizedAt).toBeNumber();
+    expect({ planID: running.planID, revision: running.revision, digest: running.digest }).toEqual({
+      planID: presented.planID, revision: presented.revision, digest: presented.digest,
+    });
+    expect(runResult.metadata).toMatchObject({
+      planID: running.planID, revision: running.revision, phase: running.phase,
+    });
     expect(runResult.content).toBe(renderPlan(running));
+    expect(runResult.content).toContain(running.planID);
+    expect(runResult.content).toContain(running.revision);
+    expect(runResult.content).toContain(running.digest);
     expect(harness.approvals.map((request) => request.action)).toEqual(["malahor_plan_review", "malahor_plan_run"]);
     const afterRun = { ...beforeRun, effect: "allow" };
     await evaluatePlanningPermission(afterRun, options, storage);
@@ -1033,18 +1123,22 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     const harness = await registeredTools();
     await harness.execute("plan", input(), call(SESSION, "malahor", "msg_control_plan"));
     const presented = records.get(planKey(SESSION)) as PlanState;
+    const identity = { planID: presented.planID, revision: presented.revision, digest: presented.digest };
     await harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_control_go"));
     const pausedResult = await harness.execute("plan_control", { action: "pause" }, call(SESSION, "malahor", "msg_control_pause"));
     const paused = records.get(planKey(SESSION)) as PlanState;
     expect(paused.phase).toBe("paused");
+    expect({ planID: paused.planID, revision: paused.revision, digest: paused.digest }).toEqual(identity);
     expect(pausedResult.content).toBe(renderPlan(paused));
     const resumedResult = await harness.execute("plan_control", { action: "resume" }, call(SESSION, "malahor", "msg_control_resume"));
     const resumed = records.get(planKey(SESSION)) as PlanState;
     expect(resumed.phase).toBe("running");
+    expect({ planID: resumed.planID, revision: resumed.revision, digest: resumed.digest }).toEqual(identity);
     expect(resumedResult.content).toBe(renderPlan(resumed));
     const completedResult = await harness.execute("plan_control", { action: "complete" }, call(SESSION, "malahor", "msg_control_complete"));
     const completed = records.get(planKey(SESSION)) as PlanState;
     expect(completed.phase).toBe("completed");
+    expect({ planID: completed.planID, revision: completed.revision, digest: completed.digest }).toEqual(identity);
     expect(completedResult.content).toBe(renderPlan(completed));
     expect(harness.approvals.map((item) => item.action)).toEqual([
       "malahor_plan_run", "malahor_plan_resume", "malahor_plan_complete",
@@ -1229,6 +1323,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(text).toMatch(/\bgo\b/i);
     expect(text).toMatch(/\bimplementa\b/i);
     expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
+    expectProgressiveDisclosureContract(text);
     const absent: Record<string, unknown> = { sessionID: SESSION, agent: "malahor", system: [] };
     await injectPlanningInstructions(absent, options);
     expect((absent.system as Array<{ text: string }>)[0]?.text).toContain("no ejecutes");
@@ -1264,6 +1359,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(
       /cop(?:ia|iar)[\s\S]*(?:Markdown|presentaci[oó]n)[\s\S]*termina(?:r)? (?:este )?turno[\s\S]*no invoques malahor_run/i,
     );
+    expectProgressiveDisclosureContract(MALAHOR_RUNTIME_PROTOCOL);
   });
 
   test("plugin V2 registra tools y hooks con un host estructural sintético, sin instalacion", async () => {

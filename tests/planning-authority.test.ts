@@ -38,14 +38,18 @@ describe("autoridad persistente de planning", () => {
       steps: ["validar"],
       presentation: {
         objective: "Validar la autoridad persistente del plan.",
-        rationale: "La firma debe seguir siendo verificable despues de recargar la clave.",
+        outcome: "La firma sigue siendo verificable después de recargar la clave.",
         steps: [{
           title: "Validar la firma",
-          what: "Recargar la autoridad y verificar el estado firmado.",
-          why: "Demuestra continuidad sin aceptar estados adulterados.",
-          expected: "El estado conserva una firma valida tras el reinicio.",
+          description: "Recargar la autoridad y verificar el estado firmado.",
         }],
-        changes: ["El fixture de autoridad"],
+        impact: [{ area: "Autoridad", description: "El fixture conserva continuidad entre reinicios." }],
+        risk: {
+          level: "low",
+          categories: [],
+          summary: "La prueba usa una clave privada aislada.",
+          details: "No se leen ni modifican claves externas.",
+        },
         exclusions: ["No se modifican claves externas"],
         completionCriteria: ["La segunda autoridad verifica el estado firmado por la primera"],
       },
@@ -53,6 +57,21 @@ describe("autoridad persistente de planning", () => {
     },
     Date.now(), "msg-authority", undefined, first);
     expect(validState(state, second)).toBe(true);
+
+    for (const field of ["outcome", "impact", "risk"] as const) {
+      const tampered = structuredClone(state) as unknown as {
+        plan: { presentation: Record<string, unknown> };
+      };
+      tampered.plan.presentation[field] = field === "outcome"
+        ? "Resultado adulterado."
+        : field === "impact"
+          ? [{ area: "Datos", description: "Impacto adulterado." }]
+          : {
+            level: "high", categories: ["security"],
+            summary: "Riesgo adulterado.", details: "No pertenece a la revisión firmada.",
+          };
+      expect(validState(tampered, second)).toBe(false);
+    }
     expect(fs.lstatSync(planningKeyPath(directory)).isFile()).toBe(true);
     if (process.platform !== "win32") {
       expect(fs.statSync(directory).mode & 0o777).toBe(0o700);

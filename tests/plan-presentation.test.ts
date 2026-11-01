@@ -2,18 +2,30 @@ import { describe, expect, test } from "bun:test";
 
 import { validPlanPresentation } from "../src/cli/core/plan-presentation";
 import {
-  authorizePlan,
-  controlPlan,
   proposePlan,
-  reviewPlan,
   type PlanInput,
-  type PlanningAdapter,
   type PlanScope,
   type PlanState,
 } from "../src/cli/core/planning";
 
 const NOW = Date.parse("2026-11-01T12:00:00.000Z");
 const DEPENDENCY = { planID: "a".repeat(32), revision: "b".repeat(32) };
+
+type RiskCategory = "security" | "data" | "architecture" | "destructive";
+type TargetPresentation = {
+  objective: string;
+  outcome: string;
+  steps: Array<{ title: string; description: string }>;
+  impact: Array<{ area: string; description: string }>;
+  risk: {
+    level: "low" | "medium" | "high";
+    categories: RiskCategory[];
+    summary: string;
+    details: string;
+  };
+  exclusions: string[];
+  completionCriteria: string[];
+};
 
 const scope = (mode: PlanScope["mode"] = "assistant"): PlanScope => ({
   sessionID: "ses_plan_presentation",
@@ -22,152 +34,346 @@ const scope = (mode: PlanScope["mode"] = "assistant"): PlanScope => ({
   policyRevision: "c".repeat(32),
 });
 
-const input = (): PlanInput => ({
-  summary: "Hacer visible el plan humano",
-  steps: ["Definir el contrato", "Verificar todos los adaptadores"],
-  presentation: {
-    objective: "Mostrar el plan completo como un mensaje normal antes de aprobar.",
-    rationale: "La traza tecnica de una tool no es una presentacion comprensible para la persona.",
+function presentation(overrides: Partial<TargetPresentation> = {}): TargetPresentation {
+  return {
+    objective: "Hacer visible el plan humano antes de aprobarlo.",
+    outcome: "La persona entiende el resultado, el impacto y el riesgo en unos segundos.",
     steps: [
       {
-        title: "Definir el contrato semantico",
-        what: "Crear una vista humana comun para todos los adaptadores.",
-        why: "Evita que cada harness reconstruya o resuma el plan de forma distinta.",
-        expected: "Un Markdown estable con toda la informacion necesaria para decidir.",
+        title: "Definir la vista humana",
+        description: "Presentar una ruta breve y común para todos los adaptadores.",
       },
       {
         title: "Verificar el flujo foreground",
-        what: "Comprobar presentacion, revision, ejecucion y controles.",
-        why: "El output tecnico nunca debe sustituir la presentacion normal.",
-        expected: "Todos los puntos de entrada muestran exactamente el mismo plan.",
+        description: "Comprobar presentación, revisión, ejecución y controles.",
       },
     ],
-    changes: ["El renderer canonico", "La envoltura foreground de malahor_plan"],
-    exclusions: ["No se ejecutaran las acciones durante la presentacion", "No se mostraran argumentos crudos"],
-    completionCriteria: [
-      "La persona ve objetivo, motivo, pasos, alcance y criterios de cierre.",
-      "Cada efecto ejecutable conserva su recurso exacto.",
+    impact: [
+      { area: "Interfaz humana", description: "El plan prioriza la información necesaria para decidir." },
+      { area: "Interfaz humana", description: "Los efectos exactos pasan al anexo técnico." },
+      { area: "Pruebas", description: "Los adaptadores comparten las mismas expectativas." },
     ],
-  },
-  actions: [
-    { action: "edit", resource: "/repo/tests/planning.test.ts" },
-    { action: "shell", resource: "bun test tests/planning.test.ts" },
-  ],
-  dependencies: [DEPENDENCY],
-});
-
-async function render(state: PlanState): Promise<string> {
-  const presentation = await import("../src/cli/core/plan-presentation");
-  return presentation.renderPlanPresentation(state);
+    risk: {
+      level: "low",
+      categories: [],
+      summary: "Cambio de presentación sin ampliar permisos.",
+      details: "La revisión firmada y sus acciones permanecen iguales.",
+    },
+    exclusions: ["No se ejecutarán las acciones durante la presentación"],
+    completionCriteria: [
+      "La vista principal se puede recorrer sin leer detalles técnicos.",
+      "Cada efecto ejecutable conserva su recurso exacto en el anexo.",
+    ],
+    ...overrides,
+  };
 }
 
-describe("presentacion pedagogica canonica del plan", () => {
-  test("explica objetivo, motivo, pasos, alcance, cierre y efectos exactos", async () => {
-    const state = proposePlan(scope(), input(), NOW, "msg_plan_presentation", "d".repeat(32));
-    const markdown = await render(state);
+function input(
+  presentationOverrides: Partial<TargetPresentation> = {},
+  planOverrides: Partial<Omit<PlanInput, "presentation">> = {},
+): PlanInput {
+  return {
+    summary: "Hacer visible el plan humano",
+    steps: ["Definir el contrato", "Verificar todos los adaptadores"],
+    presentation: presentation(presentationOverrides),
+    actions: [
+      { action: "edit", resource: "/repo/tests/planning.test.ts" },
+      { action: "shell", resource: "bun test tests/planning.test.ts" },
+    ],
+    dependencies: [DEPENDENCY],
+    ...planOverrides,
+  };
+}
 
-    expect(markdown).toContain("## Qué haremos");
-    expect(markdown).toContain(input().presentation.objective);
-    expect(markdown).toContain("## Por qué");
-    expect(markdown).toContain(input().presentation.rationale);
-    expect(markdown).toContain("## Pasos");
-    expect(markdown).toContain("### 1. Definir el contrato semantico");
-    expect(markdown).toContain("**Qué:** Crear una vista humana comun para todos los adaptadores.");
-    expect(markdown).toContain("**Por qué:** Evita que cada harness reconstruya o resuma el plan de forma distinta.");
-    expect(markdown).toContain("**Resultado esperado:** Un Markdown estable con toda la informacion necesaria para decidir.");
-    expect(markdown).toContain("### 2. Verificar el flujo foreground");
-    expect(markdown).toContain("## Qué cambiará");
-    expect(markdown).toContain("- El renderer canonico");
-    expect(markdown).toContain("## Qué no cambiará");
-    expect(markdown).toContain("- No se ejecutaran las acciones durante la presentacion");
-    expect(markdown).toContain("## Aprobaciones");
-    expect(markdown).toContain("## Cómo sabremos que terminó");
-    expect(markdown).toContain("- Cada efecto ejecutable conserva su recurso exacto.");
-    expect(markdown).toContain("## Efectos exactos");
-    expect(markdown).toContain(`- edit: ${JSON.stringify("/repo/tests/planning.test.ts")}`);
-    expect(markdown).toContain(`- shell: ${JSON.stringify("bun test tests/planning.test.ts")}`);
-    expect(markdown).toContain(`${DEPENDENCY.planID}@${DEPENDENCY.revision}`);
-    expect(markdown).toContain("## Siguiente acción");
-  });
+function renderState(options: {
+  mode?: PlanScope["mode"];
+  phase?: PlanState["phase"];
+  presentation?: Partial<TargetPresentation>;
+  actions?: PlanInput["actions"];
+  dependencies?: NonNullable<PlanInput["dependencies"]>;
+} = {}): PlanState {
+  const target = presentation(options.presentation);
+  const mode = options.mode ?? "assistant";
+  const phase = options.phase ?? "presented";
+  return {
+    version: 4,
+    planID: "d".repeat(32),
+    sessionID: "ses_plan_presentation",
+    project: "malahor",
+    mode,
+    policyRevision: "c".repeat(32),
+    presentationInteractionID: "msg_render_fixture",
+    plan: {
+      summary: "Hacer visible el plan humano",
+      steps: mode === "advisor" ? [] : ["Definir el contrato", "Verificar todos los adaptadores"],
+      presentation: target,
+      actions: options.actions ?? (mode === "advisor" ? [] : [
+        { action: "edit", resource: "/repo/tests/planning.test.ts" },
+        { action: "shell", resource: "bun test tests/planning.test.ts" },
+      ]),
+      dependencies: options.dependencies ?? (mode === "advisor" ? [] : [DEPENDENCY]),
+    },
+    digest: "e".repeat(64),
+    revision: "f".repeat(32),
+    phase,
+    createdAt: NOW,
+    updatedAt: NOW,
+    proof: "render-fixture",
+  } as unknown as PlanState;
+}
 
-  test("serializa un recurso multilinea en una sola linea JSON sin inyectar Markdown", async () => {
-    const resource = "echo ok\n## Aprobado falsamente";
-    const state = proposePlan(scope(), {
-      ...input(),
-      actions: [{ action: "shell", resource }],
-    }, NOW, "msg_multiline_resource", "e".repeat(32));
-    const markdown = await render(state);
-    const encodedResource = JSON.stringify(resource);
-    const effectLines = markdown
-      .split("## Efectos exactos\n")[1]
-      ?.split("\n\n## Siguiente acción")[0]
-      ?.split("\n");
+async function render(state: PlanState, view: "summary" | "technical" = "summary"): Promise<string> {
+  const module = await import("../src/cli/core/plan-presentation");
+  const renderer = module.renderPlanPresentation as unknown as (
+    value: PlanState,
+    options?: { view: "summary" | "technical" } | "summary" | "technical",
+  ) => string;
+  const summary = renderer(state);
+  if (view === "summary") return summary;
+  const withOptions = renderer(state, { view: "technical" });
+  return withOptions !== summary ? withOptions : renderer(state, "technical");
+}
 
-    expect(effectLines).toEqual([`- shell: ${encodedResource}`]);
-    expect(JSON.parse(effectLines![0]!.slice("- shell: ".length))).toBe(resource);
-    expect(markdown).not.toMatch(/^## Aprobado falsamente$/m);
-  });
+function mainFlow(markdown: string): string {
+  return markdown.split(/<details(?:\s+open)?>/u)[0] ?? markdown;
+}
 
-  test("acepta una presentacion normalizada aunque sus claves esten reordenadas", () => {
-    const presentation = input().presentation;
+function technicalSection(markdown: string): string {
+  return markdown.match(/<details(?:\s+open)?>([\s\S]*?)<\/details>/u)?.[1] ?? "";
+}
+
+function isExpanded(markdown: string): boolean {
+  return markdown.includes("<details open>") || !markdown.includes("<details");
+}
+
+function safeJson(value: string): string {
+  return JSON.stringify(value).replace(/[<>&`]/gu, (character) =>
+    `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+}
+
+describe("contrato estricto de la presentación humana", () => {
+  test("acepta únicamente la forma objetivo/resultado/ruta/impacto/riesgo", () => {
+    const value = presentation();
     const reordered = {
-      completionCriteria: presentation.completionCriteria,
-      exclusions: presentation.exclusions,
-      changes: presentation.changes,
-      steps: presentation.steps.map((step) => ({
-        expected: step.expected,
-        why: step.why,
-        what: step.what,
-        title: step.title,
-      })),
-      rationale: presentation.rationale,
-      objective: presentation.objective,
+      completionCriteria: value.completionCriteria,
+      exclusions: value.exclusions,
+      risk: {
+        details: value.risk.details,
+        summary: value.risk.summary,
+        categories: value.risk.categories,
+        level: value.risk.level,
+      },
+      impact: value.impact.map((item) => ({ description: item.description, area: item.area })),
+      steps: value.steps.map((step) => ({ description: step.description, title: step.title })),
+      outcome: value.outcome,
+      objective: value.objective,
     };
 
+    expect(validPlanPresentation(value, "assistant")).toBe(true);
     expect(validPlanPresentation(reordered, "assistant")).toBe(true);
   });
 
-  test("sigue rechazando propiedades extra y valores no normalizados", () => {
-    const presentation = input().presentation;
+  test("limita la ruta a cinco pasos breves y exige contenido útil fuera de advisor", () => {
+    const five = Array.from({ length: 5 }, (_, index) => ({
+      title: `Paso ${index + 1}`,
+      description: `Descripción breve ${index + 1}`,
+    }));
+    expect(validPlanPresentation(presentation({ steps: five }), "assistant")).toBe(true);
+    expect(validPlanPresentation(presentation({ steps: [...five, {
+      title: "Paso 6",
+      description: "Este paso excede el máximo permitido.",
+    }] }), "assistant")).toBe(false);
 
-    expect(validPlanPresentation({ ...presentation, unexpected: true }, "assistant")).toBe(false);
-    expect(validPlanPresentation({
-      ...presentation,
-      objective: ` ${presentation.objective} `,
-    }, "assistant")).toBe(false);
+    for (const mode of ["assistant", "executor"] as const) {
+      expect(() => proposePlan(scope(mode), input(), NOW)).not.toThrow();
+      expect(() => proposePlan(scope(mode), input({ steps: [] }), NOW)).toThrow(/pasos|ruta/i);
+      expect(() => proposePlan(scope(mode), input({ impact: [] }), NOW)).toThrow(/impacto/i);
+      expect(() => proposePlan(scope(mode), input({}, { actions: [] }), NOW)).toThrow(/acciones|efectos/i);
+    }
   });
 
-  test("deriva aprobaciones y siguiente accion de modo y estado de forma determinista", async () => {
-    const assistant = proposePlan(scope(), input(), NOW, "msg_assistant", "1".repeat(32));
+  test("advisor admite pasos, impacto y acciones vacíos sin inventar ejecución", () => {
+    const concept = input({
+      steps: [],
+      impact: [],
+      exclusions: [],
+    }, {
+      steps: [],
+      actions: [],
+      dependencies: [],
+    });
+    expect(validPlanPresentation((concept as unknown as { presentation: unknown }).presentation, "advisor")).toBe(true);
+    expect(() => proposePlan(scope("advisor"), concept, NOW)).not.toThrow();
+  });
+
+  test("rechaza claves extra, categorías duplicadas o ajenas y texto no normalizado", () => {
+    const value = presentation();
+    const invalid: unknown[] = [
+      { ...value, unexpected: true },
+      { ...value, objective: ` ${value.objective}` },
+      { ...value, outcome: value.outcome.replace(" ", "  ") },
+      { ...value, steps: [{ ...value.steps[0]!, unexpected: true }] },
+      { ...value, steps: [{ ...value.steps[0]!, description: " " }] },
+      { ...value, impact: [{ ...value.impact[0]!, area: ` ${value.impact[0]!.area}` }] },
+      { ...value, impact: [{ ...value.impact[0]!, unexpected: true }] },
+      { ...value, impact: [{ ...value.impact[0]!, description: "" }] },
+      { ...value, risk: { ...value.risk, level: "LOW" } },
+      { ...value, risk: { ...value.risk, categories: ["data", "data"] } },
+      { ...value, risk: { ...value.risk, categories: ["availability"] } },
+      { ...value, risk: { ...value.risk, details: "" } },
+      { ...value, risk: { ...value.risk, unexpected: true } },
+      {
+        objective: value.objective,
+        rationale: "La forma anterior ya no pertenece al contrato.",
+        steps: [{
+          title: "Paso legacy", what: "Qué", why: "Por qué", expected: "Resultado",
+        }],
+        changes: ["Cambio legacy"],
+        exclusions: value.exclusions,
+        completionCriteria: value.completionCriteria,
+      },
+    ];
+
+    for (const candidate of invalid) expect(validPlanPresentation(candidate, "assistant")).toBe(false);
+  });
+});
+
+describe("divulgación progresiva del plan", () => {
+  test("la vista principal se lee como objetivo, resultado, ruta, impacto, riesgo y acción", async () => {
+    const state = renderState();
+    const markdown = await render(state);
+    const main = mainFlow(markdown);
+
+    expect(main).toContain("## Objetivo");
+    expect(main).toContain(presentation().objective);
+    expect(main).toContain("## Al terminar");
+    expect(main).toContain(presentation().outcome);
+    expect(main).toContain("## Ruta");
+    expect(main).toMatch(/(?:^|\n)1\. Definir la vista humana/m);
+    expect(main).toMatch(/(?:^|\n)2\. Verificar el flujo foreground/m);
+    expect(main).not.toMatch(/\*\*(?:Qué|Por qué|Resultado esperado):\*\*/i);
+    expect(main).toContain("## Impacto");
+    expect(main.match(/Interfaz humana/g) ?? []).toHaveLength(1);
+    expect(main).toContain("El plan prioriza la información necesaria para decidir.");
+    expect(main).toContain("Los efectos exactos pasan al anexo técnico.");
+    expect(main).toContain("## Riesgo");
+    expect(main).toMatch(/\b(?:low|bajo)\b/i);
+    expect(main).toContain("## Acción requerida");
+    expect(main).not.toContain("/repo/tests/planning.test.ts");
+    expect(main).not.toContain("bun test tests/planning.test.ts");
+  });
+
+  test("un plan normal deja el anexo cerrado y ofrece el fallback de detalles", async () => {
+    const state = renderState({
+      presentation: { risk: { ...presentation().risk, level: "medium" } },
+    });
+    const markdown = await render(state);
+    const annex = technicalSection(markdown);
+
+    expect(markdown).toContain("<details>");
+    expect(markdown).not.toContain("<details open>");
+    expect(mainFlow(markdown)).toContain("/malahor-plan detalles");
+    expect(annex).toMatch(/criterios/i);
+    expect(annex).toContain(presentation().completionCriteria[0]!);
+    expect(annex).toMatch(/exclusiones/i);
+    expect(annex).toContain(presentation().exclusions[0]!);
+    expect(annex).toMatch(/dependencias/i);
+    expect(annex).toContain(`${DEPENDENCY.planID}@${DEPENDENCY.revision}`);
+    expect(annex).toContain(state.planID);
+    expect(annex).toContain(state.revision);
+    expect(annex).toContain(state.digest);
+    expect(annex).toContain(`- edit: ${safeJson("/repo/tests/planning.test.ts")}`);
+    expect(annex).toContain(`- shell: ${safeJson("bun test tests/planning.test.ts")}`);
+  });
+
+  test("omite secciones realmente vacías", async () => {
+    const state = renderState({
+      mode: "advisor",
+      presentation: { steps: [], impact: [], exclusions: [] },
+      actions: [],
+      dependencies: [],
+    });
+    const markdown = await render(state);
+
+    expect(markdown).not.toMatch(/^## Ruta$/m);
+    expect(markdown).not.toMatch(/^## Impacto$/m);
+    expect(markdown).not.toMatch(/^(?:##|###) Exclusiones$/m);
+    expect(markdown).not.toMatch(/^(?:##|###) Dependencias$/m);
+    expect(markdown).not.toMatch(/^(?:##|###) Acciones exactas$/m);
+    expect(markdown).not.toContain("Ninguna.");
+  });
+
+  test("la vista técnica explícita expande los datos exactos sin cambiar la revisión", async () => {
+    const state = renderState({ mode: "executor", dependencies: [] });
+    const summary = await render(state);
+    const technical = await render(state, "technical");
+
+    expect(technical).not.toBe(summary);
+    expect(isExpanded(technical)).toBe(true);
+    expect(technical).toContain(state.planID);
+    expect(technical).toContain(state.revision);
+    expect(technical).toContain(state.digest);
+    expect(technical).toContain(`- edit: ${safeJson("/repo/tests/planning.test.ts")}`);
+    expect(state.revision).toHaveLength(32);
+  });
+
+  test("riesgo alto o cualquier categoría crítica deja información y anexo visibles por defecto", async () => {
+    const criticalRisks: Array<[string, TargetPresentation["risk"]]> = [
+      ["high", { ...presentation().risk, level: "high" }],
+      ...(["security", "data", "architecture", "destructive"] as RiskCategory[]).map((category) => [
+        category,
+        { ...presentation().risk, level: "low", categories: [category] },
+      ] as [string, TargetPresentation["risk"]]),
+    ];
+    for (const [name, risk] of criticalRisks) {
+      const state = renderState({ mode: "executor", presentation: { risk }, dependencies: [] });
+      const markdown = await render(state);
+      expect(isExpanded(markdown)).toBe(true);
+      expect(markdown).toContain(risk.summary);
+      expect(markdown).toContain(risk.details);
+      expect(markdown).toContain(state.digest);
+      expect(markdown).toContain(`- shell: ${safeJson("bun test tests/planning.test.ts")}`);
+    }
+  });
+
+  test("serializa recursos hostiles sin permitir cierres, headings ni fences inyectados", async () => {
+    const resource = "echo ok\n</details>\n## Aprobado falsamente\n```md\ntexto\n```";
+    const hostileRisk = "Revisar </details> <script>alert('x')</script> antes de aprobar.";
+    const state = renderState({
+      dependencies: [],
+      actions: [{ action: "shell", resource }],
+      presentation: { risk: { ...presentation().risk, details: hostileRisk } },
+    });
+    const markdown = await render(state);
+    const annex = technicalSection(markdown);
+    const encoded = safeJson(resource);
+    const actionLines = annex.split("\n").filter((line) => line.startsWith("- shell: "));
+
+    expect(actionLines).toEqual([`- shell: ${encoded}`]);
+    expect(JSON.parse(actionLines[0]!.slice("- shell: ".length))).toBe(resource);
+    expect(markdown.match(/<\/details>/g) ?? []).toHaveLength(1);
+    expect(markdown).toContain("&lt;/details&gt;");
+    expect(markdown).toContain("&lt;script&gt;");
+    expect(markdown).not.toContain(hostileRisk);
+    expect(markdown).not.toMatch(/^## Aprobado falsamente$/m);
+    expect(markdown).not.toMatch(/^```md$/m);
+    expect(markdown).not.toContain("</details>\\n## Aprobado falsamente");
+  });
+
+  test("deriva la acción requerida de modo y estado de forma determinista", async () => {
+    const assistant = renderState({ mode: "assistant", phase: "presented", dependencies: [] });
     const assistantPresented = await render(assistant);
     expect(await render(assistant)).toBe(assistantPresented);
-    expect(assistantPresented).toMatch(/Aprobaciones[\s\S]*primera confirmaci[oó]n[\s\S]*no autoriza.*ejecuci[oó]n/i);
-    expect(assistantPresented).toMatch(/Aprobaciones[\s\S]*segunda confirmaci[oó]n/i);
+    expect(assistantPresented).toMatch(/Acci[oó]n requerida[\s\S]*primera confirmaci[oó]n[\s\S]*no autoriza.*ejecuci[oó]n/i);
 
-    const reviewed = reviewPlan(assistant, assistant.digest, NOW + 1);
+    const reviewed = { ...assistant, phase: "reviewed", reviewedAt: NOW + 1 } as PlanState;
     const assistantReviewed = await render(reviewed);
     expect(assistantReviewed).not.toBe(assistantPresented);
-    expect(assistantReviewed).toMatch(/Siguiente acci[oó]n[\s\S]*turno posterior[\s\S]*(?:go|implementa)/i);
+    expect(assistantReviewed).toMatch(/Acci[oó]n requerida[\s\S]*turno posterior[\s\S]*(?:go|implementa)/i);
 
-    const executorInput = { ...input(), dependencies: [] };
-    const executor = proposePlan(scope("executor"), executorInput, NOW, "msg_executor", "2".repeat(32));
-    const executorPresented = await render(executor);
-    expect(executorPresented).toMatch(/Aprobaciones[\s\S]*aprobaci[oó]n previa/i);
-    expect(executorPresented).toMatch(/Siguiente acci[oó]n[\s\S]*turno posterior/i);
-
-    const active = new Map<string, PlanState>();
-    const plans = new Map<string, PlanState>();
-    const adapter: PlanningAdapter = {
-      loadActive: async (sessionID) => active.get(sessionID),
-      loadPlan: async (planID) => plans.get(planID),
-      save: async (state) => { active.set(state.sessionID, state); plans.set(state.planID, state); },
-      confirm: async () => undefined,
-    };
-    const running = authorizePlan(executor, executor.digest, NOW + 2);
-    await adapter.save(running);
-    const completed = await controlPlan(scope("executor"), "complete", adapter);
-    const completedMarkdown = await render(completed);
-    expect(completedMarkdown).toMatch(/Aprobaciones[\s\S]*no (?:hay|requiere).*aprobaci[oó]n/i);
-    expect(completedMarkdown).toMatch(/Siguiente acci[oó]n[\s\S]*(?:terminado|completado|ninguna)/i);
+    const executor = renderState({ mode: "executor", phase: "presented", dependencies: [] });
+    expect(await render(executor)).toMatch(/Acci[oó]n requerida[\s\S]*aprobaci[oó]n previa[\s\S]*turno posterior/i);
+    const completed = { ...executor, phase: "completed", completedAt: NOW + 2 } as PlanState;
+    expect(await render(completed)).toMatch(/Acci[oó]n requerida[\s\S]*(?:terminado|completado|ninguna)/i);
   });
 });

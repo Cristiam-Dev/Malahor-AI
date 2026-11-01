@@ -183,19 +183,33 @@ export async function registerPlanningTools(
           presentation: {
             type: "object", properties: {
               objective: { type: "string" },
-              rationale: { type: "string" },
+              outcome: { type: "string" },
               steps: { type: "array", items: {
                 type: "object", properties: {
-                  title: { type: "string" }, what: { type: "string" },
-                  why: { type: "string" }, expected: { type: "string" },
+                  title: { type: "string" }, description: { type: "string" },
                 },
-                required: ["title", "what", "why", "expected"], additionalProperties: false,
+                required: ["title", "description"], additionalProperties: false,
+              }, maxItems: 5 },
+              impact: { type: "array", items: {
+                type: "object", properties: {
+                  area: { type: "string" }, description: { type: "string" },
+                },
+                required: ["area", "description"], additionalProperties: false,
               } },
-              changes: { type: "array", items: { type: "string" } },
+              risk: {
+                type: "object", properties: {
+                  level: { type: "string", enum: ["low", "medium", "high"] },
+                  categories: { type: "array", uniqueItems: true, items: {
+                    type: "string", enum: ["security", "data", "architecture", "destructive"],
+                  } },
+                  summary: { type: "string" }, details: { type: "string" },
+                },
+                required: ["level", "categories", "summary", "details"], additionalProperties: false,
+              },
               exclusions: { type: "array", items: { type: "string" } },
               completionCriteria: { type: "array", items: { type: "string" } },
             },
-            required: ["objective", "rationale", "steps", "changes", "exclusions", "completionCriteria"],
+            required: ["objective", "outcome", "steps", "impact", "risk", "exclusions", "completionCriteria"],
             additionalProperties: false,
           },
           actions: { type: "array", items: {
@@ -338,11 +352,14 @@ export async function injectPlanningInstructions(
   const instructions = !resolved || !storage
     ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host."
     : mode === "advisor"
-      ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps, presentation.steps, presentation.changes y actions van vacios."
+      ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps, presentation.steps, presentation.impact y actions van vacios."
       : [
         `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
         mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar."
           : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+        "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto por area, riesgo y accion requerida; rutas, comandos y evidencia exacta permanecen en el anexo tecnico.",
+        "El detalle exacto siempre puede consultarse con /malahor-plan detalles, aunque el cliente no renderice el desplegable.",
+        "Un riesgo alto o una categoria critica mantiene el anexo visible y abierto por defecto, sin interaccion adicional.",
         "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
         "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
         "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",

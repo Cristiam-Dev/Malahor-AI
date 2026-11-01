@@ -9,6 +9,8 @@ import {
   renderPlanPresentation,
   validPlanPresentation,
   type PlanPresentationInput,
+  type PlanPresentationOptions,
+  type PlanPresentationView,
 } from "./plan-presentation";
 
 export interface PlannedAction {
@@ -305,8 +307,11 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
   return authority.verify(statePayload(value), value.proof);
 }
 
-export function renderPlan(state: PlanState): string {
-  return renderPlanPresentation(state);
+export function renderPlan(
+  state: PlanState,
+  options: PlanPresentationOptions | PlanPresentationView = {},
+): string {
+  return renderPlanPresentation(state, options);
 }
 
 function normalizePlan(mode: MalahorMode, input: PlanInput): Required<PlanInput> {
@@ -322,6 +327,7 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): Required<PlanInput>
     throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
   }
   if (mode !== "advisor" && input.steps.length === 0) throw new Error("El plan requiere pasos visibles.");
+  if (mode !== "advisor" && input.actions.length === 0) throw new Error("El plan requiere acciones o efectos exactos.");
   if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000)) throw new Error("Paso de plan invalido.");
   if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action)
     || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {

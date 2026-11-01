@@ -31,6 +31,7 @@ export interface PlanCommandHost {
 }
 
 const CONTROLS = new Set<PlanControl>(["status", "pause", "resume", "revoke", "complete"]);
+const DETAIL_VIEWS = new Set(["detalles", "details"]);
 
 export async function registerPlanCommand(
   host: PlanCommandHost,
@@ -40,16 +41,18 @@ export async function registerPlanCommand(
 ) {
   return host.command.transform((editor) => editor.add({
     name: "malahor-plan",
-    description: "Consultar, pausar, reanudar, revocar o completar el plan activo",
+    description: "Consultar el resumen o detalle tecnico, pausar, reanudar, revocar o completar el plan activo",
     execute: async ({ sessionID, prompt }) => {
       if (!prompt || typeof prompt.text !== "string" || prompt.files?.length || prompt.agents?.length || prompt.skills?.length) {
         throw new Error("El comando de plan solo acepta argumentos de texto, sin adjuntos.");
       }
       const args = prompt.text.trim().replace(/^\/?malahor-plan(?:\s+|$)/, "").trim().split(/\s+/).filter(Boolean);
-      const action = (args[0] ?? "status") as PlanControl;
-      if (args.length > 1 || !CONTROLS.has(action)) {
-        throw new Error("Uso: /malahor-plan [status|pause|resume|revoke|complete]");
+      const requested = args[0] ?? "status";
+      const technical = DETAIL_VIEWS.has(requested);
+      if (args.length > 1 || (!technical && !CONTROLS.has(requested as PlanControl))) {
+        throw new Error("Uso: /malahor-plan [status|detalles|details|pause|resume|revoke|complete]");
       }
+      const action = technical ? "status" : requested as PlanControl;
       const resolved = await resolvePlanningScope(sessionID, options);
       if (!resolved) throw new Error("Sesion sin afinidad a un proyecto registrado; plan no disponible.");
       const adapter: PlanningAdapter = {
@@ -73,7 +76,7 @@ export async function registerPlanCommand(
         },
       };
       const state = await controlPlan(resolved.scope, action, adapter, authority);
-      await host.session.synthetic({ sessionID, text: renderPlan(state) });
+      await host.session.synthetic({ sessionID, text: renderPlan(state, technical ? "technical" : "summary") });
     },
   }));
 }

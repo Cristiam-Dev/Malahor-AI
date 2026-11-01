@@ -170,14 +170,18 @@ describe("modo portable: configuracion de Malahor", () => {
       steps: ["Editar"],
       presentation: {
         objective: "Editar exclusivamente el archivo declarado.",
-        rationale: "El cambio de modo debe invalidar este plan sin ampliar sus efectos.",
+        outcome: "El archivo queda actualizado únicamente bajo la revisión original.",
         steps: [{
           title: "Editar el archivo",
-          what: "Modificar solo file.ts.",
-          why: "Es el unico recurso autorizado por el plan.",
-          expected: "El archivo cambia sin tocar otros recursos.",
+          description: "Modificar solo file.ts, el único recurso autorizado.",
         }],
-        changes: ["file.ts"],
+        impact: [{ area: "Código", description: "Solo cambia file.ts." }],
+        risk: {
+          level: "low",
+          categories: [],
+          summary: "Cambio de un único archivo.",
+          details: "Cambiar de modo invalida la autorización anterior.",
+        },
         exclusions: ["Cualquier otro archivo o comando"],
         completionCriteria: ["El cambio permanece ligado a la revision de politica original"],
       },
