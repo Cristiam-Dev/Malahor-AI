@@ -2,7 +2,7 @@ export type HookDecision = "allow" | "warn" | "ask" | "deny";
 
 export type HookProfile = "off" | "light" | "standard" | "strict" | "release";
 
-export const HOOK_RESOURCE_KINDS = ["filesystem", "obsidian-vault"] as const;
+export const HOOK_RESOURCE_KINDS = ["filesystem"] as const;
 
 export type HookResourceKind = typeof HOOK_RESOURCE_KINDS[number];
 
@@ -228,7 +228,6 @@ export const HOOK_EVENTS = [
   "memory.move.apply",
   "memory.restore.preview",
   "memory.restore.apply",
-  "obsidian.write.before",
   "codegraph.index.before",
   "install.preflight",
   "install.beforePolicy",
@@ -278,7 +277,7 @@ export const CODE_MODE_TOOL_NAMES = new Set([
 // OpenCode normaliza las tools MCP como `<servidor>_<tool>`. Los servidores
 // gestionados por Malahor deben pasar por el mismo punto de mediacion que el
 // prefijo legacy `mcp_`, sin convertirlos en permisos V2 desconocidos.
-export const MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "obsidian", "codegraph"] as const;
+export const MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "docs", "codegraph"] as const;
 
 export function isMcpToolName(value: string): boolean {
   const normalized = value.trim().toLowerCase();

@@ -9,7 +9,7 @@ import path from "node:path";
 
 import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
 import { loadPlanningAuthority, type PlanningAuthority } from "../cli/core/planning-authority";
-import { codegraphEnabled, levelForProject, obsidianEnabled, registeredProjectRoots } from "../cli/core/context";
+import { codegraphEnabled, levelForProject, registeredProjectRoots } from "../cli/core/context";
 import { resolveProject } from "../cli/core/project";
 import { codegraphRoot, codegraphRuntime } from "../cli/core/codegraph-runtime";
 import { loadHookPolicy } from "../cli/core/hooks/policy-loader";
@@ -538,6 +538,9 @@ async function registerMcpTransform(
   if (!fs.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   }
+  if (!fs.existsSync(paths.docsIndex)) {
+    warnings.push("mcp.docs-index-missing");
+  }
 
   try {
     const registration = await domain.transform((editor) => {
@@ -556,6 +559,21 @@ async function registerMcpTransform(
         }
       }
 
+      const existingDocs = editor.get("docs");
+      if (fs.existsSync(paths.docsIndex)) {
+        if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
+          editor.set("docs", {
+            ...(existingDocs ?? {}),
+            type: "local",
+            command: ["node", paths.docsIndex],
+            disabled: false,
+            codemode: false,
+          });
+        } else {
+          warnings.push("mcp.docs-foreign-definition");
+        }
+      }
+
       let target: ReturnType<typeof codegraphRoot> | undefined;
       try {
         const registered = canonical ? registeredProjectRoots(paths.projectsFile)
@@ -563,15 +581,6 @@ async function registerMcpTransform(
         if (!canonical || registered) target = codegraphRoot(paths, registered?.canonicalKey);
       } catch { /* No registered root at this location. */ }
       const level = target ? levelForProject(paths.projectsFile, target.project) : undefined;
-
-      const existingObsidian = editor.get("obsidian");
-      if (existingObsidian?.type === "remote") {
-        // No copiar headers ni secretos a otro store; solo habilitar el MCP remoto
-        // cuando el proyecto registrado permite documentacion.
-        editor.set("obsidian", { ...existingObsidian, disabled: !level || !obsidianEnabled(level), codemode: false });
-      } else if (level && obsidianEnabled(level)) {
-        warnings.push(existingObsidian ? "mcp.obsidian-legacy-local" : "mcp.obsidian-definition-missing");
-      }
 
       const existingCodegraph = editor.get("codegraph");
       if (!level || !codegraphEnabled(level)) {
@@ -619,6 +628,12 @@ function isMalahorMnemo(config: McpServerConfig, paths: MalahorPaths): boolean {
   if (config.type !== "local" || !Array.isArray(config.command)) return false;
   const command = config.command.filter((item): item is string => typeof item === "string");
   return command.some((item) => path.resolve(paths.opencodeDir, item) === path.resolve(paths.mnemoIndex));
+}
+
+function isMalahorDocs(config: McpServerConfig, paths: MalahorPaths): boolean {
+  if (config.type !== "local" || !Array.isArray(config.command)) return false;
+  const command = config.command.filter((item): item is string => typeof item === "string");
+  return command.some((item) => path.resolve(paths.opencodeDir, item) === path.resolve(paths.docsIndex));
 }
 
 function sessionLocationDirectory(value: unknown): string | undefined {

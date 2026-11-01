@@ -6,6 +6,7 @@ export interface MalahorPackagePaths {
   root: string;
   assetsDir: string;
   mnemoBuild: string;
+  docsBuild: string;
 }
 
 export function resolvePackagePaths(cwd = process.cwd(), moduleUrl = import.meta.url): MalahorPackagePaths {
@@ -19,6 +20,7 @@ export function resolvePackagePaths(cwd = process.cwd(), moduleUrl = import.meta
     root,
     assetsDir: path.join(root, "assets"),
     mnemoBuild: path.join(root, "dist", "mnemo", "index.js"),
+    docsBuild: path.join(root, "dist", "docs", "index.js"),
   };
 }
 

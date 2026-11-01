@@ -80,6 +80,9 @@ function validationPathsFor(root: string): MalahorPaths {
     backupsDir: path.join(root, "backups"),
     malahorHome: path.join(root, "malahor"),
     mnemoIndex: path.join(root, "malahor", "mnemo", "index.js"),
+    docsDir: path.join(root, "malahor", "docs"),
+    docsIndex: path.join(root, "malahor", "docs", "index.js"),
+    vaultDir: path.join(root, "malahor", "vault"),
     assetsDir: path.join(root, "malahor", "assets"),
     agentsMd: path.join(opencodeDir, "AGENTS.md"),
     opencodeConfig: path.join(opencodeDir, "opencode.jsonc"),
@@ -503,6 +506,9 @@ describe("agentes malahor gestionados", () => {
     fs.mkdirSync(paths.malahorHome, { recursive: true });
     fs.mkdirSync(path.dirname(paths.mnemoIndex), { recursive: true });
     fs.writeFileSync(paths.mnemoIndex, "", "utf8");
+    fs.mkdirSync(path.dirname(paths.docsIndex), { recursive: true });
+    fs.writeFileSync(paths.docsIndex, "", "utf8");
+    fs.mkdirSync(paths.vaultDir, { recursive: true });
     fs.mkdirSync(paths.assetsDir, { recursive: true });
     fs.mkdirSync(path.dirname(paths.agentsMd), { recursive: true });
     fs.writeFileSync(paths.agentsMd, "", "utf8");

@@ -36,6 +36,8 @@ beforeEach(() => {
   fs.mkdirSync(repo, { recursive: true });
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(opencode, { recursive: true });
+  fs.mkdirSync(path.join(home, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(home, "docs", "index.js"), "// docs fixture\n", "utf8");
   fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({ name: "demo" }, null, 2)}\n`, "utf8");
   env = {
     ...process.env,
@@ -84,6 +86,8 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toContain("recuerdos contradictorios en un mismo scope");
     expect(system[0]?.text).toContain("Ranking, pin o fecha aislados no deciden");
     expect(system[0]?.text).toContain("No arbitres automáticamente");
+    expect(system[0]?.text).toContain("exclusivamente mediante docs_*");
+    expect(system[0]?.text).toContain("Obsidian MCP ni fallback al repositorio");
   });
 
   test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {
@@ -242,8 +246,8 @@ describe("adaptador de plugin V2", () => {
     expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-PLUGIN-UNMAPPED")).toBe(true);
   });
 
-  test("permission.evaluate trata Mnemo y Obsidian directos como MCP sin pedir permiso adicional", async () => {
-    for (const action of ["mnemo_mem_save", "obsidian_vault_write"]) {
+  test("permission.evaluate trata Mnemo y docs directos como MCP sin pedir permiso adicional", async () => {
+    for (const action of ["mnemo_mem_save", "docs_write"]) {
       const result = await evaluatePermission({
         action,
         resources: [],
@@ -631,7 +635,7 @@ describe("adaptador de plugin V2", () => {
     expect(loaded.stdout.toString()).toContain("function");
   });
 
-  test("ctx.mcp.transform registra Mnemo y conserva MCP ajeno", async () => {
+  test("ctx.mcp.transform registra Mnemo y docs, y conserva MCPs ajenos", async () => {
     const originalHome = process.env.MALAHOR_HOME;
     const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
     process.env.MALAHOR_HOME = home;
@@ -676,6 +680,12 @@ describe("adaptador de plugin V2", () => {
         disabled: false,
         codemode: false,
       });
+      expect(sets.find((entry) => entry.name === "docs")?.config).toMatchObject({
+        type: "local",
+        command: ["node", path.join(home, "docs", "index.js")],
+        disabled: false,
+        codemode: false,
+      });
       expect(sets.some((entry) => entry.name === "foreign")).toBe(false);
       expect(sets.some((entry) => entry.name === "obsidian")).toBe(false);
 
@@ -689,7 +699,7 @@ describe("adaptador de plugin V2", () => {
     }
   });
 
-  test("ctx.mcp.transform no pisa Mnemo ajeno y habilita Obsidian remoto solo para nivel documental", async () => {
+  test("ctx.mcp.transform no pisa Mnemo ajeno, registra docs y nunca gestiona Obsidian", async () => {
     const originalHome = process.env.MALAHOR_HOME;
     const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
     process.env.MALAHOR_HOME = home;
@@ -725,11 +735,19 @@ describe("adaptador de plugin V2", () => {
         },
       });
 
-      expect(sets).toEqual(["obsidian"]);
+      expect(sets).toEqual(["docs"]);
       expect(state.mnemo.command).toEqual(["node", "/tmp/other-mnemo.js"]);
-      expect(state.obsidian.disabled).toBe(false);
-      expect(state.obsidian.codemode).toBe(false);
-      expect(state.obsidian.headers).toEqual({ Authorization: "Bearer {env:OBSIDIAN_API_KEY}" });
+      expect(state.docs).toMatchObject({
+        type: "local",
+        command: ["node", path.join(home, "docs", "index.js")],
+        disabled: false,
+        codemode: false,
+      });
+      expect(state.obsidian).toEqual({
+        type: "remote",
+        url: "https://obsidian.example/mcp",
+        headers: { Authorization: "Bearer {env:OBSIDIAN_API_KEY}" },
+      });
     } finally {
       if (originalHome === undefined) delete process.env.MALAHOR_HOME;
       else process.env.MALAHOR_HOME = originalHome;

@@ -18,6 +18,23 @@ function tempPaths(): MalahorPaths {
 }
 
 describe("comandos gestionados de OpenCode", () => {
+  test("retira el comando y API legacy de Obsidian de la CLI publica", () => {
+    const commandPath = path.join(process.cwd(), "src", "cli", "commands", "obsidian.ts");
+    const indexSource = fs.readFileSync(path.join(process.cwd(), "src", "cli", "index.ts"), "utf8");
+    expect(fs.existsSync(commandPath)).toBe(false);
+    expect(indexSource).not.toMatch(/commands\/obsidian|case\s+["']obsidian["']/);
+
+    const run = Bun.spawnSync(["bun", "run", "src/cli/index.ts", "obsidian"], {
+      cwd: process.cwd(),
+      env: { ...process.env, MALAHOR_OPENCODE_DETECT: "0" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr.toString()).toContain("Unknown command: obsidian");
+    expect(run.stdout.toString()).not.toMatch(/^\s+obsidian\s+/m);
+  });
+
   test("incluye contexto y commit, sin duplicados", () => {
     expect(MALAHOR_COMMAND_FILES).toContain("malahor-contexto.md");
     expect(MALAHOR_COMMAND_FILES).toContain("malahor-commit.md");

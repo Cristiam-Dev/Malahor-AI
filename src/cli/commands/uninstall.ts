@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { backupFile } from "../core/backup";
 import { loadConfig } from "../core/config";
-import { removeBuildPolicyConfig, removeMnemoConfig } from "../core/injector";
+import { removeBuildPolicyConfig, removeMalahorMcpConfig } from "../core/injector";
 import { instructionsState } from "../core/instructions";
 import {
   describePluginStateRemoval,
@@ -37,7 +37,7 @@ export function runUninstall(options: UninstallOptions): void {
   const mdBackup = backupFile(paths.opencodeMd, paths.backupsDir, options.dryRun);
   const legacyExisted = fs.existsSync(paths.opencodeMd);
 
-  removeMnemoConfig(paths, options.dryRun);
+  removeMalahorMcpConfig(paths, options.dryRun);
   const buildPolicy = removeBuildPolicyConfig(paths, options.dryRun);
   const removedCommands = removeOpenCodeCommands(paths, options.dryRun);
   const sdkRemoval = removeOpencodeSdk({
@@ -49,6 +49,7 @@ export function runUninstall(options: UninstallOptions): void {
   const pluginRemoval = removeManagedPlugin(paths.malahorPluginDir, paths.backupsDir, options.dryRun);
   const pluginStateRemoval = removePluginState(paths.pluginState, options.dryRun);
   const agentRemovals = removeManagedAgents(paths, options.dryRun);
+  const docsRuntimeExisted = fs.existsSync(paths.docsIndex);
 
   if (!options.dryRun) {
     if (agentsState === "managed" && fs.existsSync(paths.agentsMd)) {
@@ -57,12 +58,17 @@ export function runUninstall(options: UninstallOptions): void {
     if (legacyExisted) {
       fs.unlinkSync(paths.opencodeMd);
     }
+    if (docsRuntimeExisted) {
+      fs.unlinkSync(paths.docsIndex);
+      if (fs.existsSync(paths.docsDir) && fs.readdirSync(paths.docsDir).length === 0) fs.rmdirSync(paths.docsDir);
+    }
   }
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(agentsBackup?.created ? `Backup AGENTS.md: ${agentsBackup.destination}` : "Backup AGENTS.md: skipped");
   printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
-  printLine(`Mnemo MCP: ${options.dryRun ? "would remove from OpenCode config" : "removed from OpenCode config"}`);
+  printLine(`Managed MCP registrations (Mnemo + docs): ${options.dryRun ? "would remove" : "removed"}; foreign definitions kept`);
+  printLine(`Docs runtime: ${docsRuntimeExisted ? (options.dryRun ? "would remove" : "removed") : "nothing to remove"}`);
   printLine(buildPolicy.removed
     ? `Build policy: ${options.dryRun ? "would remove locks" : `removed locks (${buildPolicy.cleaned.join(", ") || "marker"})`}`
     : "Build policy: nothing to remove");
@@ -83,6 +89,7 @@ export function runUninstall(options: UninstallOptions): void {
       : "AGENTS.md: nothing to remove");
   printLine(legacyExisted ? `OPENCODE.md: ${options.dryRun ? "would remove" : "removed"}` : "OPENCODE.md: nothing to remove");
   printLine("Local data: kept");
+  printLine(`Docs vault: kept (${paths.vaultDir}); external project overrides are never removed`);
 }
 
 function printHeader(value: string): void {

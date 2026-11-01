@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { parseDocsClient, type DocsClient } from "../../docs/client";
 import type { ProjectAliases } from "./project";
 import { type MalahorPaths, resolvePaths } from "./paths";
 import { stripJsonComments } from "./jsonc";
@@ -21,6 +22,9 @@ export interface MalahorConfig {
   mode: MalahorMode;
   paths: MalahorPaths;
   execution: MalahorExecutionPolicy;
+  docs: {
+    client: DocsClient;
+  };
   projects: {
     aliases: ProjectAliases;
   };
@@ -28,6 +32,7 @@ export interface MalahorConfig {
 
 interface ConfigFile {
   mode?: unknown;
+  docs?: unknown;
   execution?: unknown;
   projects?: unknown;
   paths?: unknown;
@@ -37,6 +42,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   const defaultPaths = resolvePaths(env, cwd);
   const fileConfig = readConfigFile(defaultPaths.configFile);
   const executionConfig = readOptionalObject(fileConfig.execution, "execution");
+  const docsConfig = readOptionalObject(fileConfig.docs, "docs");
   const projectsConfig = readOptionalObject(fileConfig.projects, "projects");
   const paths = resolvePaths({ ...resolvePathEnv(env, fileConfig), MALAHOR_CONFIG: defaultPaths.configFile }, cwd);
   const legacyMode = env.MALAHOR_MODE ?? fileConfig.mode;
@@ -47,10 +53,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     mode: modeForIntervention(execution.intervention),
     paths,
     execution,
+    docs: {
+      client: readDocsClient(docsConfig?.client),
+    },
     projects: {
       aliases: readProjectAliases(projectsConfig?.aliases),
     },
   };
+}
+
+function readDocsClient(value: unknown): DocsClient {
+  if (value === undefined || value === null || value === "") return "system";
+  return parseDocsClient(value, "La configuracion docs.client");
 }
 
 export function resolveMode(value: unknown = process.env.MALAHOR_MODE): MalahorMode {

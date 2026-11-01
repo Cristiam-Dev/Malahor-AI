@@ -213,15 +213,15 @@ export const toolDefinitions = [
   },
   {
     name: "malahor_hook_check",
-    description: "Ejecuta guardrails cross-harness de Malahor antes de acciones sensibles (git, memoria, instalacion, archivos, secretos). Usar antes de commit/push/reset/push --force, writes de Obsidian o acciones destructivas.",
+    description: "Ejecuta guardrails cross-harness de Malahor antes de acciones sensibles (git, memoria, instalacion, archivos, secretos). Usar antes de commit/push/reset/push --force, escrituras de archivos o acciones destructivas.",
     inputSchema: {
       type: "object",
       properties: {
         event: { type: "string", description: "Evento hook, por ejemplo git.commit.before, git.push.before, memory.delete.apply, install.beforePolicy." },
         profile: { type: "string", description: "off|light|standard|strict|release. Default standard." },
         command: { type: "string", description: "Comando shell que se planea ejecutar, si aplica." },
-        paths: { type: "array", items: { type: "string" }, description: "Recursos objetivo a revisar. Son rutas fisicas salvo que resourceKind indique obsidian-vault." },
-        resourceKind: { type: "string", enum: ["filesystem", "obsidian-vault"], description: "Tipo de paths. Default filesystem; obsidian-vault es obligatorio y exclusivo de obsidian.write.before." },
+        paths: { type: "array", items: { type: "string" }, description: "Rutas fisicas objetivo a revisar." },
+        resourceKind: { type: "string", enum: ["filesystem"], description: "Tipo de paths; default y unico valor admitido: filesystem." },
         confirm: { type: "string", description: "Confirmacion exacta para operaciones destructivas; CHECKS_OK no autoriza una operacion ask." },
         metadata: { type: "object", description: "Metadatos del evento (previewToken, requiresConfirmation, writesMalahorData, etc.)." },
       },

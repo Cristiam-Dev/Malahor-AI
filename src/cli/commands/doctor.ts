@@ -27,6 +27,7 @@ import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { pluginHealthChecks, type PluginHealthCheck } from "../core/plugin-health";
+import { checkDocsProject, initializeDocsProject, resolveDocsProject } from "../../docs/resolver";
 
 export interface DoctorOptions {
   dryRun: boolean;
@@ -71,11 +72,14 @@ function renderReport(
   checks.push({ name: "Malahor home", ok: fs.existsSync(paths.malahorHome), message: paths.malahorHome, critical: true });
   checks.push({ name: "Mnemo dir", ok: fs.existsSync(paths.mnemoDir), message: paths.mnemoDir, critical: true });
   checks.push({ name: "Mnemo index", ok: fs.existsSync(paths.mnemoIndex), message: paths.mnemoIndex, critical: true });
+  checks.push({ name: "Docs runtime dir", ok: fs.existsSync(paths.docsDir), message: paths.docsDir, critical: true });
+  checks.push({ name: "Docs MCP index", ok: fs.existsSync(paths.docsIndex), message: paths.docsIndex, critical: true });
+  checks.push({ name: "Docs vault", ok: fs.existsSync(paths.vaultDir), message: paths.vaultDir, critical: true });
   checks.push({ name: "Assets dir", ok: fs.existsSync(paths.assetsDir), message: paths.assetsDir, critical: true });
   checks.push({ name: "OpenCode config", ok: fs.existsSync(paths.opencodeConfig), message: paths.opencodeConfig, critical: true });
   checks.push(checkInstructions(paths));
   checks.push(checkLegacyInstructions(paths));
-  checks.push(checkMnemoConfig(paths.opencodeConfig, host, paths));
+  checks.push(...checkMcpConfig(paths.opencodeConfig, host, paths));
   checks.push(checkCompaction(paths.opencodeConfig, host, paths));
   checks.push(checkOpenCodeCommands(paths));
   checks.push(...checkAgents(paths, host));
@@ -85,6 +89,13 @@ function renderReport(
   }
   checks.push(checkHookPolicy(paths, project.canonicalKey));
   checks.push(checkCodegraph(paths, host, project.canonicalKey, level));
+  checks.push(checkDocs(paths, config, project.canonicalKey));
+  checks.push({
+    name: "Docs human client",
+    ok: true,
+    message: `${config.docs.client} (fallback seguro: system; no se instalan aplicaciones)`,
+    critical: false,
+  });
   checks.push(...buildPolicyChecks(paths.opencodeConfig, config.execution, host, paths));
   process.stdout.write(`\nmalahor-ai doctor${options.selfHeal ? " --self-heal" : ""}\n=================\n`);
   process.stdout.write(`Mode: ${config.mode}\n`);
@@ -163,7 +174,7 @@ function selfHeal(
 ): string[] {
   const repairs: string[] = [];
 
-  const missingDirs = [paths.mnemoDir, paths.assetsDir, paths.vaultDir, paths.opencodeDir].filter((dir) => !fs.existsSync(dir));
+  const missingDirs = [paths.mnemoDir, paths.docsDir, paths.assetsDir, paths.vaultDir, paths.opencodeDir].filter((dir) => !fs.existsSync(dir));
   if (missingDirs.length > 0) {
     if (!dryRun) {
       for (const dir of missingDirs) {
@@ -185,6 +196,16 @@ function selfHeal(
   archiveLegacyInstructions(paths, dryRun, repairs);
 
   repairOpenCodeConfigFile(config, paths, host, dryRun, repairs);
+
+  try {
+    const project = resolveRegisteredProject(paths, config.projects.aliases);
+    const docs = resolveDocsProject(paths, config.projects.aliases, project.canonicalKey);
+    const template = packagePaths ? path.join(packagePaths.assetsDir, "vault-template") : undefined;
+    const initialized = initializeDocsProject(docs, template, dryRun);
+    if (initialized.created.length > 0) repairs.push(`${dryRun ? "crearia" : "creado"} skeleton docs (${initialized.created.length} entradas)`);
+  } catch (error) {
+    repairs.push(`AVISO: docs no reparable: ${(error as Error).message}`);
+  }
 
   return repairs;
 }
@@ -241,6 +262,13 @@ function repairInstallFiles(
       fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
     }
     repairs.push(`${dryRun ? "restauraria" : "restaurado"} Mnemo index`);
+  }
+  if (!fs.existsSync(paths.docsIndex) && fs.existsSync(packagePaths.docsBuild)) {
+    if (!dryRun) {
+      fs.mkdirSync(paths.docsDir, { recursive: true });
+      fs.copyFileSync(packagePaths.docsBuild, paths.docsIndex);
+    }
+    repairs.push(`${dryRun ? "restauraria" : "restaurado"} Docs MCP index`);
   }
 
   if (fs.existsSync(agentsAsset)) {
@@ -330,9 +358,14 @@ function repairOpenCodeConfigFile(config: MalahorConfig, paths: MalahorPaths, ho
   const problems: string[] = [];
   const mcp = asRecord(ocConfig.mcp);
   const mnemo = mcp ? asRecord(mcp.mnemo) : undefined;
+  const docs = mcp ? asRecord(mcp.docs) : undefined;
   const validLegacyMnemo = mnemo && mnemo.type === "local" && Array.isArray(mnemo.command) && mnemo.enabled === true;
+  const validLegacyDocs = docs && docs.type === "local" && Array.isArray(docs.command) && docs.enabled === true;
   if (!validLegacyMnemo && !(host.kind === "v2" && pluginManagesMcp(paths))) {
     problems.push("mcp.mnemo");
+  }
+  if (!validLegacyDocs && !(host.kind === "v2" && pluginManagesMcp(paths))) {
+    problems.push("mcp.docs");
   }
 
   const compaction = asRecord(ocConfig.compaction);
@@ -627,50 +660,62 @@ function checkHookPolicy(paths: MalahorPaths, project: string): CheckResult {
   };
 }
 
-function checkMnemoConfig(configPath: string, host: OpenCodeHostInfo, paths: MalahorPaths): CheckResult {
+function checkMcpConfig(configPath: string, host: OpenCodeHostInfo, paths: MalahorPaths): CheckResult[] {
   if (!fs.existsSync(configPath)) {
     if (host.kind === "v2" && pluginManagesMcp(paths)) {
-      return { name: "Mnemo MCP config", ok: true, message: "runtime ctx.mcp.transform (sin registro legacy en config)", critical: true };
+      return [
+        { name: "Mnemo MCP config", ok: true, message: "runtime ctx.mcp.transform (sin registro legacy en config)", critical: true },
+        { name: "Docs MCP config", ok: true, message: "runtime ctx.mcp.transform (sin registro legacy en config)", critical: true },
+      ];
     }
-    return { name: "Mnemo MCP config", ok: false, message: "opencode.jsonc missing", critical: true };
+    return [
+      { name: "Mnemo MCP config", ok: false, message: "opencode.jsonc missing", critical: true },
+      { name: "Docs MCP config", ok: false, message: "opencode.jsonc missing", critical: true },
+    ];
   }
 
   try {
     const config = readOpenCodeConfig(configPath);
     const mcp = config.mcp;
     const mnemo = typeof mcp === "object" && mcp !== null ? (mcp as Record<string, unknown>).mnemo : undefined;
-
-    if (typeof mnemo !== "object" || mnemo === null) {
-      if (host.kind === "v2" && pluginManagesMcp(paths)) {
-        return { name: "Mnemo MCP config", ok: true, message: "runtime ctx.mcp.transform (sin registro legacy en config)", critical: true };
-      }
-      return { name: "Mnemo MCP config", ok: false, message: "mcp.mnemo missing", critical: true };
-    }
-
-    const entry = mnemo as Record<string, unknown>;
-    const ok = entry.type === "local" && Array.isArray(entry.command) && entry.enabled === true;
+    const docs = typeof mcp === "object" && mcp !== null ? (mcp as Record<string, unknown>).docs : undefined;
     const runtimeManaged = host.kind === "v2" && pluginManagesMcp(paths);
+    return [mcpCheck("Mnemo", mnemo, runtimeManaged), mcpCheck("Docs", docs, runtimeManaged)];
+  } catch (error) {
+    return [{ name: "MCP config", ok: false, message: (error as Error).message, critical: true }];
+  }
+}
 
+function mcpCheck(label: string, value: unknown, runtimeManaged: boolean): CheckResult {
+  const entry = asRecord(value);
+  const ok = Boolean(entry && entry.type === "local" && Array.isArray(entry.command) && entry.enabled === true);
+  return {
+    name: `${label} MCP config`,
+    ok: ok || runtimeManaged,
+    message: runtimeManaged ? "runtime ctx.mcp.transform" : ok ? "type=local command=array enabled=true" : `mcp.${label.toLowerCase()} missing/invalid`,
+    critical: true,
+  };
+}
+
+function checkDocs(paths: MalahorPaths, config: MalahorConfig, project: string): CheckResult {
+  try {
+    const resolution = resolveDocsProject(paths, config.projects.aliases, project);
+    const issues = checkDocsProject(resolution);
+    const errors = issues.filter((issue) => issue.severity === "error");
     return {
-      name: "Mnemo MCP config",
-      ok: ok || (host.kind === "v2" && pluginManagesMcp(paths)),
-      message: ok
-        ? runtimeManaged
-          ? "runtime ctx.mcp.transform (legacy mirror preserved)"
-          : "type=local command=array enabled=true"
-        : host.kind === "v2" && pluginManagesMcp(paths)
-          ? "runtime ctx.mcp.transform (legacy entry ignored)"
-          : "expected type=local command=array enabled=true",
+      name: "Canonical docs",
+      ok: resolution.initialized && errors.length === 0,
+      message: `${resolution.source} ${resolution.projectRoot}; ${issues.length} issue(s)`,
       critical: true,
     };
   } catch (error) {
-    return { name: "Mnemo MCP config", ok: false, message: (error as Error).message, critical: true };
+    return { name: "Canonical docs", ok: false, message: (error as Error).message, critical: true };
   }
 }
 
 function pluginManagesMcp(paths: MalahorPaths): boolean {
   const pluginFile = path.join(paths.malahorPluginDir, "index.ts");
-  if (!fs.existsSync(pluginFile) || !fs.existsSync(paths.mnemoIndex)) return false;
+  if (!fs.existsSync(pluginFile) || !fs.existsSync(paths.mnemoIndex) || !fs.existsSync(paths.docsIndex)) return false;
 
   try {
     return isManagedContent(fs.readFileSync(pluginFile, "utf8"));

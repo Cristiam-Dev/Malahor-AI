@@ -89,14 +89,14 @@ describe("raíces registradas por proyecto", () => {
     expect(raw).not.toMatch(/graphify/i);
   });
 
-  test("acepta solo los tres niveles nuevos y conserva legibles los tres heredados", () => {
+  test("acepta niveles vigentes/legacy, pero ningun sufijo habilita Obsidian gestionado", () => {
     for (const level of ["memory", "memory+codegraph", "memory+codegraph+obsidian",
       "mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"]) {
       expect(parseContextLevel(level)).toBe(level);
     }
     expect(() => parseContextLevel("memory+graphify")).toThrow(/invalido/i);
-    expect(obsidianEnabled(parseContextLevel("memory+codegraph+obsidian"))).toBe(true);
-    expect(obsidianEnabled(parseContextLevel("mnemo+graphify+obsidian"))).toBe(true);
+    expect(obsidianEnabled(parseContextLevel("memory+codegraph+obsidian"))).toBe(false);
+    expect(obsidianEnabled(parseContextLevel("mnemo+graphify+obsidian"))).toBe(false);
     expect(obsidianEnabled(parseContextLevel("mnemo+graphify"))).toBe(false);
   });
 
@@ -132,13 +132,14 @@ describe("raíces registradas por proyecto", () => {
       expect(output).toContain(`- Context level: ${level}`);
       expect(output).toMatch(/- Code context: .*degrad|\bCodeGraph: .*degrad/i);
       expect(output).toMatch(/(?:index|[ií]ndice|codegraph)/i);
-      expect(output).toContain(`- Obsidian: ${level.endsWith("+obsidian") ? "enabled" : "disabled"}`);
+      expect(output).toContain("- Documentation:");
+      expect(output).toContain("- Obsidian: optional human client; not a managed context provider or storage backend");
       expect(fs.readFileSync(projects, "utf8")).toBe(raw);
       expect(fs.existsSync(path.join(paths.malahorHome, "codegraph"))).toBe(false);
     }
   });
 
-  test("status distingue los tres niveles legacy: codigo inactivo, transicion visible y Obsidian preservado", () => {
+  test("status distingue los tres niveles legacy sin reactivar Obsidian como proveedor", () => {
     const { projects, paths } = fixture();
     fs.mkdirSync(path.dirname(projects), { recursive: true });
     for (const level of ["mnemo", "mnemo+graphify", "mnemo+graphify+obsidian"] as const) {
@@ -149,18 +150,23 @@ describe("raíces registradas por proyecto", () => {
 
       expect(output).toMatch(/(?:legacy|transici[oó]n|migraci[oó]n)/i);
       expect(output).toContain("- Code context: disabled");
-      expect(output).toContain(`- Obsidian: ${level.endsWith("+obsidian") ? "enabled" : "disabled"}`);
+      expect(output).toContain("- Documentation:");
+      expect(output).toContain("- Obsidian: optional human client; not a managed context provider or storage backend");
       expect(fs.readFileSync(projects, "utf8")).toBe(raw);
       expect(fs.existsSync(path.join(paths.malahorHome, "codegraph"))).toBe(false);
     }
   });
 
-  test("el protocolo recupera proyecto, memoria, CodeGraph gestionado, Obsidian y lecturas dirigidas en ese orden", () => {
+  test("el protocolo recupera proyecto, memoria, CodeGraph gestionado, docs y lecturas dirigidas en ese orden", () => {
     const order = MALAHOR_RUNTIME_PROTOCOL.split("\n").find((line) => /ordena el contexto/i.test(line));
     expect(order).toBeDefined();
-    expect(order).toMatch(/proyecto.*mem_\*.*codegraph.*obsidian.*lecturas (?:dirigidas|puntuales)/i);
+    expect(order).toMatch(/proyecto.*mem_\*.*codegraph.*docs_\*.*lecturas (?:dirigidas|puntuales)/i);
     expect(order).toMatch(/codegraph.*(?:habilitad|gestionad)/i);
-    expect(order).toMatch(/obsidian.*habilitad/i);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/Obsidian.*clientes? humanos?.*no (?:son|es) storage/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/exclusivamente mediante docs_\*.*nunca mediante filesystem, Obsidian MCP ni fallback al repositorio/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/fachada documental natural.*no exige al usuario claves, rutas internas, versiones SHA ni nombres de tools/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/No existe borrado documental permanente.*mover a un [aá]rea de archivo/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/docs_open.*cliente global o system/is);
   });
 
   test("el protocolo mantiene planes sin TTL y dependencias sin autoarranque", () => {

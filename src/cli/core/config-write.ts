@@ -5,9 +5,24 @@ import { applyEdits, modify } from "jsonc-parser/lib/esm/main.js";
 
 import { timestamp } from "./backup";
 import { readConfigFile, type MalahorConfig } from "./config";
+import type { DocsClient } from "../../docs/client";
 
 /** Solo instalacion/update: conserva JSONC y comparte el lock con mode set. */
 export function saveExecutionPolicy(config: MalahorConfig, dryRun: boolean): boolean {
+  return saveConfigSection(config, "execution", { ...config.execution }, dryRun);
+}
+
+/** Preferencia global del host; conserva comentarios y crea backup como mode set. */
+export function saveDocsClient(config: MalahorConfig, client: DocsClient, dryRun: boolean): boolean {
+  return saveConfigSection(config, "docs", { client }, dryRun);
+}
+
+function saveConfigSection(
+  config: MalahorConfig,
+  section: "execution" | "docs",
+  values: Record<string, unknown>,
+  dryRun: boolean,
+): boolean {
   if (dryRun) return true;
   const file = config.paths.configFile;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -17,14 +32,12 @@ export function saveExecutionPolicy(config: MalahorConfig, dryRun: boolean): boo
   try {
     if (fs.existsSync(file) && !fs.lstatSync(file).isFile()) throw new Error("La configuracion debe ser un archivo regular.");
     const raw = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-    const current = readConfigFile(file);
-    const existing = current.execution as Record<string, unknown> | undefined;
-    if (existing?.intervention === config.execution.intervention
-      && existing.verification === config.execution.verification
-      && existing.revision === config.execution.revision) return true;
+    const current = readConfigFile(file) as unknown as Record<string, unknown>;
+    const existing = current[section] as Record<string, unknown> | undefined;
+    if (Object.entries(values).every(([key, value]) => existing?.[key] === value)) return true;
     let next = raw || "{}\n";
-    for (const [key, value] of Object.entries(config.execution)) {
-      next = applyEdits(next, modify(next, ["execution", key], value, {
+    for (const [key, value] of Object.entries(values)) {
+      next = applyEdits(next, modify(next, [section, key], value, {
         formattingOptions: { insertSpaces: true, tabSize: 2, eol: next.includes("\r\n") ? "\r\n" : "\n" },
       }));
     }

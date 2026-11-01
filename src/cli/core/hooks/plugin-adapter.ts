@@ -16,6 +16,7 @@ import {
   type HookResult,
   type HookViolation,
 } from "./types";
+import { parsePatchOperations } from "../documentation-boundary";
 
 export type PermissionEffect = "allow" | "ask" | "deny";
 
@@ -479,8 +480,25 @@ function toolDetails(tool: string, input: unknown, options: PluginAdapterOptions
     return { event: "file.read.before", resourceKind: "filesystem", targetPaths: pathValues(args), metadata: { tool } };
   }
 
-  if (normalized === "write" || normalized === "edit" || normalized === "patch") {
-    return { event: "file.write.before", resourceKind: "filesystem", targetPaths: pathValues(args), metadata: { tool } };
+  if (normalized === "patch") {
+    const patchText = stringValue(args.patchText) ?? "";
+    const fileOperations = parsePatchOperations(patchText);
+    return {
+      event: "file.write.before",
+      resourceKind: "filesystem",
+      targetPaths: fileOperations.map((operation) => operation.path),
+      metadata: { tool, fileOperations },
+    };
+  }
+
+  if (normalized === "write" || normalized === "edit") {
+    const targetPaths = pathValues(args);
+    return {
+      event: "file.write.before",
+      resourceKind: "filesystem",
+      targetPaths,
+      metadata: { tool, fileOperations: targetPaths.map((targetPath) => ({ kind: "write", path: targetPath })) },
+    };
   }
 
   if (normalized === "webfetch") {

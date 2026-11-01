@@ -94,33 +94,32 @@ describe("approval ledger", () => {
     expect(consumeApproval(record.nonce, context(home)).ok).toBe(true);
   });
 
-  test("vincula recursos del vault por identidad logica independiente del cwd", () => {
+  test("vincula recursos filesystem absolutos de forma estable e independiente del cwd", () => {
     const home = temporaryHome();
-    const targetPaths = ["Malahor-AI/Product/pm/plan.md"];
+    const target = path.join(home, "repo", "Product", "pm", "plan.md");
     const ctx = context(home, {
-      event: "obsidian.write.before",
+      event: "file.write.before",
       command: "",
-      resourceKind: "obsidian-vault",
-      targetPaths,
+      resourceKind: "filesystem",
+      targetPaths: [target],
     });
     const record = grantApproval(ctx, { channel: "cli-tty" });
 
-    expect(record.resources).toEqual(["obsidian-vault:Malahor-AI/Product/pm/plan.md"]);
-    expect(consumeApproval(record.nonce, { ...ctx, resourceKind: "filesystem" }).ok).toBe(false);
+    expect(record.resources).toEqual([path.normalize(target)]);
     expect(consumeApproval(record.nonce, {
       ...ctx,
       cwd: path.join(home, "otro-cwd"),
     }).ok).toBe(true);
   });
 
-  test("no emite aprobaciones para rutas de vault invalidas", () => {
+  test("no emite aprobaciones para el resourceKind legacy retirado", () => {
     const home = temporaryHome();
     expect(() => grantApproval(context(home, {
-      event: "obsidian.write.before",
+      event: "file.write.before",
       command: "",
-      resourceKind: "obsidian-vault",
-      targetPaths: ["../fuera.md"],
-    }), { channel: "cli-tty" })).toThrow(/traversal/);
+      resourceKind: "obsidian-vault" as unknown as HookContext["resourceKind"],
+      targetPaths: ["Product/manual.md"],
+    }), { channel: "cli-tty" })).toThrow(/tipo de recurso no reconocido/i);
   });
 
   test("rechaza registros con vigencia invalida, permisos inseguros o TTL excedido", () => {
@@ -240,13 +239,14 @@ describe("assert with approvals and audit", () => {
     expect(fs.statSync(path.dirname(auditFilePath(home))).mode & 0o777).toBe(0o700);
   });
 
-  test("auditoria de vault es estable aunque cambie el cwd", () => {
+  test("auditoria de un recurso filesystem absoluto es estable aunque cambie el cwd", () => {
     const home = temporaryHome();
+    const target = path.join(home, "repo", "Product", "manual.md");
     const ctx = context(home, {
-      event: "obsidian.write.before",
+      event: "file.write.before",
       command: "",
-      resourceKind: "obsidian-vault",
-      targetPaths: ["Malahor-AI/Product/manual.md"],
+      resourceKind: "filesystem",
+      targetPaths: [target],
     });
 
     const first = buildAuditEntry(ctx, runHooks(ctx));
@@ -260,7 +260,7 @@ describe("assert with approvals and audit", () => {
     const notDirectory = path.join(home, "not-a-directory");
     fs.writeFileSync(notDirectory, "x", "utf8");
     const ctx = context(home, {
-      event: "git.commit.before",
+      event: "context.save.before",
       command: "",
       targetPaths: [],
       malahorHome: notDirectory,

@@ -1,13 +1,26 @@
+---
+type: projects-index
+format: malahor-markdown-v1
+---
+
 # Projects
 
-Notas por proyecto.
+Documentacion canonica aislada por clave de proyecto.
 
 ## Convencion
 
-Crear una nota por proyecto usando el nombre canonico del proyecto.
+Malahor crea una carpeta por proyecto registrado:
 
 Ejemplo:
 
-```txt
-malahor.md
+```text
+projects/
+  malahor/
+    README.md
+    Product/
+    Design/
+    SDD/
+    Discovery/
 ```
+
+Los agentes operan estas carpetas mediante `docs_*` con paths relativos al proyecto y control optimista de versiones. La persona puede pedirlo en lenguaje natural: el agente infiere la clave, busca antes de crear y reporta el path afectado. No mover contenido entre claves, borrar permanentemente ni crear copias documentales en repositorios de codigo.

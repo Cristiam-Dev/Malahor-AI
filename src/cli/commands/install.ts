@@ -12,6 +12,11 @@ import {
 } from "../core/config";
 import { saveExecutionPolicy } from "../core/config-write";
 import { registerProjectRoot } from "../core/context";
+import {
+  describeProjectDocsOnboarding,
+  persistProjectDocsOnboarding,
+  prepareProjectDocsOnboarding,
+} from "../core/docs-onboarding";
 import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostKind } from "../core/detector";
 import { parseExecutionLevel, reviseExecutionPolicy } from "../core/execution-policy";
 import { assertHooksAllowed } from "../core/hooks/engine";
@@ -27,12 +32,14 @@ import { isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveProject } from "../core/project";
 import type { MalahorPackagePaths } from "../core/package";
 import { validateInstallation } from "../core/validate";
+import { initializeDocsProject } from "../../docs/resolver";
 
 export interface InstallOptions {
   dryRun: boolean;
   yes: boolean;
   bootstrap: boolean;
   policyAfter: string | undefined;
+  docsPath?: string;
 }
 
 export async function runInstall(options: InstallOptions): Promise<void> {
@@ -41,6 +48,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   const detection = detectEnvironment(paths);
   const host = detectOpenCodeHost(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
+  const project = resolveProject(packagePaths.root, config.projects.aliases);
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
   const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
@@ -59,6 +67,16 @@ export async function runInstall(options: InstallOptions): Promise<void> {
     throw new Error(`Node 22+ es requerido. Detectado: ${detection.nodeVersion}`);
   }
 
+  const docsChoice = await prepareProjectDocsOnboarding({
+    paths,
+    aliases: config.projects.aliases,
+    project: project.canonicalKey,
+    codeRoots: [project.root],
+    explicitPath: options.docsPath,
+    yes: options.yes || options.bootstrap,
+    dryRun: options.dryRun,
+  });
+
   // Politica DIFERIDA: se valida todo antes de tocar permisos del agente.
   // Si la validacion falla, la politica guardada sigue intacta y el agente conserva salida.
   ensureBuild(packagePaths, paths, detection, options);
@@ -75,6 +93,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 
   if (!options.dryRun) {
     fs.mkdirSync(paths.mnemoDir, { recursive: true });
+    fs.mkdirSync(paths.docsDir, { recursive: true });
     fs.mkdirSync(paths.assetsDir, { recursive: true });
     fs.mkdirSync(paths.vaultDir, { recursive: true });
     fs.mkdirSync(paths.opencodeDir, { recursive: true });
@@ -87,6 +106,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 
   if (!options.dryRun) {
     fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
+    fs.copyFileSync(packagePaths.docsBuild, paths.docsIndex);
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
@@ -119,13 +139,21 @@ export async function runInstall(options: InstallOptions): Promise<void> {
     printLine(describeAgentSync(agent, options.dryRun));
   }
   printLine(`Mnemo MCP: ${host.kind === "v2" ? "runtime plugin transform" : "configured in legacy config"}`);
+  printLine(`Docs MCP: ${host.kind === "v2" ? "runtime plugin transform" : "configured in legacy config"}`);
   printLine(`OpenCode compaction: ${host.kind === "v2" ? "runtime plugin hook (verify-only config)" : "configured"}`);
 
   validateBeforePolicy(paths, packagePaths, options, host.kind === "v2", host.kind === "v2", host.kind);
 
   const execution = await resolveFinalPolicy(config.execution, options);
-  const project = resolveProject(packagePaths.root, config.projects.aliases);
   registerProjectRoot(paths.projectsFile, project.canonicalKey, project.root, options.dryRun);
+  persistProjectDocsOnboarding(paths, docsChoice, options.dryRun);
+  const initialized = initializeDocsProject(
+    docsChoice.resolution,
+    path.join(packagePaths.assetsDir, "vault-template"),
+    options.dryRun,
+  );
+  printLine(`Docs vault: ${describeProjectDocsOnboarding(docsChoice, options.dryRun)}`);
+  printLine(`Docs skeleton: ${options.dryRun ? "would initialize" : "initialized"} (${initialized.created.length} created, ${initialized.kept.length} kept)`);
   const policyLoad = loadHookPolicy(paths, project.canonicalKey);
   assertHooksAllowed({
     event: "install.beforePolicy",
@@ -170,20 +198,20 @@ export async function runInstall(options: InstallOptions): Promise<void> {
 }
 
 function ensureBuild(packagePaths: MalahorPackagePaths, _paths: MalahorPaths, detection: DetectionResult, options: InstallOptions): void {
-  if (fs.existsSync(packagePaths.mnemoBuild)) return;
+  if (fs.existsSync(packagePaths.mnemoBuild) && fs.existsSync(packagePaths.docsBuild)) return;
 
   const canAutoBuild = detection.commands.bun && fs.existsSync(path.join(packagePaths.root, "src"));
 
   if (options.bootstrap && canAutoBuild && !options.dryRun) {
     printLine("Bootstrap: dist/ no existe; corriendo `bun run build` automaticamente...");
     execFileSync("bun", ["run", "build"], { cwd: packagePaths.root, stdio: "inherit" });
-    if (fs.existsSync(packagePaths.mnemoBuild)) return;
-    throw new Error("`bun run build` no genero dist/mnemo/index.js. Corre el build manualmente y revisa errores.");
+    if (fs.existsSync(packagePaths.mnemoBuild) && fs.existsSync(packagePaths.docsBuild)) return;
+    throw new Error("`bun run build` no genero los runtimes dist/mnemo y dist/docs. Corre el build manualmente y revisa errores.");
   }
 
   if (options.dryRun) return;
 
-  throw new Error("No existe dist/mnemo/index.js. Ejecuta `bun run build` antes de instalar (o usa `install --bootstrap` con bun disponible).");
+  throw new Error("Falta dist/mnemo/index.js o dist/docs/index.js. Ejecuta `bun run build` antes de instalar (o usa `install --bootstrap` con bun disponible).");
 }
 
 function validateBeforePolicy(

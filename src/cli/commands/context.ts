@@ -1,5 +1,5 @@
-import fs from "node:fs";
 import { createInterface } from "node:readline/promises";
+import path from "node:path";
 import { loadConfig } from "../core/config";
 import { statusCodegraph } from "../core/codegraph-index";
 import { applyContextMigration, previewContextMigration } from "../core/context-migration";
@@ -9,16 +9,20 @@ import {
   contextLevelLabel,
   legacyContextLevel,
   levelForProject,
-  obsidianEnabled,
   registerProjectRoot,
   resolveContextTarget,
 } from "../core/context";
+import {
+  describeProjectDocsOnboarding,
+  persistProjectDocsOnboarding,
+  prepareProjectDocsOnboarding,
+} from "../core/docs-onboarding";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveCanonicalProjectKey, type ProjectAliases } from "../core/project";
 import { detectStack } from "../core/stack";
 import { saveSessionSummary } from "../../mnemo/db";
 import { contextForProject } from "../../mnemo/context";
-import { artifactPaths, resolveObsidianMode } from "./obsidian";
+import { initializeDocsProject, resolveDocsProject } from "../../docs/resolver";
 
 export interface ContextOptions {
   action: string;
@@ -29,12 +33,14 @@ export interface ContextOptions {
   apply?: boolean;
   yes?: boolean;
   approval?: string;
+  docsPath?: string;
 }
 
 export function runContext(options: ContextOptions): void | Promise<void> {
   const config = loadConfig();
   const paths = config.paths;
   const action = options.action || "help";
+  if (options.docsPath && action !== "register") throw new Error("--docs-path solo se admite con `context register`.");
 
   printHeader("malahor-ai context");
   printLine(`Projects file: ${paths.projectsFile}`);
@@ -44,7 +50,7 @@ export function runContext(options: ContextOptions): void | Promise<void> {
   switch (action) {
     case "status":
       assertArgCount(options.args, 0, "Uso: malahor-ai context status [--project <key>]");
-      printStatus(paths, config.projects.aliases, options.project);
+      printStatus(paths, config.projects.aliases, options.project, config.docs.client);
       return;
     case "detect":
       assertArgCount(options.args, 0, "Uso: malahor-ai context detect [--project <key>]");
@@ -59,8 +65,7 @@ export function runContext(options: ContextOptions): void | Promise<void> {
       printContextSave(paths, config.projects.aliases, options);
       return;
     case "register":
-      printRegister(paths, config.projects.aliases, options);
-      return;
+      return printRegister(paths, config.projects.aliases, options);
     case "migrate":
       assertArgCount(options.args, 0, "Uso: malahor-ai context migrate [--apply] [--yes] [--approval <evidencia-hook>]");
       return printMigration(paths, options);
@@ -74,7 +79,7 @@ export function runContext(options: ContextOptions): void | Promise<void> {
   }
 }
 
-function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: string | undefined): void {
+function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: string | undefined, docsClient: string): void {
   const target = resolveContextTarget(paths, aliases, override);
   const level = levelForProject(paths.projectsFile, target.canonicalKey);
 
@@ -86,8 +91,9 @@ function printStatus(paths: MalahorPaths, aliases: ProjectAliases, override: str
   printLine(`- Context level: ${contextLevelLabel(level)}`);
   printLine("- Memory: enabled (always)");
   printLine(`- Code context: ${codeContextStatus(paths, target.canonicalKey, target.root, level)}`);
-  printLine(`- Obsidian: ${obsidianEnabled(level) ? "enabled" : "disabled"}`);
-  if (obsidianEnabled(level)) printLine(`- Obsidian bridge: ${bridgeLabel(paths)}`);
+  printLine(`- Documentation: ${docsStatus(paths, aliases, target.canonicalKey)}`);
+  printLine(`- Documentation client: ${docsClient} (fallback: system)`);
+  printLine("- Obsidian: optional human client; not a managed context provider or storage backend");
   if (legacyContextLevel(level)) printLine("- Migration: nivel legacy preservado; usa `malahor-ai context migrate` para previsualizar una conversion con backup.");
 }
 
@@ -131,7 +137,7 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   printLine(`- Root: ${root}`);
   printLine(`- Context level: ${contextLevelLabel(level)}`);
   printLine(`- Code context: ${codegraphEnabled(level) ? "configured by level (use only when index is managed)" : "disabled"}`);
-  printLine(`- Obsidian: ${obsidianEnabled(level) ? "enabled" : "disabled"}`);
+  printLine(`- Documentation: ${docsStatus(paths, aliases, target.canonicalKey)}`);
   printLine(`- Stack signals: ${detection.signals.length > 0 ? detection.signals.map((item) => item.signal).join(", ") : "none"}`);
   printLine(`- Suggested skills: ${detection.skills.length > 0 ? detection.skills.join(", ") : "none"}`);
   printLine(`- Memory scopes: ${memory.scopeChain.join(" → ")}`);
@@ -150,9 +156,9 @@ function printContextCapsule(paths: MalahorPaths, aliases: ProjectAliases, overr
   printLine("");
   printLine("Recovery protocol:");
   printLine("- Use this capsule first; do not dump full files or full memory unless needed.");
-  printLine("- Orden: proyecto canonico -> memoria mem_* -> CodeGraph solo habilitado y gestionado -> Obsidian solo habilitado -> lecturas dirigidas.");
+  printLine("- Orden: proyecto canonico -> memoria mem_* -> CodeGraph solo habilitado y gestionado -> docs_* -> lecturas dirigidas.");
   printLine("- Sin indice CodeGraph gestionado, degrada a lecturas dirigidas; no instales ni indexes automaticamente.");
-  printLine("- Si hay contexto documental habilitado, lee solo las notas necesarias.");
+  printLine("- Lee solo Markdown necesario mediante docs_*; Obsidian es un cliente humano, no otro storage.");
   printLine("- Keep the working summary under ~1500 tokens and proceed with the next concrete action.");
 }
 
@@ -172,19 +178,36 @@ function printContextSave(paths: MalahorPaths, aliases: ProjectAliases, options:
   printLine(`- Summary: ${compactText(summary, 900)}`);
 }
 
-function printRegister(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): void {
+async function printRegister(paths: MalahorPaths, aliases: ProjectAliases, options: ContextOptions): Promise<void> {
   const requested = options.project ?? options.args[0];
   const roots = options.project ? options.args : options.args.slice(1);
   if (!requested || roots.length === 0) {
-    throw new Error("Uso: malahor-ai context register <project> <root> [<root> ...] [--dry-run]");
+    throw new Error("Uso: malahor-ai context register <project> <root> [<root> ...] [--docs-path <externa>] [--yes] [--dry-run]");
   }
 
   const canonicalKey = resolveCanonicalProjectKey(requested, aliases);
+  const docsChoice = await prepareProjectDocsOnboarding({
+    paths,
+    aliases,
+    project: canonicalKey,
+    codeRoots: roots,
+    explicitPath: options.docsPath,
+    yes: Boolean(options.yes),
+    dryRun: options.dryRun,
+  });
   for (const root of roots) {
     registerProjectRoot(paths.projectsFile, canonicalKey, root, options.dryRun);
     printLine(`- ${options.dryRun ? "would register" : "registered"}: ${canonicalKey} -> ${root}`);
   }
+  persistProjectDocsOnboarding(paths, docsChoice, options.dryRun);
+  const initialized = initializeDocsProject(
+    docsChoice.resolution,
+    path.join(paths.assetsDir, "vault-template"),
+    options.dryRun,
+  );
   printLine(`Default root: ${roots.at(-1)}`);
+  printLine(`Documentation: ${describeProjectDocsOnboarding(docsChoice, options.dryRun)}`);
+  printLine(`Docs skeleton: ${options.dryRun ? "would initialize" : "initialized"} (${initialized.created.length} created, ${initialized.kept.length} kept)`);
 }
 
 async function printMigration(paths: MalahorPaths, options: ContextOptions): Promise<void> {
@@ -266,15 +289,13 @@ function compactText(value: string, maxChars: number): string {
   return `${normalized.slice(0, Math.max(0, maxChars - 1)).trim()}…`;
 }
 
-function isBridgeConfigured(paths: MalahorPaths): boolean {
-  const mode = resolveObsidianMode(paths);
-  const { secretFile, scriptFile } = artifactPaths(paths, mode);
-  return fs.existsSync(secretFile) && fs.existsSync(scriptFile);
-}
-
-function bridgeLabel(paths: MalahorPaths): string {
-  const mode = resolveObsidianMode(paths);
-  return isBridgeConfigured(paths) ? `configured (${mode})` : `not configured (${mode})`;
+function docsStatus(paths: MalahorPaths, aliases: ProjectAliases, project: string): string {
+  try {
+    const docs = resolveDocsProject(paths, aliases, project);
+    return `${docs.initialized ? "available" : "not initialized"} (${docs.source}: ${docs.projectRoot})`;
+  } catch (error) {
+    return `degradado: ${(error as Error).message}`;
+  }
 }
 
 function printContextHelp(): void {
@@ -285,14 +306,15 @@ Usage:
   malahor-ai context recover [--project <key>] [--limit <n>]
   malahor-ai context capsule [--project <key>] [--limit <n>]
   malahor-ai context save [summary...] [--project <key>] [--dry-run]
-  malahor-ai context register <project> <root> [<root> ...] [--dry-run]
+  malahor-ai context register <project> <root> [<root> ...] [--docs-path <externa>] [--yes] [--dry-run]
   malahor-ai context migrate [--apply] [--yes] [--approval <evidencia-hook>]
 
 Reglas:
   La memoria siempre esta activa.
   Proyectos nuevos: memory+codegraph por defecto (instalacion e indexado requieren consentimiento).
-  Niveles: memory, memory+codegraph, memory+codegraph+obsidian.
-  Niveles mnemo* heredados se preservan y NO activan CodeGraph hasta migrarlos.
+  Niveles activos: memory, memory+codegraph. La documentacion externa docs_* siempre se resuelve aparte.
+  Sufijos +obsidian y niveles mnemo* se leen por compatibilidad; Obsidian ya no habilita storage/contexto.
+  Niveles mnemo* heredados NO activan CodeGraph hasta migrarlos.
   context migrate previsualiza sin escribir; --apply confirma, respalda y verifica.
 
 Detect:
@@ -303,6 +325,7 @@ Recovery:
   context recover/capsule genera una capsula corta con proyecto, nivel, stack,
   ultima sesion y memoria reciente. Usalo antes/despues de compactar.
   context save guarda un checkpoint breve en la memoria local.
+  context register ofrece vault gestionado o carpeta externa en TTY; --yes/no-TTY usa el vault gestionado.
 `);
 }
 

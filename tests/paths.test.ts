@@ -75,6 +75,9 @@ console.log(JSON.stringify({
     }, root);
 
     expect(paths.opencodeDir).toBe(path.join(root, "custom-opencode"));
+    expect(paths.docsDir).toBe(path.join(root, ".malahor", "docs"));
+    expect(paths.docsIndex).toBe(path.join(root, ".malahor", "docs", "index.js"));
+    expect(paths.vaultDir).toBe(path.join(root, ".malahor", "vault"));
   });
 
   test("fallback Windows usa ~/.config/opencode sin depender de AppData", () => {

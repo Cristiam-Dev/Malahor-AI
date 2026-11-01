@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 import { loadConfig } from "../cli/core/config";
@@ -10,6 +11,7 @@ import {
 } from "../cli/core/planning";
 import type { PlanningAuthority } from "../cli/core/planning-authority";
 import { detectSecretKinds, type PluginAdapterOptions } from "../cli/core/hooks/plugin-adapter";
+import { isProtectedDocumentationPath, parsePatchOperations } from "../cli/core/documentation-boundary";
 
 export interface PlanningStorage {
   get(key: string): Promise<unknown>;
@@ -130,8 +132,9 @@ export async function evaluatePlanningPermission(
   if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority)) return;
   const state = await readPlan(storage, resolved.scope.sessionID, authority);
   const resources = Array.isArray(input.resources) ? input.resources : [];
-  if (resources.length === 0 || resources.some((item) => typeof item !== "string"
-    || !planAllows(state, resolved.scope, normalizeAction(normalized, item, resolved.directory), Date.now(), authority))) {
+  if (!permissionResourcesAllowed(
+    state, resolved.scope, normalized, resources, resolved.directory, authority,
+  )) {
     deny(input, "Accion no incluida en un plan vigente y confirmado.");
   }
 }
@@ -191,6 +194,10 @@ export async function registerPlanningTools(
         const raw = value as PlanInput;
         if (detectSecretKinds(raw).length > 0) throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
+        const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+        const newRepoDoc = actions?.find((item) => item.action === "edit"
+          && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));
+        if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const state = await presentPlan(
           resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call), authority,
         );
@@ -388,8 +395,8 @@ function toolActions(tool: string, value: unknown, directory: string): PlannedAc
   }
   if (tool === "patch") {
     if (typeof args.patchText !== "string") return undefined;
-    const matches = [...args.patchText.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)];
-    return matches.length ? matches.map((match) => normalizeAction("edit", match[1]!, directory)) : undefined;
+    const operations = parsePatchOperations(args.patchText);
+    return operations.length ? operations.map((operation) => normalizeAction("edit", operation.path, directory)) : undefined;
   }
   if (tool === "edit" || tool === "write") {
     const target = args.path ?? args.filePath;
@@ -402,6 +409,29 @@ function normalizeAction(action: string, resource: string, directory: string): P
   return { action, resource: action === "edit" ? path.resolve(directory, resource) : resource };
 }
 
+function permissionResourcesAllowed(
+  state: unknown,
+  scope: PlanScope,
+  action: string,
+  resources: unknown[],
+  directory: string,
+  authority: PlanningAuthority,
+): boolean {
+  if (resources.length === 0 || resources.some((item) => typeof item !== "string")) return false;
+  const now = Date.now();
+  if (resources.every((item) => planAllows(
+    state, scope, normalizeAction(action, item as string, directory), now, authority,
+  ))) return true;
+
+  // OpenCode V2 escanea un comando compuesto y emite un recurso por cada
+  // subcomando. La segunda frontera (tool.execute.before) conserva la
+  // coincidencia exacta del comando original; aqui solo reconstruimos `&&`
+  // para no rechazar antes un comando compuesto que si figura en el plan.
+  if (action !== "shell" || resources.length < 2) return false;
+  const compound = (resources as string[]).join(" && ");
+  return planAllows(state, scope, { action: "shell", resource: compound }, now, authority);
+}
+
 function permissionAction(action: string): string {
   if (["bash", "command"].includes(action)) return "shell";
   if (["write", "patch", "create"].includes(action)) return "edit";
@@ -410,7 +440,17 @@ function permissionAction(action: string): string {
 }
 
 function routineTool(tool: string): boolean {
-  return /^(?:mcp_)?(?:mnemo_|obsidian_|codegraph_(?!.*(?:index|write|delete)))/.test(tool);
+  const normalized = tool.trim().toLowerCase();
+  if (/^(?:mcp[_:.-])?mnemo(?:[_:.-])/.test(normalized)) return true;
+  if (/^(?:mcp[_:.-])?docs(?:[_:.-])(?:resolve|list|read|search|write|append|move|open)$/.test(normalized)) return true;
+  return /^(?:mcp[_:.-])?codegraph[_:.-](?!.*(?:index|write|delete))/.test(normalized);
+}
+
+function planningProjectRoot(project: string, directory: string, env: NodeJS.ProcessEnv | undefined): string {
+  const paths = resolvePaths({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
+  return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside(directory, entry.root))?.root
+    ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root
+    ?? directory;
 }
 
 function inside(target: string, root: string): boolean {

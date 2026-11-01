@@ -22,6 +22,8 @@ beforeEach(() => {
   fs.mkdirSync(process.env.MALAHOR_OPENCODE_DIR, { recursive: true });
   fs.mkdirSync(path.join(home, "mnemo"), { recursive: true });
   fs.writeFileSync(path.join(home, "mnemo", "index.js"), "// mnemo\n", "utf8");
+  fs.mkdirSync(path.join(home, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(home, "docs", "index.js"), "// docs\n", "utf8");
 });
 
 afterEach(() => {
@@ -158,6 +160,8 @@ describe("scaffold del plugin", () => {
       expect(text).toMatch(/\bgo\b/i);
       expect(text).toMatch(/\bimplementa\b/i);
       expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
+      expect(text).toMatch(/documentaci[oó]n mediante docs_\*/i);
+      expect(text).toMatch(/Obsidian MCP ni fallback al repositorio/i);
     } finally {
       if (typeof cleanup === "function") await cleanup();
     }

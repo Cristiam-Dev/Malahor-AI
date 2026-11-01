@@ -1,4 +1,5 @@
-export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v1 -->";
+export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v2 -->";
+const LEGACY_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v1 -->";
 
 export const MALAHOR_RUNTIME_PROTOCOL = `${MALAHOR_PROTOCOL_MARKER}
 PROTOCOLO OPERATIVO MALAHOR
@@ -13,10 +14,10 @@ Proyecto y contexto
 - Resuelve el proyecto activo a su clave canónica antes de consultar memoria, código o documentación; reutiliza aliases existentes y no crees duplicados.
 - Si el proyecto está registrado, usa su raíz/defaultRoot autorizada para el contexto de código aunque la sesión esté en otra ubicación; no pidas una ruta si la registry es inequívoca.
 - Si no hay raíz registrada o hay varias candidatas, pide una sola aclaración antes de operar sobre código.
-- Ordena el contexto así: resolver de proyecto (clave y raíz canónica) → memoria mediante mem_* → CodeGraph solo si está habilitado por el nivel y gestionado → Obsidian solo si está habilitado → lecturas dirigidas puntuales.
+- Ordena el contexto así: resolver de proyecto (clave, raíz de código y raíz documental canónicas) → memoria mediante mem_* → CodeGraph solo si está habilitado por el nivel y gestionado → documentación mediante docs_* → lecturas dirigidas puntuales de código.
 - Los niveles legados mnemo* son de lectura/preservación; no activan CodeGraph ni se migran automáticamente. Sin índice gestionado, degrada a memoria y lecturas dirigidas.
-- Respeta el nivel de contexto del proyecto. No actives MCP, documentación o herramientas opcionales solo por comodidad.
-- La configuración global, memoria, grafos, índices y assets de Malahor viven fuera del repositorio del usuario.
+- La documentación externa docs_* es independiente del nivel de contexto. No actives proveedores o herramientas opcionales solo por comodidad.
+- La configuración global, memoria, documentación operativa, grafos, índices y assets de Malahor viven fuera del repositorio del usuario.
 
 Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
@@ -26,7 +27,7 @@ Intervención y reparación
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
-- El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni la documentación en Obsidian.
+- El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni las escrituras documentales autorizadas mediante docs_*.
 - Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
 - No edites opencode.json/opencode.jsonc manualmente ni pidas al usuario hacerlo; usa las rutas de diagnóstico y reparación de Malahor.
 - Un cambio de modo no requiere una sesion nueva. Si cambian assets o capacidades del host, sigue el diagnostico de Malahor y usa /reload solo cuando este lo indique.
@@ -45,7 +46,13 @@ Memoria y documentación
 - Si detectas recuerdos contradictorios en un mismo scope, presenta ambos antes de actuar con su ID, scope o procedencia y versión o fecha disponibles. Ranking, pin o fecha aislados no deciden cuál prevalece.
 - Si la evidencia no basta para resolver la contradicción, adviértelo y pide confirmación. No arbitres automáticamente ni adelantes relaciones supersedes/conflicts.
 - Nunca persistas secretos, tokens, passwords, PII innecesaria o llaves privadas.
-- Obsidian es documentación humana opcional y solo se opera mediante su MCP; no leas ni escribas el vault por filesystem.
+- La fuente documental canónica es Markdown UTF-8 bajo la raíz externa resuelta del proyecto. Los agentes leen y escriben exclusivamente mediante docs_*; nunca mediante filesystem, Obsidian MCP ni fallback al repositorio.
+- El agente es la fachada documental natural: interpreta la intención del usuario, infiere proyecto y área, busca antes de crear duplicados y traduce la petición a docs_resolve/list/read/search/write/append/move/open. No exige al usuario claves, rutas internas, versiones SHA ni nombres de tools.
+- Gestiona ifMatch/ifNoneMatch automáticamente, informa el path relativo afectado y pide una sola aclaración únicamente si proyecto, documento o intención son realmente ambiguos. Un conflicto de versión nunca se sobrescribe silenciosamente.
+- “Abre la documentación” usa docs_open con --app explícita, cliente global o system. Los launchers son cerrados, entienden Windows/WSL y nunca instalan aplicaciones ni aceptan comandos arbitrarios.
+- No existe borrado documental permanente: ante una petición de eliminar, propone mover a un área de archivo. Cambiar la raíz, migrar contenido o limpiar artefactos legacy requiere preview, plan y aprobación propia.
+- Usa paths .md relativos, frontmatter y enlaces relativos. README, licencias, gobernanza pública, contratos machine-readable, assets gestionados, ejemplos y fixtures son las únicas excepciones documentales permitidas dentro del repositorio.
+- Al registrar un proyecto en TTY ofrece el vault gestionado recomendado o una carpeta externa; --yes/no-TTY usa el gestionado salvo override explícito. Obsidian, VSCode, el explorador y otros lectores Markdown son clientes humanos opcionales del mismo vault; no son storage ni proveedores de contexto gestionados por Malahor.
 - Antes de cambiar, pausar o compactar, conserva un checkpoint breve con objetivo, estado, decisiones, bloqueos, validaciones y próximo paso.
 
 Construcción y SDD
@@ -74,6 +81,16 @@ Continuidad
 export function injectMalahorProtocol(input: Record<string, unknown>): boolean {
   const system = Array.isArray(input.system) ? input.system : [];
   if (system.some((part) => textContainsMarker(part))) return false;
+
+  for (const part of system) {
+    if (!isTextPart(part)) continue;
+    const legacyAt = part.text.indexOf(LEGACY_PROTOCOL_MARKER);
+    if (legacyAt >= 0) {
+      part.text = `${part.text.slice(0, legacyAt).trimEnd()}\n\n${MALAHOR_RUNTIME_PROTOCOL}`;
+      input.system = system;
+      return true;
+    }
+  }
 
   const last = system.at(-1);
   if (isTextPart(last)) {

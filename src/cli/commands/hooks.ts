@@ -307,8 +307,8 @@ function printEvents(): void {
 function printHooksHelp(): void {
   process.stdout.write(`
 Usage:
-  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--resource-kind filesystem|obsidian-vault] [--scope <scope>] [--confirm TOKEN] [--approval <nonce>] [--json]
-  malahor-ai hooks approval grant <event> --confirm APPROVE [--ttl <segundos>] [--command <cmd>] [--paths a,b] [--resource-kind filesystem|obsidian-vault] [--scope <scope>] [--json]
+  malahor-ai hooks check <event> [--profile standard|strict|release] [--command <cmd>] [--paths a,b] [--resource-kind filesystem] [--scope <scope>] [--confirm TOKEN] [--approval <nonce>] [--json]
+  malahor-ai hooks approval grant <event> --confirm APPROVE [--ttl <segundos>] [--command <cmd>] [--paths a,b] [--resource-kind filesystem] [--scope <scope>] [--json]
   malahor-ai hooks status [--project <key>]
   malahor-ai hooks profile get [--project <key>]
   malahor-ai hooks profile set off|light|standard|strict|release [--project <key>]
@@ -319,7 +319,6 @@ Ejemplos:
   malahor-ai hooks check git.push.before --profile release
   malahor-ai hooks check git.reset.before --command "git reset --hard"
   malahor-ai hooks check file.stage.before --paths .env,src/index.ts
-  malahor-ai hooks check obsidian.write.before --resource-kind obsidian-vault --paths Malahor-AI/Product/pm/plan.md
   malahor-ai hooks approval grant git.push.before --profile release --confirm APPROVE --ttl 300
 
 Decisiones:

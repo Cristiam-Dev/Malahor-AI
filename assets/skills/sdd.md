@@ -21,4 +21,6 @@ Usar este flujo para cambios no triviales: features nuevas, refactors amplios, c
 - Si calidad falla, volver a `sdd-apply` antes de verificar.
 - Guardar decisiones importantes en Mnemo.
 - Usar la capacidad de contexto de codigo configurada o busquedas dirigidas antes de leer muchos archivos raw.
-- No crear artefactos SDD dentro del repo objetivo salvo pedido explicito del usuario.
+- Leer y mantener artefactos SDD mediante `docs_*` en la raiz externa del proyecto.
+- Interpretar la solicitud documental natural, buscar el artefacto antes de crear y gestionar `ifMatch`/`ifNoneMatch` sin pedir versiones al usuario.
+- No crear documentacion SDD dentro del repo objetivo ni usar filesystem/Obsidian MCP como fallback.

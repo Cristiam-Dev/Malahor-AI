@@ -12,8 +12,9 @@ Foco opcional del usuario: $ARGUMENTS
 Instrucciones:
 
 1. La capsula anterior corre con permisos del cliente; no la reejecutes si ya mostro datos.
-2. Resume en maximo 10 lineas: proyecto canonico, root activo, nivel de contexto, memoria, proveedor de contexto de codigo, Obsidian y estado del puente.
+2. Resume en maximo 10 lineas: proyecto canonico, root de codigo, raiz documental, cliente humano, nivel de contexto, memoria, proveedor de contexto de codigo y estado del MCP docs.
 3. Si el usuario pide recuperar contexto o memoria, usa `/recuperar-contexto` o `malahor-ai context recover`; no dupliques la capsula completa.
 4. Si el proyecto o el root es ambiguo o no esta registrado, pide una sola aclaracion antes de operar; no asumas el cwd.
 5. Si aparece `MALAHOR_CLI_MISSING`, indica `/malahor-bootstrap`; no edites `opencode.jsonc` a mano.
 6. No leas archivos completos ni memoria completa para responder esto.
+7. Si el usuario pide abrir documentacion, usa `docs_open` con el cliente global o `system`; no solicites una ruta absoluta.

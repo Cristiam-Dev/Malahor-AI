@@ -6,6 +6,11 @@ import { copyAssets } from "../core/assets";
 import { formatExecutionPolicy, loadConfig, type MalahorExecutionPolicy } from "../core/config";
 import { saveExecutionPolicy } from "../core/config-write";
 import { registerProjectRoot } from "../core/context";
+import {
+  describeProjectDocsOnboarding,
+  persistProjectDocsOnboarding,
+  prepareProjectDocsOnboarding,
+} from "../core/docs-onboarding";
 import { detectEnvironment, detectOpenCodeHost, type DetectionResult, type OpenCodeHostKind } from "../core/detector";
 import { parseExecutionLevel, reviseExecutionPolicy } from "../core/execution-policy";
 import { assertHooksAllowed } from "../core/hooks/engine";
@@ -20,20 +25,23 @@ import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
 import { isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveProject } from "../core/project";
 import { validateInstallation } from "../core/validate";
+import { initializeDocsProject } from "../../docs/resolver";
 
 export interface UpdateOptions {
   dryRun: boolean;
   yes: boolean;
   bootstrap: boolean;
   policyAfter: string | undefined;
+  docsPath?: string;
 }
 
-export function runUpdate(options: UpdateOptions): void {
+export async function runUpdate(options: UpdateOptions): Promise<void> {
   const config = loadConfig();
   const paths = config.paths;
   const detection = detectEnvironment(paths);
   const host = detectOpenCodeHost(paths);
   const packagePaths = resolvePackagePaths(paths.cwd);
+  const project = resolveProject(packagePaths.root, config.projects.aliases);
   const agentsAsset = path.join(packagePaths.assetsDir, "opencode", "AGENTS.md");
   const commandsAsset = path.join(packagePaths.assetsDir, "opencode", "commands");
   const pluginAsset = path.join(packagePaths.assetsDir, "opencode", "plugins", "malahor", "index.ts");
@@ -51,6 +59,16 @@ export function runUpdate(options: UpdateOptions): void {
     throw new Error(`Node 22+ es requerido. Detectado: ${detection.nodeVersion}`);
   }
 
+  const docsChoice = await prepareProjectDocsOnboarding({
+    paths,
+    aliases: config.projects.aliases,
+    project: project.canonicalKey,
+    codeRoots: [project.root],
+    explicitPath: options.docsPath,
+    yes: options.yes || options.bootstrap,
+    dryRun: options.dryRun,
+  });
+
   ensureBuild(packagePaths, detection, options);
 
   if (!fs.existsSync(agentsAsset)) {
@@ -65,6 +83,7 @@ export function runUpdate(options: UpdateOptions): void {
 
   if (!options.dryRun) {
     fs.mkdirSync(paths.mnemoDir, { recursive: true });
+    fs.mkdirSync(paths.docsDir, { recursive: true });
     fs.mkdirSync(paths.assetsDir, { recursive: true });
     fs.mkdirSync(paths.vaultDir, { recursive: true });
     fs.mkdirSync(paths.opencodeDir, { recursive: true });
@@ -77,6 +96,7 @@ export function runUpdate(options: UpdateOptions): void {
 
   if (!options.dryRun) {
     fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
+    fs.copyFileSync(packagePaths.docsBuild, paths.docsIndex);
   }
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
@@ -108,6 +128,7 @@ export function runUpdate(options: UpdateOptions): void {
     printLine(describeAgentSync(agent, options.dryRun));
   }
   printLine(`Mnemo MCP: ${host.kind === "v2" ? "runtime plugin transform" : (options.dryRun ? "would refresh" : "refreshed")}`);
+  printLine(`Docs MCP: ${host.kind === "v2" ? "runtime plugin transform" : (options.dryRun ? "would refresh" : "refreshed")}`);
   printLine(describeInstructionsSync(agentsSync, options.dryRun));
   const legacyHint = legacyInstructionsHint(paths.opencodeMd);
   if (legacyHint) printLine(legacyHint);
@@ -118,8 +139,15 @@ export function runUpdate(options: UpdateOptions): void {
   // Migracion garantizada: cualquier update reescribe el formato de politica vigente,
   // incluyendo legacy deny -> whitelist agent-safe.
   const execution = resolveFinalPolicy(config.execution, options);
-  const project = resolveProject(packagePaths.root, config.projects.aliases);
   registerProjectRoot(paths.projectsFile, project.canonicalKey, project.root, options.dryRun);
+  persistProjectDocsOnboarding(paths, docsChoice, options.dryRun);
+  const initialized = initializeDocsProject(
+    docsChoice.resolution,
+    path.join(packagePaths.assetsDir, "vault-template"),
+    options.dryRun,
+  );
+  printLine(`Docs vault: ${describeProjectDocsOnboarding(docsChoice, options.dryRun)}`);
+  printLine(`Docs skeleton: ${options.dryRun ? "would refresh" : "refreshed safely"} (${initialized.created.length} created, ${initialized.kept.length} kept)`);
   const policyLoad = loadHookPolicy(paths, project.canonicalKey);
   assertHooksAllowed({
     event: "install.beforePolicy",
@@ -151,20 +179,20 @@ export function runUpdate(options: UpdateOptions): void {
 }
 
 function ensureBuild(packagePaths: MalahorPackagePaths, detection: DetectionResult, options: UpdateOptions): void {
-  if (fs.existsSync(packagePaths.mnemoBuild)) return;
+  if (fs.existsSync(packagePaths.mnemoBuild) && fs.existsSync(packagePaths.docsBuild)) return;
 
   const canAutoBuild = detection.commands.bun && fs.existsSync(path.join(packagePaths.root, "src"));
 
   if (options.bootstrap && canAutoBuild && !options.dryRun) {
     printLine("Bootstrap: dist/ no existe; corriendo `bun run build` automaticamente...");
     execFileSync("bun", ["run", "build"], { cwd: packagePaths.root, stdio: "inherit" });
-    if (fs.existsSync(packagePaths.mnemoBuild)) return;
-    throw new Error("`bun run build` no genero dist/mnemo/index.js. Corre el build manualmente y revisa errores.");
+    if (fs.existsSync(packagePaths.mnemoBuild) && fs.existsSync(packagePaths.docsBuild)) return;
+    throw new Error("`bun run build` no genero los runtimes dist/mnemo y dist/docs. Corre el build manualmente y revisa errores.");
   }
 
   if (options.dryRun) return;
 
-  throw new Error("No existe dist/mnemo/index.js. Ejecuta `bun run build` antes de actualizar (o usa `update --bootstrap` con bun disponible).");
+  throw new Error("Falta dist/mnemo/index.js o dist/docs/index.js. Ejecuta `bun run build` antes de actualizar (o usa `update --bootstrap` con bun disponible).");
 }
 
 function validateBeforePolicy(

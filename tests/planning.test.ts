@@ -497,6 +497,31 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     }
   });
 
+  test("permission reconstruye solo el comando shell compuesto exacto y tool exige el original", async () => {
+    const first = "parte A";
+    const second = "parte B";
+    const command = `${first} && ${second}`;
+    const presented = proposePlan(scope(), { ...input("shell"), actions: [{ action: "shell", resource: command }] });
+    records.set(planKey(SESSION), authorizePlan(reviewPlan(presented, presented.digest), presented.digest));
+
+    const split = { sessionID: SESSION, action: "bash", resources: [first, second], effect: "allow" };
+    await evaluatePlanningPermission(split, options, storage);
+    expect(split.effect).toBe("allow");
+
+    for (const resources of [[first], [second, first]]) {
+      const denied = { ...split, resources, effect: "allow" };
+      await evaluatePlanningPermission(denied, options, storage);
+      expect(denied.effect).toBe("deny");
+    }
+
+    await evaluatePlanningTool({ sessionID: SESSION, tool: "shell", input: { command } }, options, storage);
+    for (const attempted of [first, `${first} && parte C`]) {
+      await expect(evaluatePlanningTool({
+        sessionID: SESSION, tool: "shell", input: { command: attempted },
+      }, options, storage)).rejects.toThrow(/plan/);
+    }
+  });
+
   test("permission normaliza bash, write, patch y task sin ampliar los recursos del plan", async () => {
     const planned = proposePlan(scope(), { ...input(), actions: [
       input().actions[0]!, input("shell").actions[0]!, input("subagent").actions[0]!,
@@ -515,6 +540,49 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       await evaluatePlanningPermission(denied, options, storage);
       expect(denied.effect).toBe("deny");
     }
+  });
+
+  test("solo las ocho tools docs first-party y sus variantes MCP son rutinarias", async () => {
+    for (const operation of ["resolve", "list", "read", "search", "write", "append", "move", "open"] as const) {
+      for (const action of [`docs_${operation}`, `mcp_docs_${operation}`]) {
+        const permission = { sessionID: SESSION, action, resources: [], effect: "allow" };
+        await evaluatePlanningPermission(permission, options, storage);
+        expect(permission.effect).toBe("allow");
+        await evaluatePlanningTool({ sessionID: SESSION, tool: action, input: {} }, options, storage);
+      }
+    }
+
+    for (const action of ["mnemo_mem_save"] as const) {
+      const permission = { sessionID: SESSION, action, resources: [], effect: "allow" };
+      await evaluatePlanningPermission(permission, options, storage);
+      expect(permission.effect).toBe("allow");
+      await evaluatePlanningTool({ sessionID: SESSION, tool: action, input: {} }, options, storage);
+    }
+  });
+
+  test("docs no declaradas y Obsidian MCP no eluden planeacion", async () => {
+    for (const action of ["docs_delete", "mcp_docs_delete", "docs_publish", "mcp_docs_publish"] as const) {
+      const permission = { sessionID: SESSION, action, resources: [], effect: "allow" };
+      await evaluatePlanningPermission(permission, options, storage);
+      expect(permission.effect).toBe("deny");
+      await expect(evaluatePlanningTool({
+        sessionID: SESSION, tool: action, input: {},
+      }, options, storage)).rejects.toThrow(/fuera de un plan/i);
+    }
+
+    const obsidianPermission = {
+      sessionID: SESSION,
+      action: "obsidian_vault_write",
+      resources: [],
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(obsidianPermission, options, storage);
+    expect(obsidianPermission.effect).toBe("deny");
+    await expect(evaluatePlanningTool({
+      sessionID: SESSION,
+      tool: "obsidian_vault_write",
+      input: { path: "Product/plan.md" },
+    }, options, storage)).rejects.toThrow(/fuera de un plan/i);
   });
 
   test("asesor no usa read, glob ni grep en ninguna frontera", async () => {

@@ -12,6 +12,8 @@ Usuarios principales:
 
 Antes de cambios no triviales, leer la documentacion relevante del vault y la memoria Mnemo.
 
+El usuario puede pedir buscar, crear, actualizar, anexar, mover o abrir documentacion en lenguaje natural. Resolver automaticamente proyecto, area, path relativo y version; buscar antes de crear y pedir una sola aclaracion solo si existe ambiguedad real. Nunca pedir SHA o nombres de tools. Ante una eliminacion, proponer mover a archivo.
+
 Documentos base:
 
 - PRD
@@ -24,6 +26,7 @@ Documentos base:
 
 - No inventar requisitos de negocio.
 - No crear archivos en el repo para contexto de Malahor.
+- Operar el vault solo mediante `docs_*`; `docs_open` usa el cliente humano configurado o `system`.
 - Reutilizar patrones existentes.
 - Seguir arquitectura, seguridad y convenciones documentadas.
 - No exponer secretos.

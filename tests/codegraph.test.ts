@@ -271,6 +271,8 @@ test("MCP CodeGraph solo se registra con nivel nuevo e indice gestionado; legacy
   writeReadyIndex();
   fs.mkdirSync(paths.mnemoDir, { recursive: true });
   fs.writeFileSync(paths.mnemoIndex, "// synthetic Mnemo fixture\n");
+  fs.mkdirSync(paths.docsDir, { recursive: true });
+  fs.writeFileSync(paths.docsIndex, "// synthetic docs fixture\n");
   expect(Boolean(codegraphRuntime(paths, PROJECT, repo))).toBe(available);
   await withFixtureEnvironment(async () => {
       for (const level of ["memory", "memory+codegraph", "memory+codegraph+obsidian",
@@ -293,13 +295,16 @@ test("MCP CodeGraph solo se registra con nivel nuevo e indice gestionado; legacy
 
         const codeEnabled = level === "memory+codegraph" || level === "memory+codegraph+obsidian";
         expect(state.codegraph.disabled).toBe(!codeEnabled || !available);
+        expect(state.docs).toMatchObject({
+          type: "local", command: ["node", paths.docsIndex], disabled: false, codemode: false,
+        });
         if (codeEnabled && available) {
           expect(state.codegraph.command).toEqual([
             "node", codegraphProxy(paths), codegraphBinary(paths), repo, codegraphIndex(paths, repo).database,
             PROJECT, paths.projectsFile, home,
           ]);
         }
-        expect(state.obsidian.disabled).toBe(!level.endsWith("+obsidian"));
+        expect(state.obsidian).toEqual({ type: "remote", url: "http://127.0.0.1/fixture", disabled: true });
         expect(fs.readFileSync(paths.projectsFile, "utf8")).toBe(before);
       }
 
@@ -549,6 +554,12 @@ test("doctor sin self-heal avisa CodeGraph ausente sin bloquear un host V2 aisla
   writeJson(paths.projectsFile, { malahor: { context: "memory+codegraph", roots: [repo], defaultRoot: repo } });
   fs.mkdirSync(paths.mnemoDir);
   fs.writeFileSync(paths.mnemoIndex, "// synthetic Mnemo stub\n");
+  fs.mkdirSync(paths.docsDir);
+  fs.writeFileSync(paths.docsIndex, "// synthetic Docs stub\n");
+  fs.mkdirSync(paths.vaultDir, { recursive: true });
+  const canonicalDocs = path.join(paths.vaultDir, "projects", "malahor");
+  fs.mkdirSync(canonicalDocs, { recursive: true });
+  fs.writeFileSync(path.join(canonicalDocs, "README.md"), "---\ntype: project-index\n---\n\n# malahor\n");
   fs.mkdirSync(paths.assetsDir);
   fs.mkdirSync(paths.opencodeDir, { recursive: true });
   fs.writeFileSync(paths.agentsMd, "Synthetic user-owned instructions\n");

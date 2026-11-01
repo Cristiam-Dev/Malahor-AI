@@ -1,18 +1,31 @@
+---
+type: vault-index
+format: malahor-markdown-v1
+---
+
 # Malahor Vault
 
-Vault markdown opcional para documentacion humana, decisiones, patrones y seguimiento de cambios SDD.
+Fuente documental canonica de Malahor para conocimiento humano, producto, diseno, arquitectura y SDD. Vive fuera de los repositorios de codigo.
 
 ## Uso
 
-- Mantener este vault fuera de repositorios de codigo.
-- Usar Obsidian para navegar y editar notas.
-- Usar Mnemo para memoria operativa del agente.
+- Los agentes leen y escriben exclusivamente mediante el MCP `docs`.
+- Las personas piden acciones en lenguaje natural; el agente resuelve proyecto, ruta y versiones sin exponer detalles internos.
+- Las personas pueden usar Obsidian, VSCode, el explorador o cualquier editor Markdown.
+- Obsidian es un cliente opcional de estos archivos; no es otro storage ni un requisito.
+- `docs_open` usa `--app`, la preferencia global o `system`; Windows/WSL convierte las rutas sin API keys ni wrappers.
+- Usar Markdown UTF-8, frontmatter YAML y enlaces relativos.
+- Usar Mnemo para memoria operativa; el vault conserva conocimiento humano durable.
 - No guardar secretos, tokens, passwords, credenciales ni llaves privadas.
 
 ## Estructura
 
-- `00-inbox.md`: notas rapidas pendientes de clasificar.
-- `projects/`: notas por proyecto.
+- `00-inbox.md`: notas humanas rapidas pendientes de clasificar.
+- `projects/<clave-canonica>/`: raiz aislada de cada proyecto.
+  - `Product/`: PRD, dominio y PM.
+  - `Design/`: sistema y decisiones de diseno.
+  - `SDD/`: cambios, arquitectura, testing y decisiones tecnicas.
+  - `Discovery/`: hipotesis, historias, casos de uso y definicion previa.
 - `templates/`: plantillas reutilizables.
   - `prd.md`: requisitos de producto.
   - `design-system.md`: lenguaje visual.
@@ -22,7 +35,7 @@ Vault markdown opcional para documentacion humana, decisiones, patrones y seguim
 
 ## Regla
 
-El vault complementa Mnemo, no lo reemplaza. Mnemo guarda contexto operativo consultable por agentes; el vault guarda conocimiento humano navegable.
+El vault complementa Mnemo, no lo reemplaza. No hay fallback documental al repo: si `docs` no puede resolver o escribir la raiz externa, la operacion se bloquea y se diagnostica. Tampoco hay borrado permanente: archivar significa mover dentro del proyecto.
 
 ## Principio de documentacion AI-friendly
 

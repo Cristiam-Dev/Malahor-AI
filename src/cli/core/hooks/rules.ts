@@ -1,13 +1,20 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { loadProjectsFile } from "../context";
 import { filesystemTargetPaths, hookResourceIssues } from "./resources";
 import { CODE_MODE_TOOL_NAMES, isMcpToolName, type HookContext, type HookEvent, type HookProfile, type HookRule, type HookViolation } from "./types";
+import {
+  classifyDocumentationPath,
+  isRemovalOperation,
+  type DocumentationOperation,
+} from "../documentation-boundary";
 
 export const builtInHookRules: HookRule[] = [
   { id: "policy-integrity", run: policyIntegrityGuard },
   { id: "resource-contract", run: resourceContractGuard },
   { id: "repo-boundary", run: repoBoundaryGuard },
+  { id: "documentation-boundary", run: documentationBoundaryGuard },
   { id: "destructive-memory", run: destructiveMemoryGuard },
   { id: "policy-safety", run: policySafetyGuard },
   { id: "dangerous-git", run: dangerousGitGuard },
@@ -25,16 +32,10 @@ export const builtInHookRules: HookRule[] = [
 
 function resourceContractGuard(context: HookContext): HookViolation[] {
   return hookResourceIssues(context).map((issue) => ({
-    id: issue.code === "kind"
-      ? "MAL-HOOK-RESOURCE-KIND"
-      : issue.code === "missing"
-        ? "MAL-HOOK-RESOURCE-MISSING"
-        : "MAL-HOOK-VAULT-PATH",
+    id: "MAL-HOOK-RESOURCE-KIND",
     decision: "deny",
     message: issue.message,
-    fix: issue.code === "kind"
-      ? "Usa filesystem para rutas fisicas y obsidian-vault exclusivamente con obsidian.write.before."
-      : "Proporciona una ruta vault-relative canonica, sin traversal, prefijos absolutos ni separadores Windows.",
+    fix: "Usa filesystem para rutas fisicas. Los agentes operan documentacion exclusivamente mediante docs_*.",
   }));
 }
 
@@ -81,6 +82,116 @@ function repoBoundaryGuard(context: HookContext): HookViolation[] {
     message: `Malahor no debe escribir memoria/configuracion/grafos/assets dentro del repo: ${unsafe.join(", ")}`,
     fix: "Escribe datos operativos en ~/.malahor o usa MALAHOR_HOME fuera del repo.",
   }];
+}
+
+function documentationBoundaryGuard(context: HookContext): HookViolation[] {
+  const relevant = context.event === "file.write.before"
+    || context.event === "file.stage.before"
+    || context.event === "git.commit.before"
+    || (context.event === "shell.exec.before" && /\bgit\s+commit\b/.test(context.command ?? ""));
+  if (!relevant) return [];
+
+  if (context.event === "file.write.before") {
+    const directTargets = filesystemTargetPaths(context).map((targetPath) => path.resolve(context.cwd, targetPath));
+    let docsRoots: string[];
+    try {
+      docsRoots = managedDocsRoots(context.malahorHome);
+    } catch (error) {
+      return [{
+        id: "MAL-HOOK-DOCS-VERIFY",
+        decision: "deny",
+        message: `No se pudo resolver la frontera del vault documental: ${(error as Error).message}`,
+        fix: "Repara projects.json con malahor-ai doctor antes de escribir archivos.",
+      }];
+    }
+    const directVaultWrites = directTargets.filter((target) => docsRoots.some((root) => (
+      isInside(target, root) || isInside(canonicalPlannedPath(target), canonicalPlannedPath(root))
+    )));
+    if (directVaultWrites.length > 0) {
+      return [{
+        id: "MAL-HOOK-DOCS-MCP-ONLY",
+        decision: "deny",
+        message: `Los agentes solo escriben el vault mediante docs_*: ${directVaultWrites.join(", ")}`,
+        fix: "Usa docs_write, docs_append o docs_move; no uses write/edit/patch sobre rutas fisicas del vault.",
+      }];
+    }
+  }
+
+  let operations: DocumentationOperation[] = [];
+  if (context.event === "file.write.before") {
+    operations = metadataOperations(context.metadata?.fileOperations)
+      ?? filesystemTargetPaths(context).map((targetPath) => ({ kind: "write", path: targetPath }));
+  } else {
+    const targets = filesystemTargetPaths(context);
+    const persisted = targets.length > 0 ? targets : stagedPaths(context.projectRoot);
+    if (persisted === null) {
+      return [{
+        id: "MAL-HOOK-DOCS-VERIFY",
+        decision: "deny",
+        message: "No se pudo verificar el contenido staged contra la frontera documental.",
+        fix: "Corrige el repositorio y vuelve a ejecutar el flujo Git verificado.",
+      }];
+    }
+    operations = persisted.map((targetPath) => ({ kind: "write", path: targetPath }));
+  }
+
+  const unsafe = operations.filter((operation) => {
+    if (isRemovalOperation(operation.kind)) return false;
+    return classifyDocumentationPath(context.projectRoot, path.resolve(context.cwd, operation.path)).protected;
+  });
+  if (unsafe.length === 0) return [];
+  return [{
+    id: "MAL-HOOK-DOCS-EXTERNAL",
+    decision: "deny",
+    message: `La documentacion operativa debe vivir en el vault externo: ${unsafe.map((item) => item.path).join(", ")}`,
+    fix: "Usa las tools docs_* del MCP first-party. Solo se permite borrar o mover fuera documentos historicos del repo.",
+  }];
+}
+
+function managedDocsRoots(malahorHome: string): string[] {
+  const projects = loadProjectsFile(path.join(malahorHome, "projects.json"));
+  return [...new Set([
+    path.join(malahorHome, "vault"),
+    ...Object.values(projects).flatMap((entry) => entry.docs?.path ? [entry.docs.path] : []),
+  ].map((value) => path.resolve(value)))];
+}
+
+function canonicalPlannedPath(value: string): string {
+  const resolved = path.resolve(value);
+  let current = resolved;
+  const suffix: string[] = [];
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    suffix.unshift(path.basename(current));
+    current = parent;
+  }
+  let canonical = current;
+  try { canonical = fs.realpathSync(current); } catch { /* usa la ruta lexica */ }
+  return path.resolve(canonical, ...suffix);
+}
+
+function metadataOperations(value: unknown): DocumentationOperation[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const valid = value.filter((item): item is DocumentationOperation => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return false;
+    const record = item as Record<string, unknown>;
+    return typeof record.path === "string" && typeof record.kind === "string"
+      && ["add", "update", "delete", "move-in", "move-out", "write"].includes(record.kind);
+  });
+  return valid.length === value.length ? valid : undefined;
+}
+
+function stagedPaths(cwd: string): string[] | null {
+  try {
+    return execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMR"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).split("\n").map((item) => item.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
 }
 
 function destructiveMemoryGuard(context: HookContext): HookViolation[] {
@@ -758,7 +869,6 @@ function controlAffectsEvent(gap: string, event: HookEvent): boolean {
       || event.startsWith("file.")
       || event === "shell.exec.before"
       || event === "tool.execute.before"
-      || event === "obsidian.write.before"
       || event === "codegraph.index.before"
       || event === "database.change.before";
   }

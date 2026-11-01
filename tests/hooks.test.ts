@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { assertHooksAllowed, evaluateHookRules, hookExitCode, runHooks } from "../src/cli/core/hooks/engine";
-import { HOOK_EVENTS, type HookContext, type HookPolicyMeta, type HookRule } from "../src/cli/core/hooks/types";
+import { HOOK_EVENTS, HOOK_RESOURCE_KINDS, type HookContext, type HookPolicyMeta, type HookRule } from "../src/cli/core/hooks/types";
 import { callTool } from "../src/mnemo/tools";
 
 const baseContext = (overrides: Partial<HookContext>): HookContext => ({
@@ -45,98 +45,45 @@ describe("malahor hooks", () => {
       expect(events.has(event)).toBe(true);
     }
     expect(events.has("graphify.generate.before")).toBe(false);
+    expect(events.has("obsidian.write.before")).toBe(false);
+    expect(HOOK_RESOURCE_KINDS).toEqual(["filesystem"]);
   });
 
-  test("permite un recurso vault-relative valido sin resolverlo contra el repo", () => {
+  test("deniega el resourceKind legacy y solo acepta rutas filesystem", () => {
     const result = runHooks(baseContext({
-      event: "obsidian.write.before",
-      resourceKind: "obsidian-vault",
-      targetPaths: ["Malahor-AI/Product/pm/plan-fase-5.md"],
+      event: "file.write.before",
+      resourceKind: "obsidian-vault" as unknown as HookContext["resourceKind"],
+      targetPaths: ["Product/pm/plan-fase-5.md"],
       metadata: { writesMalahorData: true },
     }));
 
-    expect(result.decision).toBe("allow");
-    expect(result.violations).toEqual([]);
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-RESOURCE-KIND")).toBe(true);
   });
 
-  test("el CLI propaga --resource-kind al contrato del hook", () => {
+  test("el CLI rechaza el evento y resourceKind retirados de Obsidian", () => {
     const root = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hook-cli-resource-"));
     try {
-      const run = Bun.spawnSync([
-        "bun",
-        "run",
-        "src/cli/index.ts",
-        "hooks",
-        "check",
-        "obsidian.write.before",
-        "--resource-kind",
-        "obsidian-vault",
-        "--paths",
-        "Malahor-AI/Product/manual.md",
-        "--json",
-      ], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          MALAHOR_HOME: path.join(root, "home"),
-          MALAHOR_OPENCODE_DIR: path.join(root, "opencode"),
-          MALAHOR_OPENCODE_DETECT: "0",
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const env = {
+        ...process.env,
+        MALAHOR_HOME: path.join(root, "home"),
+        MALAHOR_OPENCODE_DIR: path.join(root, "opencode"),
+        MALAHOR_OPENCODE_DETECT: "0",
+      };
+      const retiredEvent = Bun.spawnSync([
+        "bun", "run", "src/cli/index.ts", "hooks", "check", "obsidian.write.before", "--json",
+      ], { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" });
+      const retiredKind = Bun.spawnSync([
+        "bun", "run", "src/cli/index.ts", "hooks", "check", "file.write.before",
+        "--resource-kind", "obsidian-vault", "--json",
+      ], { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" });
 
-      expect(run.exitCode).toBe(0);
-      expect(JSON.parse(run.stdout.toString()).decision).toBe("allow");
+      expect(retiredEvent.exitCode).toBe(1);
+      expect(retiredEvent.stderr.toString()).toMatch(/Evento hook invalido/i);
+      expect(retiredKind.exitCode).toBe(1);
+      expect(retiredKind.stderr.toString()).toMatch(/Tipo de recurso invalido.*filesystem/i);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("deniega traversal y rutas absolutas POSIX, Windows o UNC en el vault", () => {
-    const unsafe = [
-      "../fuera.md",
-      "Product/../../fuera.md",
-      "/tmp/nota.md",
-      "C:\\vault\\nota.md",
-      "C:/vault/nota.md",
-      "\\\\server\\share\\nota.md",
-      "//server/share/nota.md",
-      "Product/%2e%2e/fuera.md",
-      "Product/%25252e%25252e/fuera.md",
-    ];
-
-    for (const target of unsafe) {
-      const result = runHooks(baseContext({
-        event: "obsidian.write.before",
-        resourceKind: "obsidian-vault",
-        targetPaths: [target],
-        metadata: { writesMalahorData: true },
-      }));
-      expect(result.decision).toBe("deny");
-      expect(result.violations.some((violation) => violation.id === "MAL-HOOK-VAULT-PATH")).toBe(true);
-    }
-  });
-
-  test("deniega pares falsos entre evento y tipo de recurso", () => {
-    const missingKind = runHooks(baseContext({
-      event: "obsidian.write.before",
-      targetPaths: ["Product/nota.md"],
-    }));
-    const vaultAsFile = runHooks(baseContext({
-      event: "file.write.before",
-      resourceKind: "obsidian-vault",
-      targetPaths: ["Product/nota.md"],
-    }));
-    const filesystemAsVault = runHooks(baseContext({
-      event: "obsidian.write.before",
-      resourceKind: "filesystem",
-      targetPaths: ["Product/nota.md"],
-    }));
-
-    for (const result of [missingKind, vaultAsFile, filesystemAsVault]) {
-      expect(result.decision).toBe("deny");
-      expect(result.violations.some((violation) => violation.id === "MAL-HOOK-RESOURCE-KIND")).toBe(true);
     }
   });
 
@@ -179,8 +126,8 @@ describe("malahor hooks", () => {
 
   test("no confunde un placeholder multilinea del codigo con una credencial", () => {
     const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-source-"));
-    const sourceFile = path.join(dir, "obsidian.ts");
-    fs.writeFileSync(sourceFile, 'throw new Error("OBSIDIAN_API_KEY: ");\n', "utf8");
+    const sourceFile = path.join(dir, "integration.ts");
+    fs.writeFileSync(sourceFile, 'throw new Error("SERVICE_API_KEY: ");\n', "utf8");
 
     const result = runHooks(baseContext({
       event: "file.stage.before",
@@ -400,55 +347,14 @@ describe("malahor hooks", () => {
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-DESTRUCTIVE")).toBe(true);
   });
 
-  test("el adaptador MCP no usa rutas del vault para inferir un proyecto fisico", () => {
-    const root = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hook-mcp-resource-"));
-    const outside = path.join(root, "outside");
-    const misleadingRoot = path.join(outside, "Malahor-AI");
-    const home = path.join(root, "home");
-    const probe = path.join(root, "probe.ts");
-    fs.mkdirSync(misleadingRoot, { recursive: true });
-    fs.mkdirSync(home, { recursive: true });
-    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({
-      misleading: { context: "mnemo", roots: [misleadingRoot], defaultRoot: misleadingRoot },
-    })}\n`, "utf8");
-    fs.writeFileSync(probe, [
-      `import { callTool } from ${JSON.stringify(path.join(process.cwd(), "src", "mnemo", "tools.ts"))};`,
-      "const result = callTool({",
-      '  name: "malahor_hook_check",',
-      "  arguments: {",
-      '    event: "obsidian.write.before",',
-      '    resourceKind: "obsidian-vault",',
-      '    paths: ["Malahor-AI/Product/manual.md"],',
-      "    metadata: { writesMalahorData: true },",
-      "  },",
-      "});",
-      "process.stdout.write(JSON.stringify(result));",
-      "",
-    ].join("\n"), "utf8");
-
-    try {
-      const run = Bun.spawnSync(["bun", probe], {
-        cwd: outside,
-        env: {
-          ...process.env,
-          MALAHOR_HOME: home,
-          MALAHOR_OPENCODE_DIR: path.join(root, "opencode"),
-          MALAHOR_OPENCODE_DETECT: "0",
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      expect(run.exitCode).toBe(0);
-      expect(JSON.parse(run.stdout.toString()).decision).toBe("allow");
-
-      const audit = fs.readFileSync(path.join(home, "audit", "security.jsonl"), "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as { project: string });
-      expect(audit.at(-1)?.project).toBe("outside");
-      expect(audit.at(-1)?.project).not.toBe("misleading");
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
+  test("el wrapper MCP rechaza el resourceKind retirado antes de resolver archivos", () => {
+    expect(() => callTool({
+      name: "malahor_hook_check",
+      arguments: {
+        event: "file.write.before",
+        resourceKind: "obsidian-vault",
+        paths: ["Product/manual.md"],
+      },
+    })).toThrow(/resourceKind.*filesystem/i);
   });
 });

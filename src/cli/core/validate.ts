@@ -33,6 +33,12 @@ export function validateInstallation(
   if (!fs.existsSync(paths.mnemoIndex)) {
     problems.push(`Mnemo index falta: ${paths.mnemoIndex} (corre \`bun run build\` o usa --bootstrap)`);
   }
+  if (!fs.existsSync(paths.docsIndex)) {
+    problems.push(`Docs MCP index falta: ${paths.docsIndex} (corre \`bun run build\` o usa --bootstrap)`);
+  }
+  if (!fs.existsSync(paths.vaultDir)) {
+    problems.push(`Vault documental falta: ${paths.vaultDir}`);
+  }
   if (!fs.existsSync(paths.assetsDir)) {
     problems.push(`Assets faltan: ${paths.assetsDir}`);
   }
@@ -71,10 +77,15 @@ export function validateInstallation(
     const config = readOpenCodeConfig(paths.opencodeConfig);
     const mcp = asRecord(config.mcp);
     const mnemo = mcp ? asRecord(mcp.mnemo) : undefined;
+    const docs = mcp ? asRecord(mcp.docs) : undefined;
 
     const validLegacyMnemo = mnemo && mnemo.type === "local" && Array.isArray(mnemo.command) && mnemo.enabled === true;
     if (!validLegacyMnemo && options.mcpManagedByPlugin !== true) {
       problems.push("mcp.mnemo no esta configurado correctamente");
+    }
+    const validLegacyDocs = docs && docs.type === "local" && Array.isArray(docs.command) && docs.enabled === true;
+    if (!validLegacyDocs && options.mcpManagedByPlugin !== true) {
+      problems.push("mcp.docs no esta configurado correctamente");
     }
 
     const compaction = asRecord(config.compaction);
@@ -89,6 +100,9 @@ export function validateInstallation(
 
   if (packagePaths && !fs.existsSync(packagePaths.mnemoBuild)) {
     problems.push(`Build mnemo del paquete falta: ${packagePaths.mnemoBuild}`);
+  }
+  if (packagePaths && !fs.existsSync(packagePaths.docsBuild)) {
+    problems.push(`Build docs del paquete falta: ${packagePaths.docsBuild}`);
   }
 
   return problems;

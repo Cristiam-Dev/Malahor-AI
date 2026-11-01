@@ -81,7 +81,7 @@ describe("inyeccion de politica de build", () => {
     expect(permission.webfetch).toBe("ask");
   });
 
-  test("V2 runtime no crea registro Mnemo en config y conserva legacy existente", () => {
+  test("V2 runtime no crea registros Mnemo/docs en config y conserva legacy existentes", () => {
     writeConfig({});
 
     syncOpenCodeConfig(paths, {
@@ -93,14 +93,16 @@ describe("inyeccion de politica de build", () => {
     expect(initial.mcp).toBeUndefined();
 
     const legacy = { type: "local", command: ["node", "/tmp/legacy-mnemo.js"], enabled: true };
-    fs.writeFileSync(paths.opencodeConfig, `${JSON.stringify({ mcp: { mnemo: legacy } }, null, 2)}\n`, "utf8");
+    const legacyDocs = { type: "local", command: ["node", "/tmp/legacy-docs.js"], enabled: true };
+    fs.writeFileSync(paths.opencodeConfig, `${JSON.stringify({ mcp: { mnemo: legacy, docs: legacyDocs } }, null, 2)}\n`, "utf8");
     syncOpenCodeConfig(paths, {
       execution: execution("ejecutar", true),
       manageMcp: false,
     }, false);
 
-    const preserved = JSON.parse(fs.readFileSync(paths.opencodeConfig, "utf8")) as { mcp?: { mnemo?: unknown } };
+    const preserved = JSON.parse(fs.readFileSync(paths.opencodeConfig, "utf8")) as { mcp?: { mnemo?: unknown; docs?: unknown } };
     expect(preserved.mcp?.mnemo).toEqual(legacy);
+    expect(preserved.mcp?.docs).toEqual(legacyDocs);
   });
 
   test("verify-only V2 no reescribe config ni agrega compaction/politica", () => {

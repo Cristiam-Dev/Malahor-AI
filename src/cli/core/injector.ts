@@ -22,12 +22,10 @@ export const GUIAR_BASH_POLICY: Record<string, string> = {
   "malahor-ai install*": "ask",
   "malahor-ai update*": "ask",
   "malahor-ai memory*": "ask",
-  "malahor-ai obsidian*": "ask",
   "npx --yes malahor-ai*": "ask",
   "bun run src/cli/index.ts install*": "ask",
   "bun run src/cli/index.ts update*": "ask",
   "bun run src/cli/index.ts memory*": "ask",
-  "bun run src/cli/index.ts obsidian*": "ask",
 };
 
 // Whitelist minima para `acompanar`: sin verificacion libre, pero con escape de reparacion.
@@ -74,6 +72,11 @@ export function syncOpenCodeConfig(paths: MalahorPaths, options: SyncOpenCodeCon
         command: ["node", paths.mnemoIndex],
         enabled: true,
       },
+      docs: {
+        type: "local",
+        command: ["node", paths.docsIndex],
+        enabled: true,
+      },
     };
   }
 
@@ -91,12 +94,17 @@ export function syncOpenCodeConfig(paths: MalahorPaths, options: SyncOpenCodeCon
 }
 
 export function removeMnemoConfig(paths: MalahorPaths, dryRun: boolean): OpenCodeConfig {
+  return removeMalahorMcpConfig(paths, dryRun);
+}
+
+export function removeMalahorMcpConfig(paths: MalahorPaths, dryRun: boolean): OpenCodeConfig {
   const current = readOpenCodeConfig(paths.opencodeConfig);
   const next: OpenCodeConfig = { ...current };
 
   if (current.mcp) {
     const remainingMcp = { ...current.mcp };
-    delete remainingMcp.mnemo;
+    if (isManagedLocalMcp(remainingMcp.mnemo, paths.mnemoIndex, paths.opencodeDir)) delete remainingMcp.mnemo;
+    if (isManagedLocalMcp(remainingMcp.docs, paths.docsIndex, paths.opencodeDir)) delete remainingMcp.docs;
     if (Object.keys(remainingMcp).length > 0) {
       next.mcp = remainingMcp;
     } else {
@@ -109,6 +117,13 @@ export function removeMnemoConfig(paths: MalahorPaths, dryRun: boolean): OpenCod
   }
 
   return next;
+}
+
+function isManagedLocalMcp(value: unknown, runtime: string, base: string): boolean {
+  const entry = asRecord(value);
+  if (!entry || entry.type !== "local" || !Array.isArray(entry.command)) return false;
+  return entry.command.some((item) => typeof item === "string"
+    && path.resolve(base, item) === path.resolve(runtime));
 }
 
 export interface RemoveBuildPolicyResult {

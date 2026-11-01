@@ -3,12 +3,12 @@ import { runConfig } from "./commands/config";
 import { runCodegraph } from "./commands/codegraph";
 import { runContext } from "./commands/context";
 import { runDoctor } from "./commands/doctor";
+import { runDocs } from "./commands/docs";
 import { runGitCommand } from "./commands/git";
 import { runHooksCommand } from "./commands/hooks";
 import { runInstall } from "./commands/install";
 import { runMemory } from "./commands/memory";
 import { runMode } from "./commands/mode";
-import { runObsidian } from "./commands/obsidian";
 import { runUninstall } from "./commands/uninstall";
 import { runUpdate } from "./commands/update";
 
@@ -44,6 +44,7 @@ async function main(argv: string[]): Promise<void> {
           yes: parsed.flags.has("yes"),
           bootstrap: parsed.flags.has("bootstrap"),
           policyAfter: parsed.options["policy-after"],
+          docsPath: parsed.options["docs-path"],
         });
         return;
       case "codegraph":
@@ -56,6 +57,18 @@ async function main(argv: string[]): Promise<void> {
         return;
       case "doctor":
         runDoctor({ dryRun: parsed.flags.has("dry-run"), selfHeal: parsed.flags.has("self-heal") });
+        return;
+      case "docs":
+        runDocs({
+          action: parsed.args[0] ?? "status",
+          args: parsed.args.slice(1),
+          project: parsed.options.project,
+          path: parsed.options.path,
+          app: parsed.options.app,
+          dryRun: parsed.flags.has("dry-run"),
+          apply: parsed.flags.has("apply"),
+          yes: parsed.flags.has("yes"),
+        });
         return;
       case "git":
         runGitCommand({
@@ -113,26 +126,19 @@ async function main(argv: string[]): Promise<void> {
           apply: parsed.flags.has("apply"),
           yes: parsed.flags.has("yes"),
           approval: parsed.options.approval,
-        });
-        return;
-      case "obsidian":
-        await runObsidian({
-          action: parsed.args[0] ?? "help",
-          args: parsed.args.slice(1),
-          dryRun: parsed.flags.has("dry-run"),
-          mode: parsed.options.mode,
-          yes: parsed.flags.has("yes"),
+          docsPath: parsed.options["docs-path"],
         });
         return;
       case "uninstall":
         runUninstall({ dryRun: parsed.flags.has("dry-run"), yes: parsed.flags.has("yes") });
         return;
       case "update":
-        runUpdate({
+        await runUpdate({
           dryRun: parsed.flags.has("dry-run"),
           yes: parsed.flags.has("yes"),
           bootstrap: parsed.flags.has("bootstrap"),
           policyAfter: parsed.options["policy-after"],
+          docsPath: parsed.options["docs-path"],
         });
         return;
       case "help":
@@ -164,7 +170,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       const key = arg.slice(2);
       flags.add(key);
 
-      if ((key === "command" || key === "confirm" || key === "mode" || key === "paths" || key === "resource-kind" || key === "profile" || key === "project" || key === "limit" || key === "policy-after" || key === "message" || key === "type" || key === "scope" || key === "icon" || key === "approval" || key === "ttl") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
+      if ((key === "command" || key === "confirm" || key === "paths" || key === "path" || key === "docs-path" || key === "app" || key === "resource-kind" || key === "profile" || key === "project" || key === "limit" || key === "policy-after" || key === "message" || key === "type" || key === "scope" || key === "icon" || key === "approval" || key === "ttl") && rest[index + 1] && !rest[index + 1].startsWith("--")) {
         options[key] = rest[index + 1];
         index += 1;
       }
@@ -186,12 +192,12 @@ Commands:
   codegraph     Gestionar contexto estructural (symgraph, indice externo)
   install       Instalar Malahor para OpenCode
   doctor        Diagnosticar y reparar la instalacion
+  docs          Resolver, validar y abrir el vault Markdown canonico
   git           Ejecutar el flujo git asistido
   hooks         Evaluar guardrails cross-harness
   context       Resolver proyecto, contexto y stack
   memory        Administrar la memoria
   mode          Consultar o cambiar asesor/asistente/ejecutor (configuracion de Malahor)
-  obsidian      Configurar el puente Obsidian MCP
   uninstall     Remover Malahor de OpenCode
   update        Actualizar instalacion, assets y politica
 
@@ -206,8 +212,16 @@ Context commands:
   context recover [--project <key>] [--limit <n>]
   context capsule [--project <key>] [--limit <n>]
   context save [summary...] [--project <key>]
-  context register <project> <root> [<root> ...] [--dry-run]
+  context register <project> <root> [<root> ...] [--docs-path <externa>] [--yes] [--dry-run]
   context migrate [--apply] [--yes] [--approval <evidencia-hook>]
+
+Docs commands:
+  docs path|status [--project <key>]
+  docs init [--project <key>] [--path <externa>] [--dry-run]
+  docs check [--project <key>]
+  docs open [ruta-relativa] [--project <key>] [--app system|vscode|obsidian] [--dry-run]
+  docs client [get|status|system|vscode|obsidian] [--dry-run]
+  docs move <origen> [--project <key>] [--apply --yes]
 
 Mode commands:
   mode status
@@ -225,12 +239,6 @@ Memory commands:
   memory restore <backup-file> [--dry-run | --yes --confirm RESTORE]
   memory migrate [--dry-run]
   memory migrate --apply --yes --confirm <token>
-
-Obsidian commands:
-  obsidian status [--mode wsl-windows|windows-local]
-  obsidian guide [--mode wsl-windows|windows-local]
-  obsidian setup [--dry-run] [--yes] [--mode wsl-windows|windows-local]
-  obsidian verify [--mode wsl-windows|windows-local]
 
 CodeGraph commands:
   codegraph status [--project <key>]
@@ -262,6 +270,7 @@ Config file keys:
    execution.intervention      ejecutar=ejecutor | guiar=asistente | acompanar=asesor
    mode                        legacy; no anula execution.intervention
   execution.verification      boolean read-only verification
+  docs.client                 system | vscode | obsidian (default system)
   projects.aliases            map canonical project to aliases
 
 Sandbox example:

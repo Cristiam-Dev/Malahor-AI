@@ -10,7 +10,7 @@ export type ContextLevel = "memory" | "memory+codegraph" | "memory+codegraph+obs
   | "mnemo" | "mnemo+graphify" | "mnemo+graphify+obsidian";
 
 export type LegacyContextLevel = "mnemo" | "mnemo+graphify" | "mnemo+graphify+obsidian";
-export type ModernContextLevel = "memory" | "memory+codegraph" | "memory+codegraph+obsidian";
+export type ModernContextLevel = "memory" | "memory+codegraph";
 
 export const LEGACY_CONTEXT_MIGRATIONS: readonly Readonly<{
   from: LegacyContextLevel;
@@ -18,7 +18,7 @@ export const LEGACY_CONTEXT_MIGRATIONS: readonly Readonly<{
 }>[] = [
   { from: "mnemo", to: "memory" },
   { from: "mnemo+graphify", to: "memory+codegraph" },
-  { from: "mnemo+graphify+obsidian", to: "memory+codegraph+obsidian" },
+  { from: "mnemo+graphify+obsidian", to: "memory+codegraph" },
 ];
 
 export const CONTEXT_LEVELS: readonly ContextLevel[] = [
@@ -31,6 +31,12 @@ export interface ProjectContext {
   context: ContextLevel;
   roots?: string[];
   defaultRoot?: string;
+  docs?: ProjectDocsConfig;
+}
+
+export interface ProjectDocsConfig {
+  /** Raiz documental exacta del proyecto. Ausente usa MALAHOR_HOME/vault/projects/<key>. */
+  path?: string;
 }
 
 export interface ProjectsFile {
@@ -170,10 +176,12 @@ export function loadProjectsFile(filePath: string): ProjectsFile {
     try {
       const roots = readRoots(value.roots, `${filePath} en ${key}.roots`);
       const defaultRoot = readRoot(value.defaultRoot, `${filePath} en ${key}.defaultRoot`);
+      const docs = readDocsConfig(value.docs, `${filePath} en ${key}.docs`);
       result[key] = {
         context: parseContextLevel(value.context),
         ...(roots.length > 0 ? { roots } : {}),
         ...(defaultRoot ? { defaultRoot } : {}),
+        ...(docs ? { docs } : {}),
       };
     } catch (error) {
       throw new Error(`La configuracion ${filePath} en ${key}: ${(error as Error).message}`);
@@ -215,6 +223,30 @@ export function registerProjectRoot(projectsFile: string, canonicalKey: string, 
   writeProjectsFile(projectsFile, next, dryRun);
 }
 
+export function docsConfigForProject(projectsFile: string, canonicalKey: string): ProjectDocsConfig | undefined {
+  return loadProjectsFile(projectsFile)[canonicalKey]?.docs;
+}
+
+export function setProjectDocsPath(
+  projectsFile: string,
+  canonicalKey: string,
+  docsPath: string | undefined,
+  dryRun: boolean,
+): void {
+  const current = loadProjectsFile(projectsFile);
+  const existing = current[canonicalKey];
+  if (!existing || !existing.roots?.length) {
+    throw new Error(`El proyecto ${canonicalKey} no tiene una raiz de codigo registrada.`);
+  }
+
+  const normalized = docsPath?.trim() ? normalizeRoot(docsPath) : undefined;
+  const nextEntry: ProjectContext = { ...existing };
+  if (normalized) nextEntry.docs = { path: normalized };
+  else delete nextEntry.docs;
+
+  writeProjectsFile(projectsFile, { ...current, [canonicalKey]: nextEntry }, dryRun);
+}
+
 function writeProjectsFile(projectsFile: string, next: ProjectsFile, dryRun: boolean): void {
   if (dryRun) return;
 
@@ -249,8 +281,26 @@ function readRoot(value: unknown, key: string): string | undefined {
   return normalizeRoot(value);
 }
 
+function readDocsConfig(value: unknown, key: string): ProjectDocsConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) throw new Error(`La configuracion ${key} debe ser un objeto.`);
+  const docsPath = readDocsPath(value.path, `${key}.path`);
+  const unknown = Object.keys(value).filter((name) => name !== "path");
+  if (unknown.length > 0) throw new Error(`La configuracion ${key} contiene campos desconocidos: ${unknown.join(", ")}.`);
+  return docsPath ? { path: docsPath } : {};
+}
+
+function readDocsPath(value: unknown, key: string): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw new Error(`La configuracion ${key} debe ser un string.`);
+  if (!path.isAbsolute(value)) throw new Error(`La configuracion ${key} debe ser una ruta absoluta externa.`);
+  return path.resolve(value);
+}
+
+/** Compatibilidad de lectura: Obsidian ya no habilita contexto ni storage gestionado. */
 export function obsidianEnabled(level: ContextLevel): boolean {
-  return level === "memory+codegraph+obsidian" || level === "mnemo+graphify+obsidian";
+  void level;
+  return false;
 }
 
 export function codegraphEnabled(level: ContextLevel): boolean {
@@ -266,8 +316,9 @@ export function migratedContextLevel(value: unknown): ModernContextLevel | undef
 }
 
 export function contextLevelLabel(level: ContextLevel): string {
-  if (!legacyContextLevel(level)) return level;
-  return `${level} (legacy; CodeGraph inactivo hasta migracion asistida)`;
+  const obsidian = level.endsWith("+obsidian") ? "; sufijo Obsidian obsoleto, docs_* siempre externo" : "";
+  if (!legacyContextLevel(level)) return obsidian ? `${level} (compatibilidad${obsidian})` : level;
+  return `${level} (legacy; CodeGraph inactivo hasta migracion asistida${obsidian})`;
 }
 
 function secureChmod(target: string, mode: number): void {
