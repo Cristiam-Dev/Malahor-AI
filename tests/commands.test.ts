@@ -59,8 +59,9 @@ describe("comandos gestionados de OpenCode", () => {
     expect(commit).toContain('No inicies este flujo por "continua", "listo", "cierra la fase"');
     expect(commit).toContain("git status --short");
     expect(commit).toContain("git diff --stat");
-    expect(commit).toContain("malahor-diagnostico");
-    expect(commit).toContain("malahor-testing");
+    expect(commit).toContain("Ejecuta directamente el diagnostico disponible del stack");
+    expect(commit).toContain("Ejecuta directamente las pruebas");
+    expect(commit).toContain("No delegues un commit nivel 0");
     expect(commit).toContain("git-commit-text");
     expect(commit).toContain("malahor-ai git precommit");
     expect(commit).toContain("git commit -m");
@@ -93,7 +94,7 @@ describe("comandos gestionados de OpenCode", () => {
       expect(prompt).toContain("malahor-ai git precommit");
       expect(prompt).toContain("Git es local-only");
       expect(prompt).toContain("commit-fallback");
-      expect(prompt).toContain("sin confirmación redundante");
+      expect(prompt).toMatch(/sin (?:otra )?confirmación redundante/);
     }
   });
 

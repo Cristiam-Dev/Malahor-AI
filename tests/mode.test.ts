@@ -166,6 +166,7 @@ describe("modo portable: configuracion de Malahor", () => {
       sessionID: SESSION, project: "project", mode: "assistant", policyRevision: INITIAL_REVISION,
     };
     const presented = proposePlan(originalScope, {
+      level: 0,
       summary: "Plan previo",
       steps: ["Editar"],
       presentation: {

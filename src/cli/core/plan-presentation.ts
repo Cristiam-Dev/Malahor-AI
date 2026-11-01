@@ -1,5 +1,5 @@
 import type { MalahorMode } from "./config";
-import type { PlanState } from "./planning";
+import type { PlanLevel, PlanState } from "./planning";
 
 export type PlanRiskLevel = "low" | "medium" | "high";
 export type PlanRiskCategory = "security" | "data" | "architecture" | "destructive";
@@ -46,6 +46,7 @@ const RISK_CATEGORIES = new Set<PlanRiskCategory>([
 export function normalizePlanPresentation(
   value: unknown,
   mode: MalahorMode,
+  level: PlanLevel = 1,
 ): PlanPresentationInput {
   if (!isRecord(value)) throw new Error("El plan necesita una presentacion humana estructurada.");
 
@@ -61,21 +62,29 @@ export function normalizePlanPresentation(
     if (steps.length !== 0 || impact.length !== 0) {
       throw new Error("Asesor solo presenta concepto: sin pasos ni impacto ejecutable.");
     }
-  } else {
+  } else if (level !== 0) {
     if (steps.length === 0) throw new Error("La presentacion del plan requiere una ruta con pasos breves.");
     if (impact.length === 0) throw new Error("La presentacion debe declarar su impacto por area.");
   }
   if (completionCriteria.length === 0) {
     throw new Error("La presentacion debe declarar criterios de finalizacion.");
   }
+  if (level === 0 && (steps.length > 2 || impact.length > 1 || exclusions.length > 3
+    || completionCriteria.length > 3 || risk.level !== "low" || risk.categories.length > 0)) {
+    throw new Error("Nivel 0 exige presentacion minima, riesgo bajo y ninguna categoria critica.");
+  }
 
   return { objective, outcome, steps, impact, risk, exclusions, completionCriteria };
 }
 
-export function validPlanPresentation(value: unknown, mode: MalahorMode): value is PlanPresentationInput {
+export function validPlanPresentation(
+  value: unknown,
+  mode: MalahorMode,
+  level: PlanLevel = 1,
+): value is PlanPresentationInput {
   try {
     if (!isRecord(value)) return false;
-    return samePresentation(value, normalizePlanPresentation(value, mode));
+    return samePresentation(value, normalizePlanPresentation(value, mode, level));
   } catch {
     return false;
   }
@@ -90,6 +99,7 @@ export function renderPlanPresentation(
 }
 
 function renderSummaryView(state: PlanState): string {
+  if (planLevel(state) === 0) return renderLevelZeroSummary(state);
   const presentation = state.plan.presentation;
   const critical = requiresVisibleDetails(presentation.risk);
   const lines = [
@@ -139,6 +149,38 @@ function renderSummaryView(state: PlanState): string {
   return lines.join("\n");
 }
 
+function renderLevelZeroSummary(state: PlanState): string {
+  const presentation = state.plan.presentation;
+  return [
+    planIdentity(state),
+    `Estado: ${state.phase}`,
+    "",
+    "## Cambio",
+    safeText(presentation.objective),
+    "",
+    "## Resultado",
+    safeText(presentation.outcome),
+    "",
+    "## Riesgo",
+    `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
+    `- ${safeText(presentation.risk.summary)}`,
+    "",
+    "## Acción requerida",
+    nextAction(state),
+    "",
+    "Los efectos exactos están en el anexo. Si tu cliente no lo muestra, usa `/malahor-plan detalles`.",
+    "",
+    "<details>",
+    "<summary>Ver detalle técnico</summary>",
+    "",
+    ...technicalBody(state),
+    "",
+    "</details>",
+    "",
+    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.",
+  ].join("\n");
+}
+
 function renderTechnicalView(state: PlanState): string {
   return [
     planIdentity(state),
@@ -155,6 +197,7 @@ function technicalBody(state: PlanState): string[] {
   const presentation = state.plan.presentation;
   const lines = [
     "### Riesgo y control",
+    `- Nivel de trabajo: ${planLevel(state)}`,
     `- Nivel: ${riskLevelLabel(presentation.risk.level)}`,
   ];
   if (presentation.risk.categories.length > 0) {
@@ -164,6 +207,18 @@ function technicalBody(state: PlanState): string[] {
     `- Resumen: ${safeText(presentation.risk.summary)}`,
     `- Detalles: ${safeText(presentation.risk.details)}`,
   );
+
+  if (planLevel(state) === 0 && presentation.steps.length > 0) {
+    lines.push(
+      "",
+      "### Ruta firmada",
+      ...presentation.steps.map((step, index) =>
+        `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`),
+    );
+  }
+  if (planLevel(state) === 0 && presentation.impact.length > 0) {
+    lines.push("", "### Impacto firmado", ...impactLines(presentation.impact));
+  }
 
   lines.push(
     "",
@@ -248,7 +303,11 @@ function nextAction(state: PlanState): string {
 }
 
 function planIdentity(state: PlanState): string {
-  return `Plan Malahor (${state.mode}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
+  return `Plan Malahor (${state.mode} · nivel ${planLevel(state)}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
+}
+
+function planLevel(state: PlanState): PlanLevel {
+  return state.plan.level === 0 || state.plan.level === 2 ? state.plan.level : 1;
 }
 
 function phaseLabel(phase: PlanState["phase"]): string {

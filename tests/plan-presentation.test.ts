@@ -88,6 +88,7 @@ function input(
 function renderState(options: {
   mode?: PlanScope["mode"];
   phase?: PlanState["phase"];
+  level?: 0 | 1 | 2;
   presentation?: Partial<TargetPresentation>;
   actions?: PlanInput["actions"];
   dependencies?: NonNullable<PlanInput["dependencies"]>;
@@ -104,6 +105,7 @@ function renderState(options: {
     policyRevision: "c".repeat(32),
     presentationInteractionID: "msg_render_fixture",
     plan: {
+      ...(options.level === undefined ? {} : { level: options.level }),
       summary: "Hacer visible el plan humano",
       steps: mode === "advisor" ? [] : ["Definir el contrato", "Verificar todos los adaptadores"],
       presentation: target,
@@ -239,6 +241,40 @@ describe("contrato estricto de la presentación humana", () => {
 });
 
 describe("divulgación progresiva del plan", () => {
+  test("nivel 0 muestra un plan mínimo, conserva go y deja la evidencia en el anexo", async () => {
+    const target = presentation();
+    const state = renderState({
+      mode: "executor",
+      level: 0,
+      presentation: {
+        steps: [target.steps[0]!],
+        impact: [target.impact[0]!],
+        exclusions: [target.exclusions[0]!],
+        completionCriteria: [target.completionCriteria[0]!],
+      },
+      actions: [{ action: "edit", resource: "/repo/tests/planning.test.ts" }],
+      dependencies: [],
+    });
+    const markdown = await render(state);
+    const main = mainFlow(markdown);
+    const annex = technicalSection(markdown);
+
+    expect(main).toContain("nivel 0");
+    expect(main).toContain("## Cambio");
+    expect(main).toContain("## Resultado");
+    expect(main).toContain("## Riesgo");
+    expect(main).toContain("## Acción requerida");
+    expect(main).toMatch(/turno posterior[\s\S]*(?:go|implementa)/i);
+    expect(main).not.toMatch(/^## Ruta$/m);
+    expect(main).not.toMatch(/^## Impacto$/m);
+    expect(annex).toContain("Nivel de trabajo: 0");
+    expect(annex).toContain("### Ruta firmada");
+    expect(annex).toContain("### Impacto firmado");
+    expect(annex).toContain(`- edit: ${safeJson("/repo/tests/planning.test.ts")}`);
+    expect(markdown).toContain("<details>");
+    expect(markdown).not.toContain("<details open>");
+  });
+
   test("la vista principal se lee como objetivo, resultado, ruta, impacto, riesgo y acción", async () => {
     const state = renderState();
     const markdown = await render(state);

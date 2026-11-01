@@ -8,7 +8,8 @@ Disparadores validos: el usuario dice "commit", "comitea" o equivalente explicit
 
 Reglas:
 
-- La invocacion de este comando o un pedido explicito de commit autoriza el flujo y, solo si todo esta verde, el stage exacto y un commit ordinario local de los archivos revisados. No pidas otra confirmacion humana.
+- La invocacion de este comando o un pedido explicito de commit crea un plan nivel 0 minimo. Presentalo y espera `go`; no uses Discovery, SDD, subagentes ni documentacion ceremonial.
+- Tras `go`, ejecuta todo el flujo en una sola pasada y, solo si esta verde, el stage exacto y un commit ordinario local de los archivos revisados. No pidas otra confirmacion humana.
 - No uses `git add -A` por defecto: stagea solo los archivos del cambio revisado. Si hay archivos no relacionados o dudosos, pide confirmacion antes de stagear.
 - Esta orden no autoriza `--amend`, reset, rebase, cherry-pick, merge ni operaciones de ramas; cada una requiere su propio pedido. No uses `--no-verify`.
 - Git remoto es hard DENY: nunca ejecutes push, pull, fetch, clone, `ls-remote`, `remote update`, submodulos remotos ni equivalentes, aunque la persona los pida o apruebe.
@@ -20,8 +21,8 @@ Reglas:
 Pasos:
 
 1. Revisa `git status --short`, `git diff --stat` y `git diff --cached --stat`. Si no hay cambios, detente.
-2. Ejecuta el diagnostico: si existe el especialista `malahor-diagnostico`, delegale typecheck, lint y Sonar con el contexto del cambio; si no, ejecuta el typecheck/lint que corresponda al stack.
-3. Ejecuta las pruebas: si existe `malahor-testing`, delegale las pruebas del area afectada; si no, usa el runner del stack. Despues ejecuta el build del proyecto.
+2. Ejecuta directamente el diagnostico disponible del stack: typecheck, lint y Sonar cuando existan. No delegues un commit nivel 0 salvo que el alcance deje de ser trivial y requiera un plan revisado.
+3. Ejecuta directamente las pruebas y despues el build del proyecto.
 4. Si todo esta verde, carga `git-commit-text` y genera el subject con icono + Conventional Commit en espanol y el cuerpo en vinetas cuando aporte contexto.
 5. Ejecuta `malahor_hook_check` para `file.stage.before` con el comando `git add -- <rutas exactas>`, esas mismas rutas e `intent: "commit"`. Si no permite, detente. Luego stagea exclusivamente esas rutas.
 6. Valida el staged y el subject con `malahor-ai git precommit --message "<subject>" --json`. Conserva `targetPaths` y `stagedFingerprint`; si falla o queda un ASK pendiente, detente y no uses fallback.

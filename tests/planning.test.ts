@@ -101,6 +101,7 @@ function scope(mode: MalahorMode = "assistant"): PlanScope {
 
 function input(action: "edit" | "shell" | "subagent" = "edit"): PlanInput {
   return {
+    level: 1,
     summary: "Cambiar una ruta del fixture",
     steps: ["Presentar plan", "Cambiar solo lo declarado"],
     presentation: {
@@ -130,8 +131,26 @@ function input(action: "edit" | "shell" | "subagent" = "edit"): PlanInput {
   };
 }
 
+function levelZeroInput(action: "edit" | "shell" | "subagent" = "edit"): PlanInput {
+  const base = input(action);
+  return {
+    ...base,
+    level: 0,
+    steps: ["Ejecutar el cambio puntual"],
+    presentation: {
+      ...base.presentation,
+      steps: [],
+      impact: [],
+      exclusions: [base.presentation.exclusions[0]!],
+      completionCriteria: [base.presentation.completionCriteria[0]!],
+    },
+    dependencies: [],
+  };
+}
+
 function conceptInput(summary = "Alternativas"): PlanInput {
   return {
+    level: 1,
     summary,
     steps: [],
     presentation: {
@@ -171,6 +190,13 @@ function expectProgressiveDisclosureContract(text: string): void {
   expect(text).toMatch(
     /(?:riesgo alto|categor[ií]a(?:s)? cr[ií]tica(?:s)?)[\s\S]{0,300}(?:visible|abiert[oa]|expandid[oa])[\s\S]{0,120}(?:por defecto|sin interacci[oó]n)/i,
   );
+}
+
+function expectLevelZeroContract(text: string): void {
+  expect(text).toMatch(/nivel 0[\s\S]{0,500}plan (?:mínimo|minimo)/i);
+  expect(text).toMatch(/plan (?:mínimo|minimo)[\s\S]{0,500}\bgo\b/i);
+  expect(text).toMatch(/nivel 0[\s\S]{0,500}(?:sin|no usa)[\s\S]{0,160}(?:Discovery|SDD)/i);
+  expect(text).toMatch(/commit[\s\S]{0,700}(?:status|diff)[\s\S]{0,300}(?:test|pruebas)[\s\S]{0,300}build/i);
 }
 
 function authorized(mode: "assistant" | "executor" = "assistant", now = Date.now()): PlanState {
@@ -303,6 +329,39 @@ describe("nucleo: transiciones y binding del plan", () => {
     expect(() => reviewPlan(plan, plan.digest, NOW)).toThrow();
     expect(planAllows(plan, scope("executor"), input("shell").actions[0]!, NOW)).toBe(false);
     expect(planAllows(authorizePlan(plan, plan.digest, NOW), scope("executor"), input("shell").actions[0]!, NOW)).toBe(true);
+  });
+
+  test("nivel 0 queda firmado, exige go y rechaza ampliar el trabajo trivial", () => {
+    const simple = levelZeroInput();
+    const plan = proposePlan(scope("executor"), simple, NOW);
+    const operation = simple.actions[0]!;
+    expect(plan.plan.level).toBe(0);
+    expect(plan.plan.presentation.steps).toEqual([]);
+    expect(plan.plan.presentation.impact).toEqual([]);
+    expect(validState(plan)).toBe(true);
+    expect(planAllows(plan, scope("executor"), operation, NOW)).toBe(false);
+    expect(planAllows(authorizePlan(plan, plan.digest, NOW), scope("executor"), operation, NOW)).toBe(true);
+
+    const invalid: PlanInput[] = [
+      { ...simple, presentation: { ...simple.presentation, risk: { ...simple.presentation.risk, level: "medium" } } },
+      { ...simple, presentation: { ...simple.presentation, risk: { ...simple.presentation.risk, categories: ["architecture"] } } },
+      { ...simple, dependencies: [{ planID: "a".repeat(32), revision: "b".repeat(32) }] },
+      { ...levelZeroInput("subagent") },
+      { ...simple, actions: [operation, { action: "edit", resource: path.join(repo, "other.ts") }] },
+      { ...simple, steps: ["Uno", "Dos", "Tres", "Cuatro"] },
+      { ...simple, presentation: { ...simple.presentation, steps: [
+        { title: "Primero", description: "Primer paso todavía breve." },
+        { title: "Segundo", description: "Segundo paso todavía breve." },
+        { title: "Tercero", description: "El tercer paso ya exige nivel superior." },
+      ] } },
+    ];
+    for (const candidate of invalid) expect(() => proposePlan(scope("executor"), candidate, NOW)).toThrow(/nivel 0/i);
+
+    expect(validState({ ...plan, plan: { ...plan.plan, level: 1 } })).toBe(false);
+    const { level: _level, ...legacyInput } = input();
+    const legacy = proposePlan(scope("executor"), legacyInput, NOW);
+    expect(legacy.plan.level).toBeUndefined();
+    expect(validState(legacy)).toBe(true);
   });
 
   test("acciones canonicas sin duplicados; hash ligado a resultado, impacto, riesgo, recursos y scope", () => {
@@ -937,16 +996,17 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       required?: string[];
       properties?: Record<string, Schema>;
       items?: Schema;
-      enum?: string[];
+      enum?: Array<string | number>;
       maxItems?: number;
       uniqueItems?: boolean;
       additionalProperties?: boolean;
     };
     const schema = harness.definitions.get("plan")?.input as Schema;
     const sorted = (items: string[] | undefined) => [...(items ?? [])].sort();
-    expect(sorted(schema.required)).toEqual(sorted(["summary", "steps", "presentation", "actions"]));
-    expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted(["summary", "steps", "presentation", "actions", "dependencies"]));
+    expect(sorted(schema.required)).toEqual(sorted(["level", "summary", "steps", "presentation", "actions"]));
+    expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted(["level", "summary", "steps", "presentation", "actions", "dependencies"]));
     expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties?.level?.enum).toEqual([0, 1, 2]);
     expect(sorted(schema.properties?.presentation?.required)).toEqual(sorted([
       "objective", "outcome", "steps", "impact", "risk", "exclusions", "completionCriteria",
     ]));
@@ -975,6 +1035,9 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       "security", "data", "architecture", "destructive",
     ]));
     expect(risk.properties?.categories?.uniqueItems).toBe(true);
+
+    const { level: _level, ...withoutLevel } = input();
+    await expect(harness.execute("plan", withoutLevel)).rejects.toThrow(/level 0, 1 o 2/i);
   });
 
   test("malahor_plan guarda estado v4 ligado al turno y rechaza estados v3", async () => {
@@ -1116,6 +1179,58 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await evaluatePlanningPermission(advisor, options, storage);
     expect(advisor.effect).toBe("deny");
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, options, storage)).rejects.toThrow();
+  });
+
+  test("nivel 0 conserva plan foreground y aprobación go, y rechaza rutas protegidas", async () => {
+    configure("ejecutar");
+    fs.writeFileSync(path.join(repo, "file.ts"), "export const value = 1;\n");
+    const harness = await registeredTools();
+    const planCall = call(SESSION, "malahor", "msg_level_zero_plan");
+    const result = await harness.execute("plan", levelZeroInput(), planCall);
+    const state = records.get(planKey(SESSION)) as PlanState;
+
+    expect(state.plan.level).toBe(0);
+    expect(foregroundMarkdown(result.content)).toContain("nivel 0");
+    expect(foregroundMarkdown(result.content)).not.toMatch(/^## Ruta$/m);
+    const edit = path.join(repo, "file.ts");
+    const before = { sessionID: SESSION, action: "edit", resources: [edit], effect: "allow" };
+    await evaluatePlanningPermission(before, options, storage);
+    expect(before.effect).toBe("deny");
+    await harness.execute("run", { digest: state.digest }, call(SESSION, "malahor", "msg_level_zero_go"));
+    const after = { ...before, effect: "allow" };
+    await evaluatePlanningPermission(after, options, storage);
+    expect(after.effect).toBe("allow");
+
+    fs.mkdirSync(path.join(repo, ".github", "workflows"), { recursive: true });
+    const workflow = path.join(repo, ".github", "workflows", "ci.yml");
+    fs.writeFileSync(workflow, "name: ci\n");
+    await expect(harness.execute("plan", {
+      ...levelZeroInput(),
+      actions: [{ action: "edit", resource: workflow }],
+    }, call(SESSION, "malahor", "msg_level_zero_infra"))).rejects.toThrow(/nivel 0|protegida/i);
+    await expect(harness.execute("plan", {
+      ...levelZeroInput(),
+      actions: [{ action: "edit", resource: path.join(repo, "missing.ts") }],
+    }, call(SESSION, "malahor", "msg_level_zero_missing"))).rejects.toThrow(/nivel 0|existente/i);
+    await expect(harness.execute("plan", {
+      ...levelZeroInput("shell"),
+      actions: [{ action: "shell", resource: "sudo npm install left-pad" }],
+    }, call(SESSION, "malahor", "msg_level_zero_install"))).rejects.toThrow(/nivel 0|instala/i);
+    await expect(harness.execute("plan", {
+      ...levelZeroInput("shell"),
+      actions: [{ action: "shell", resource: "rm -rf .sandbox" }],
+    }, call(SESSION, "malahor", "msg_level_zero_destructive"))).rejects.toThrow(/nivel 0|destructivo/i);
+
+    if (process.platform !== "win32") {
+      const outside = path.join(root, "outside.ts");
+      const linkedDirectory = path.join(repo, "linked-outside");
+      fs.writeFileSync(outside, "export const outside = true;\n");
+      fs.symlinkSync(root, linkedDirectory, "dir");
+      await expect(harness.execute("plan", {
+        ...levelZeroInput(),
+        actions: [{ action: "edit", resource: path.join(linkedDirectory, "outside.ts") }],
+      }, call(SESSION, "malahor", "msg_level_zero_symlink"))).rejects.toThrow(/nivel 0|proyecto/i);
+    }
   });
 
   test("plan_control pausa, reanuda y completa sin ampliar efectos", async () => {
@@ -1324,6 +1439,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(text).toMatch(/\bimplementa\b/i);
     expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
     expectProgressiveDisclosureContract(text);
+    expectLevelZeroContract(text);
     const absent: Record<string, unknown> = { sessionID: SESSION, agent: "malahor", system: [] };
     await injectPlanningInstructions(absent, options);
     expect((absent.system as Array<{ text: string }>)[0]?.text).toContain("no ejecutes");
@@ -1360,6 +1476,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       /cop(?:ia|iar)[\s\S]*(?:Markdown|presentaci[oó]n)[\s\S]*termina(?:r)? (?:este )?turno[\s\S]*no invoques malahor_run/i,
     );
     expectProgressiveDisclosureContract(MALAHOR_RUNTIME_PROTOCOL);
+    expectLevelZeroContract(MALAHOR_RUNTIME_PROTOCOL);
   });
 
   test("plugin V2 registra tools y hooks con un host estructural sintético, sin instalacion", async () => {

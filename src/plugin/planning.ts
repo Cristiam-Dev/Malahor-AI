@@ -12,6 +12,8 @@ import {
 import type { PlanningAuthority } from "../cli/core/planning-authority";
 import { detectSecretKinds, type PluginAdapterOptions } from "../cli/core/hooks/plugin-adapter";
 import { isProtectedDocumentationPath, parsePatchOperations } from "../cli/core/documentation-boundary";
+import { classifyInfrastructureCommand, classifyInfrastructurePath } from "../cli/core/infrastructure-boundary";
+import { classifyGitCommand, loadGitAliases } from "../cli/core/git-command-policy";
 
 export interface PlanningStorage {
   get(key: string): Promise<unknown>;
@@ -175,9 +177,10 @@ export async function registerPlanningTools(
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Registra el plan y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. La traza tecnica en background no cuenta. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
+      description: "Registra un plan proporcional (nivel 0, 1 o 2) y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. Nivel 0 conserva plan y go, pero usa una vista minima. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
       input: {
         type: "object", properties: {
+          level: { type: "integer", enum: [0, 1, 2] },
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
           presentation: {
@@ -220,16 +223,20 @@ export async function registerPlanningTools(
             type: "object", properties: { planID: { type: "string" }, revision: { type: "string" } },
             required: ["planID", "revision"], additionalProperties: false,
           } },
-        }, required: ["summary", "steps", "presentation", "actions"], additionalProperties: false,
+        }, required: ["level", "summary", "steps", "presentation", "actions"], additionalProperties: false,
       },
       options: { namespace: "malahor", codemode: false },
       execute: async (value: unknown, call: ToolCall) => {
         const resolved = await requireScope(call, options);
         if (call.agent !== "malahor") throw new Error("Solo el primario puede presentar el plan.");
         const raw = value as PlanInput;
+        if (raw.level !== 0 && raw.level !== 1 && raw.level !== 2) {
+          throw new Error("malahor_plan requiere level 0, 1 o 2.");
+        }
         if (detectSecretKinds(raw).length > 0) throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+        if (raw.level === 0) validateLevelZeroActions(actions ?? [], projectRoot);
         const newRepoDoc = actions?.find((item) => item.action === "edit"
           && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));
         if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
@@ -352,11 +359,15 @@ export async function injectPlanningInstructions(
   const instructions = !resolved || !storage
     ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host."
     : mode === "advisor"
-      ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps, presentation.steps, presentation.impact y actions van vacios."
+      ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, declara level 1 o 2; steps, presentation.steps, presentation.impact y actions van vacios."
       : [
         `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
         mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar."
           : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+        "Declara level 0, 1 o 2 en malahor_plan. Nivel 0 usa un plan minimo visible y conserva la aprobacion posterior go antes de cualquier efecto.",
+        "Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentacion ceremonial; ejecuta en una sola pasada y aplica validacion enfocada. Commit es la excepcion: conserva todos sus gates y hooks obligatorios.",
+        "Usa nivel 0 solo con riesgo bajo, como maximo un archivo existente y sin categorias criticas, dependencias, infraestructura, instalacion, publicacion, despliegue ni destruccion; si el alcance crece, presenta nivel 1 o 2.",
+        "Commit nivel 0: tras go revisa status/diff y ejecuta diagnostico, tests, build, stage exacto, precommit, hooks y revalidacion; no pide otra confirmacion salvo fallo o cambio material.",
         "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto por area, riesgo y accion requerida; rutas, comandos y evidencia exacta permanecen en el anexo tecnico.",
         "El detalle exacto siempre puede consultarse con /malahor-plan detalles, aunque el cliente no renderice el desplegable.",
         "Un riesgo alto o una categoria critica mantiene el anexo visible y abierto por defecto, sin interaccion adicional.",
@@ -524,6 +535,57 @@ function planningProjectRoot(project: string, directory: string, env: NodeJS.Pro
   return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside(directory, entry.root))?.root
     ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root
     ?? directory;
+}
+
+function validateLevelZeroActions(actions: PlannedAction[], projectRoot: string): void {
+  const aliases = loadGitAliases(projectRoot);
+  for (const action of actions) {
+    if (action.action === "edit") {
+      if (!insideExistingPath(action.resource, projectRoot)) {
+        throw new Error("Nivel 0 solo modifica archivos existentes dentro del proyecto.");
+      }
+      let stat: fs.Stats;
+      try { stat = fs.lstatSync(action.resource); }
+      catch { throw new Error("Nivel 0 solo modifica un archivo existente."); }
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Nivel 0 exige un archivo regular existente.");
+      if (isProtectedDocumentationPath(projectRoot, action.resource)
+        || classifyInfrastructurePath(projectRoot, action.resource).protected) {
+        throw new Error("Nivel 0 no modifica documentacion operativa ni superficies protegidas.");
+      }
+      continue;
+    }
+    if (action.action !== "shell") continue;
+    if (classifyInfrastructureCommand(action.resource).protected || installationCommand(action.resource)) {
+      throw new Error("Nivel 0 no instala, publica ni despliega.");
+    }
+    if (destructiveCommand(action.resource)) throw new Error("Nivel 0 no admite comandos destructivos.");
+    const git = classifyGitCommand(action.resource, { aliases });
+    if (git.remote || git.destructive || git.failClosed
+      || git.operations.some((operation) => !["read", "stage", "commit"].includes(operation))) {
+      throw new Error("Nivel 0 solo admite lectura Git, stage exacto y commit ordinario bajo sus hooks.");
+    }
+  }
+}
+
+function installationCommand(command: string): boolean {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:(?:--?[a-z0-9._-]+)(?:=[^\s]+)?\s+)*(?:add|i|install|remove|rm|un|uninstall|up|update|upgrade)\b/i.test(command)
+    || /\b(?:python(?:3)?\s+-m\s+)?(?:pip|pip3|uv(?:\s+pip)?|gem|cargo|go)\s+(?:install|uninstall)\b/i.test(command)
+    || /\b(?:apt(?:-get)?|dnf|yum|apk|brew|choco|winget)\s+(?:install|remove|uninstall|update|upgrade)\b/i.test(command)
+    || /\bmalahor-ai\s+(?:install|uninstall|update|codegraph\s+setup)\b/i.test(command);
+}
+
+function destructiveCommand(command: string): boolean {
+  return /\b(?:rm|rmdir|unlink|shred|truncate|mkfs(?:\.[a-z0-9]+)?|wipefs)\b/i.test(command)
+    || /\bdd\s+[^;&|]*\bof=/i.test(command);
+}
+
+function insideExistingPath(target: string, root: string): boolean {
+  if (!inside(target, root)) return false;
+  try {
+    return inside(fs.realpathSync(target), fs.realpathSync(root));
+  } catch {
+    return false;
+  }
 }
 
 function inside(target: string, root: string): boolean {

@@ -77,6 +77,12 @@ function expectProgressiveDisclosureContract(text: string): void {
   );
 }
 
+function expectLevelZeroContract(text: string): void {
+  expect(text).toMatch(/nivel 0[\s\S]{0,500}plan (?:mínimo|minimo)/i);
+  expect(text).toMatch(/plan (?:mínimo|minimo)[\s\S]{0,500}\bgo\b/i);
+  expect(text).toMatch(/nivel 0[\s\S]{0,500}(?:sin|no usa)[\s\S]{0,160}(?:Discovery|SDD)/i);
+}
+
 describe("scaffold del plugin", () => {
   test("importar no escribe estado", () => {
     expect(fs.existsSync(stateFile())).toBe(false);
@@ -171,6 +177,7 @@ describe("scaffold del plugin", () => {
       expect(text).toMatch(/\bimplementa\b/i);
       expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
       expectProgressiveDisclosureContract(text);
+      expectLevelZeroContract(text);
       expect(text).toMatch(/documentaci[oó]n mediante docs_\*/i);
       expect(text).toMatch(/Obsidian MCP ni fallback al repositorio/i);
     } finally {
@@ -181,6 +188,10 @@ describe("scaffold del plugin", () => {
   test("el asset del agente primario exige divulgación progresiva y riesgo crítico visible", () => {
     const agent = fs.readFileSync(path.resolve(import.meta.dir, "..", "assets", "opencode", "agents", "v2", "malahor.md"), "utf8");
     expectProgressiveDisclosureContract(agent);
+    expectLevelZeroContract(agent);
+    const commit = fs.readFileSync(path.resolve(import.meta.dir, "..", "assets", "opencode", "commands", "malahor-commit.md"), "utf8");
+    expect(commit).toMatch(/nivel 0[\s\S]{0,300}\bgo\b/i);
+    expect(commit).toMatch(/(?:sin|no pidas) (?:otra|nueva) confirmaci[oó]n/i);
   });
 
   test("V2 parcial separa degradadas de brechas criticas", async () => {

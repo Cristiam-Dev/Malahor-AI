@@ -18,17 +18,30 @@ export interface PlannedAction {
   resource: string;
 }
 
+export type PlanLevel = 0 | 1 | 2;
+
 export interface PlanDependency {
   planID: string;
   revision: string;
 }
 
 export interface PlanInput {
+  /** Ausente solo para compatibilidad con callers/estados V4 anteriores; las tools nuevas lo exigen. */
+  level?: PlanLevel;
   summary: string;
   steps: string[];
   presentation: PlanPresentationInput;
   actions: PlannedAction[];
   dependencies?: PlanDependency[];
+}
+
+export interface NormalizedPlanInput {
+  level?: PlanLevel;
+  summary: string;
+  steps: string[];
+  presentation: PlanPresentationInput;
+  actions: PlannedAction[];
+  dependencies: PlanDependency[];
 }
 
 export type PlanPhase = "presented" | "reviewed" | "running" | "paused" | "blocked"
@@ -43,7 +56,7 @@ export interface PlanState {
   mode: MalahorMode;
   policyRevision: string;
   presentationInteractionID: string;
-  plan: Required<PlanInput>;
+  plan: NormalizedPlanInput;
   digest: string;
   revision: string;
   phase: PlanPhase;
@@ -298,7 +311,7 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
     || !validOptionalTimes(value)
     || !validPlan(value.plan, value.mode as MalahorMode)
     || typeof value.proof !== "string") return false;
-  const plan = value.plan as Required<PlanInput>;
+  const plan = value.plan as NormalizedPlanInput;
   const expected = digestPlan({
     sessionID: value.sessionID as string, project: value.project as string,
     mode: value.mode as MalahorMode, policyRevision: value.policyRevision as string,
@@ -314,10 +327,11 @@ export function renderPlan(
   return renderPlanPresentation(state, options);
 }
 
-function normalizePlan(mode: MalahorMode, input: PlanInput): Required<PlanInput> {
+function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput {
   if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
     throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
   }
+  const level = normalizePlanLevel(input.level);
   const dependencies = input.dependencies ?? [];
   if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || !Array.isArray(dependencies)
     || input.steps.length > 30 || input.actions.length > 80 || dependencies.length > 30) {
@@ -337,10 +351,43 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): Required<PlanInput>
     throw new Error("Dependencia de plan invalida.");
   }
   if (JSON.stringify(input).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
-  const presentation = normalizePlanPresentation(input.presentation, mode);
+  const presentation = normalizePlanPresentation(input.presentation, mode, level);
   const actions = uniqueSorted(input.actions, (item) => `${item.action}\0${item.resource}`);
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\0${item.revision}`);
-  return { summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies };
+  validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
+  const normalized = {
+    summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies,
+  };
+  return input.level === undefined ? normalized : { level, ...normalized };
+}
+
+function normalizePlanLevel(value: unknown): PlanLevel {
+  if (value === undefined) return 1;
+  if (value === 0 || value === 1 || value === 2) return value;
+  throw new Error("Nivel de plan invalido: usa 0, 1 o 2.");
+}
+
+function validatePlanLevel(
+  level: PlanLevel,
+  mode: MalahorMode,
+  steps: string[],
+  presentation: PlanPresentationInput,
+  actions: PlannedAction[],
+  dependencies: PlanDependency[],
+): void {
+  if (level !== 0) return;
+  const editTargets = new Set(actions.filter((item) => item.action === "edit").map((item) => item.resource));
+  if (mode === "advisor") throw new Error("Nivel 0 requiere un modo de ejecucion; asesor solo presenta conceptos.");
+  if (steps.length > 3 || presentation.steps.length > 2 || presentation.impact.length > 1
+    || presentation.exclusions.length > 3 || presentation.completionCriteria.length > 3) {
+    throw new Error("Nivel 0 exige un plan minimo: hasta tres pasos internos, dos pasos visibles y listas breves.");
+  }
+  if (presentation.risk.level !== "low" || presentation.risk.categories.length > 0) {
+    throw new Error("Nivel 0 solo admite riesgo bajo y ninguna categoria critica.");
+  }
+  if (dependencies.length > 0) throw new Error("Nivel 0 no admite dependencias entre planes.");
+  if (actions.some((item) => item.action === "subagent")) throw new Error("Nivel 0 no usa subagentes.");
+  if (editTargets.size > 1) throw new Error("Nivel 0 solo puede modificar un archivo existente.");
 }
 
 async function assertDependencyGraph(state: PlanState, adapter: PlanningAdapter, authority: PlanningAuthority): Promise<void> {
@@ -393,7 +440,7 @@ function statePayload(value: Record<string, unknown>): string {
 }
 
 function digestPlan(
-  scope: PlanScope, plan: Required<PlanInput>, planID: unknown, revision: unknown, presentationInteractionID: string,
+  scope: PlanScope, plan: NormalizedPlanInput, planID: unknown, revision: unknown, presentationInteractionID: string,
 ): string {
   return createHash("sha256").update(canonical({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
 }
@@ -408,18 +455,34 @@ function samePlanScope(state: PlanState, scope: PlanScope): boolean {
     && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
 }
 
-function validPlan(value: unknown, mode: MalahorMode): value is Required<PlanInput> {
+function validPlan(value: unknown, mode: MalahorMode): value is NormalizedPlanInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const plan = value as Record<string, unknown>;
-  return typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions)
+  const level = plan.level === undefined ? 1 : plan.level;
+  if (level !== 0 && level !== 1 && level !== 2) return false;
+  const structurallyValid = typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions)
     && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string")
-    && validPlanPresentation(plan.presentation, mode)
+    && validPlanPresentation(plan.presentation, mode, level)
     && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
       && ACTIONS.has(String((entry as Record<string, unknown>).action))
       && typeof (entry as Record<string, unknown>).resource === "string")
     && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
       && /^[a-f0-9]{32}$/.test(String((entry as Record<string, unknown>).planID))
       && /^[a-f0-9]{32}$/.test(String((entry as Record<string, unknown>).revision)));
+  if (!structurallyValid) return false;
+  try {
+    validatePlanLevel(
+      level as PlanLevel,
+      mode,
+      plan.steps as string[],
+      plan.presentation as PlanPresentationInput,
+      plan.actions as PlannedAction[],
+      plan.dependencies as PlanDependency[],
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function validPhase(value: Record<string, unknown>): boolean {

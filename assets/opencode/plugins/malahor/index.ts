@@ -5575,6 +5575,8 @@ Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
 - Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
 - Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. La autorización del plan no caduca por tiempo; si cambian revisión, efectos, proyecto, modo o política, deja de autorizar.
+- Cada plan declara nivel 0, 1 o 2 dentro de su payload firmado. Nivel 0 usa un plan mínimo visible y conserva la aprobación posterior go: nunca ejecuta en el turno de presentación ni elimina malahor_run.
+- Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentación ceremonial. Tras go ejecuta el alcance aprobado en una sola pasada y usa validación enfocada; un commit conserva excepcionalmente diagnóstico, tests, build y hooks completos.
 - Usa divulgación progresiva: el resumen del plan debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto agrupado, riesgo y acción requerida; rutas, comandos, dependencias y evidencia exacta van en el anexo técnico.
 - El anexo puede desplegarse o consultarse siempre con /malahor-plan detalles. Un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción mantiene ese detalle visible y abierto por defecto, sin interacción adicional.
 - En asistente y ejecutor, despues de malahor_plan copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno. Una traza u output tecnico del tool en background no cuenta como presentacion. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
@@ -5610,7 +5612,8 @@ Memoria y documentación
 - Antes de cambiar, pausar o compactar, conserva un checkpoint breve con objetivo, estado, decisiones, bloqueos, validaciones y próximo paso.
 
 Construcción y SDD
-- Elige el nivel proporcional: nivel 0 para cambios triviales; nivel 1 para cambios normales con objetivo, criterios, implementación y revisión; nivel 2 para arquitectura, migraciones, seguridad o alto riesgo, con SDD completo y trazabilidad.
+- Elige el nivel proporcional y decláralo en malahor_plan: nivel 0 para cambios triviales y de alcance inequívoco; nivel 1 para cambios normales con objetivo, criterios, implementación y revisión; nivel 2 para arquitectura, migraciones, seguridad o alto riesgo, con SDD completo y trazabilidad.
+- Nivel 0 mantiene plan mínimo + go, pero omite Discovery/SDD, subagentes, documentación de proceso y fases ceremoniales. Admite como máximo un archivo existente, riesgo bajo, sin categorías críticas, dependencias, infraestructura, instalación, publicación, despliegue ni destrucción; si el alcance crece, presenta una revisión de nivel 1 o 2.
 - Explica el nivel elegido y reevalúalo si cambia el riesgo. No impongas diez fases a un cambio trivial.
 - Respeta specs y metodologías existentes como contexto; no crees un flujo paralelo ni sustituyas la metodología del proyecto sin acuerdo.
 - Si existe una definición aprobada de Discovery, reutiliza objetivos, criterios, alcance y decisiones por referencia; no la redefinas ni pidas doble aprobación.
@@ -5630,10 +5633,10 @@ Principio de socio
 
 Git y delegación
 - Git es local-only. Nunca ejecutes push, pull, fetch, clone, ls-remote, remote update, submódulos remotos ni equivalentes que contacten un remoto. Son hard DENY incluso si el usuario los pide; ningún plan, perfil, token, aprobación, metadata o fallback los habilita.
-- Stage y commit requieren una orden explícita del usuario; “continúa”, “listo” o “cierra la fase” no autorizan esas acciones. Un pedido inequívoco de commit o /malahor-commit autoriza, tras gates verdes, el stage exclusivo de las rutas revisadas y un commit ordinario local, sin pedir otra confirmación humana.
+- Stage y commit requieren una orden explícita del usuario; “continúa”, “listo” o “cierra la fase” no autorizan esas acciones. Un pedido inequívoco de commit o /malahor-commit se presenta como plan nivel 0 breve y espera go; después, tras gates verdes, autoriza el stage exclusivo de las rutas revisadas y un commit ordinario local sin otra confirmación humana.
 - Propaga esa orden mediante la intención estructurada commit de malahor_hook_check. Esa intención solo cubre el stage exacto revisado y el commit ordinario; no autoriza amend, reset, rebase, cherry-pick, merge ni ramas.
 - Amend, reset, rebase, cherry-pick, merge y creación/cambio de ramas son locales y permitidos solo con una orden específica para esa operación. Las variantes destructivas exigen preview con target visible y un ASK/aprobación de un solo uso.
-- Al pedir commit/comitea o /malahor-commit: revisa status/diff; ejecuta diagnóstico, testing y build; detente si falla; stagea solo las rutas revisadas con intent=commit; valida el staged y el mensaje con malahor-ai git precommit; vuelve a validar git.commit.before con intent=commit; ejecuta git commit sin --no-verify; relee status y git --no-pager log -1.
+- Al pedir commit/comitea o /malahor-commit: presenta primero el plan nivel 0 mínimo y espera go. Luego, en una sola pasada, revisa status/diff; ejecuta diagnóstico, testing y build; detente si falla; stagea solo las rutas revisadas con intent=commit; valida el staged y el mensaje con malahor-ai git precommit; vuelve a validar git.commit.before con intent=commit; ejecuta git commit sin --no-verify; relee status y git --no-pager log -1.
 - Si y solo si precommit quedó verde, el staged y su huella siguen exactos y el intento real de git commit fue bloqueado por el host/harness, genera el fallback con malahor-ai git commit-fallback. Declara que el agente no ejecutó el commit, conserva subject/cuerpo/cwd, nunca uses --no-verify y revalida status/log después de la ejecución humana. Un DENY/ASK de contenido o política no admite fallback.
 - Antes de operaciones sensibles usa el flujo de hooks de Malahor. Si recibes DENY, detente; si recibes ASK pendiente, solicita evidencia humana verificable.
 - Un único primario coordina y construye. Los especialistas gestionados son subagentes hermanos, con contexto, restricciones, permisos y criterios explícitos; no delegan entre sí.
@@ -7356,7 +7359,7 @@ var RISK_CATEGORIES = new Set([
   "architecture",
   "destructive"
 ]);
-function normalizePlanPresentation(value, mode) {
+function normalizePlanPresentation(value, mode, level = 1) {
   if (!isRecord5(value))
     throw new Error("El plan necesita una presentacion humana estructurada.");
   const objective = normalizedText(value.objective, "objetivo", 1000);
@@ -7370,7 +7373,7 @@ function normalizePlanPresentation(value, mode) {
     if (steps.length !== 0 || impact.length !== 0) {
       throw new Error("Asesor solo presenta concepto: sin pasos ni impacto ejecutable.");
     }
-  } else {
+  } else if (level !== 0) {
     if (steps.length === 0)
       throw new Error("La presentacion del plan requiere una ruta con pasos breves.");
     if (impact.length === 0)
@@ -7379,13 +7382,16 @@ function normalizePlanPresentation(value, mode) {
   if (completionCriteria.length === 0) {
     throw new Error("La presentacion debe declarar criterios de finalizacion.");
   }
+  if (level === 0 && (steps.length > 2 || impact.length > 1 || exclusions.length > 3 || completionCriteria.length > 3 || risk.level !== "low" || risk.categories.length > 0)) {
+    throw new Error("Nivel 0 exige presentacion minima, riesgo bajo y ninguna categoria critica.");
+  }
   return { objective, outcome, steps, impact, risk, exclusions, completionCriteria };
 }
-function validPlanPresentation(value, mode) {
+function validPlanPresentation(value, mode, level = 1) {
   try {
     if (!isRecord5(value))
       return false;
-    return samePresentation(value, normalizePlanPresentation(value, mode));
+    return samePresentation(value, normalizePlanPresentation(value, mode, level));
   } catch {
     return false;
   }
@@ -7395,6 +7401,8 @@ function renderPlanPresentation(state, options = {}) {
   return view === "technical" ? renderTechnicalView(state) : renderSummaryView(state);
 }
 function renderSummaryView(state) {
+  if (planLevel(state) === 0)
+    return renderLevelZeroSummary(state);
   const presentation = state.plan.presentation;
   const critical = requiresVisibleDetails(presentation.risk);
   const lines = [
@@ -7417,6 +7425,38 @@ function renderSummaryView(state) {
   return lines.join(`
 `);
 }
+function renderLevelZeroSummary(state) {
+  const presentation = state.plan.presentation;
+  return [
+    planIdentity(state),
+    `Estado: ${state.phase}`,
+    "",
+    "## Cambio",
+    safeText(presentation.objective),
+    "",
+    "## Resultado",
+    safeText(presentation.outcome),
+    "",
+    "## Riesgo",
+    `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
+    `- ${safeText(presentation.risk.summary)}`,
+    "",
+    "## Acción requerida",
+    nextAction(state),
+    "",
+    "Los efectos exactos están en el anexo. Si tu cliente no lo muestra, usa `/malahor-plan detalles`.",
+    "",
+    "<details>",
+    "<summary>Ver detalle técnico</summary>",
+    "",
+    ...technicalBody(state),
+    "",
+    "</details>",
+    "",
+    "Vigencia: sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política."
+  ].join(`
+`);
+}
 function renderTechnicalView(state) {
   return [
     planIdentity(state),
@@ -7433,12 +7473,19 @@ function technicalBody(state) {
   const presentation = state.plan.presentation;
   const lines = [
     "### Riesgo y control",
+    `- Nivel de trabajo: ${planLevel(state)}`,
     `- Nivel: ${riskLevelLabel(presentation.risk.level)}`
   ];
   if (presentation.risk.categories.length > 0) {
     lines.push(`- Categorías críticas: ${presentation.risk.categories.join(", ")}`);
   }
   lines.push(`- Resumen: ${safeText(presentation.risk.summary)}`, `- Detalles: ${safeText(presentation.risk.details)}`);
+  if (planLevel(state) === 0 && presentation.steps.length > 0) {
+    lines.push("", "### Ruta firmada", ...presentation.steps.map((step, index) => `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`));
+  }
+  if (planLevel(state) === 0 && presentation.impact.length > 0) {
+    lines.push("", "### Impacto firmado", ...impactLines(presentation.impact));
+  }
   lines.push("", "### Criterios de cierre", ...presentation.completionCriteria.map((item) => `- ${safeText(item)}`));
   if (presentation.exclusions.length > 0) {
     lines.push("", "### Exclusiones", ...presentation.exclusions.map((item) => `- ${safeText(item)}`));
@@ -7505,7 +7552,10 @@ function nextAction(state) {
   return "En un turno posterior, responde `go` o `implementa` para solicitar la aprobación previa.";
 }
 function planIdentity(state) {
-  return `Plan Malahor (${state.mode}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
+  return `Plan Malahor (${state.mode} · nivel ${planLevel(state)}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
+}
+function planLevel(state) {
+  return state.plan.level === 0 || state.plan.level === 2 ? state.plan.level : 1;
 }
 function phaseLabel(phase) {
   if (phase === "completed")
@@ -7848,6 +7898,7 @@ function normalizePlan(mode, input) {
   if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
     throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
   }
+  const level = normalizePlanLevel(input.level);
   const dependencies = input.dependencies ?? [];
   if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || !Array.isArray(dependencies) || input.steps.length > 30 || input.actions.length > 80 || dependencies.length > 30) {
     throw new Error("Pasos, acciones o dependencias invalidos o demasiado extensos.");
@@ -7869,10 +7920,44 @@ function normalizePlan(mode, input) {
   }
   if (JSON.stringify(input).length > 12000)
     throw new Error("El plan es demasiado grande para una revision visible.");
-  const presentation = normalizePlanPresentation(input.presentation, mode);
+  const presentation = normalizePlanPresentation(input.presentation, mode, level);
   const actions = uniqueSorted(input.actions, (item) => `${item.action}\x00${item.resource}`);
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\x00${item.revision}`);
-  return { summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies };
+  validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
+  const normalized = {
+    summary: input.summary.trim(),
+    steps: [...input.steps],
+    presentation,
+    actions,
+    dependencies: normalizedDependencies
+  };
+  return input.level === undefined ? normalized : { level, ...normalized };
+}
+function normalizePlanLevel(value) {
+  if (value === undefined)
+    return 1;
+  if (value === 0 || value === 1 || value === 2)
+    return value;
+  throw new Error("Nivel de plan invalido: usa 0, 1 o 2.");
+}
+function validatePlanLevel(level, mode, steps, presentation, actions, dependencies) {
+  if (level !== 0)
+    return;
+  const editTargets = new Set(actions.filter((item) => item.action === "edit").map((item) => item.resource));
+  if (mode === "advisor")
+    throw new Error("Nivel 0 requiere un modo de ejecucion; asesor solo presenta conceptos.");
+  if (steps.length > 3 || presentation.steps.length > 2 || presentation.impact.length > 1 || presentation.exclusions.length > 3 || presentation.completionCriteria.length > 3) {
+    throw new Error("Nivel 0 exige un plan minimo: hasta tres pasos internos, dos pasos visibles y listas breves.");
+  }
+  if (presentation.risk.level !== "low" || presentation.risk.categories.length > 0) {
+    throw new Error("Nivel 0 solo admite riesgo bajo y ninguna categoria critica.");
+  }
+  if (dependencies.length > 0)
+    throw new Error("Nivel 0 no admite dependencias entre planes.");
+  if (actions.some((item) => item.action === "subagent"))
+    throw new Error("Nivel 0 no usa subagentes.");
+  if (editTargets.size > 1)
+    throw new Error("Nivel 0 solo puede modificar un archivo existente.");
 }
 async function assertDependencyGraph(state, adapter, authority) {
   const visit2 = async (dependencies, trail) => {
@@ -7935,7 +8020,18 @@ function validPlan(value, mode) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     return false;
   const plan = value;
-  return typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions) && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string") && validPlanPresentation(plan.presentation, mode) && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && ACTIONS.has(String(entry.action)) && typeof entry.resource === "string") && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && /^[a-f0-9]{32}$/.test(String(entry.planID)) && /^[a-f0-9]{32}$/.test(String(entry.revision)));
+  const level = plan.level === undefined ? 1 : plan.level;
+  if (level !== 0 && level !== 1 && level !== 2)
+    return false;
+  const structurallyValid = typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions) && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string") && validPlanPresentation(plan.presentation, mode, level) && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && ACTIONS.has(String(entry.action)) && typeof entry.resource === "string") && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && /^[a-f0-9]{32}$/.test(String(entry.planID)) && /^[a-f0-9]{32}$/.test(String(entry.revision)));
+  if (!structurallyValid)
+    return false;
+  try {
+    validatePlanLevel(level, mode, plan.steps, plan.presentation, plan.actions, plan.dependencies);
+    return true;
+  } catch {
+    return false;
+  }
 }
 function validPhase(value) {
   const phase = value.phase;
@@ -8114,10 +8210,11 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Registra el plan y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. La traza tecnica en background no cuenta. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
+      description: "Registra un plan proporcional (nivel 0, 1 o 2) y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. Nivel 0 conserva plan y go, pero usa una vista minima. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
       input: {
         type: "object",
         properties: {
+          level: { type: "integer", enum: [0, 1, 2] },
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
           presentation: {
@@ -8176,7 +8273,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             additionalProperties: false
           } }
         },
-        required: ["summary", "steps", "presentation", "actions"],
+        required: ["level", "summary", "steps", "presentation", "actions"],
         additionalProperties: false
       },
       options: { namespace: "malahor", codemode: false },
@@ -8185,10 +8282,15 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede presentar el plan.");
         const raw = value;
+        if (raw.level !== 0 && raw.level !== 1 && raw.level !== 2) {
+          throw new Error("malahor_plan requiere level 0, 1 o 2.");
+        }
         if (detectSecretKinds(raw).length > 0)
           throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+        if (raw.level === 0)
+          validateLevelZeroActions(actions ?? [], projectRoot);
         const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs13.existsSync(item.resource));
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
@@ -8303,9 +8405,13 @@ async function injectPlanningInstructions(input, options, storage, authority = f
   const resolved = await resolvePlanningScope(input.sessionID, options);
   const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
   const mode = resolved?.scope.mode;
-  const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, steps, presentation.steps, presentation.impact y actions van vacios." : [
+  const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, declara level 1 o 2; steps, presentation.steps, presentation.impact y actions van vacios." : [
     `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
     mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar." : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+    "Declara level 0, 1 o 2 en malahor_plan. Nivel 0 usa un plan minimo visible y conserva la aprobacion posterior go antes de cualquier efecto.",
+    "Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentacion ceremonial; ejecuta en una sola pasada y aplica validacion enfocada. Commit es la excepcion: conserva todos sus gates y hooks obligatorios.",
+    "Usa nivel 0 solo con riesgo bajo, como maximo un archivo existente y sin categorias criticas, dependencias, infraestructura, instalacion, publicacion, despliegue ni destruccion; si el alcance crece, presenta nivel 1 o 2.",
+    "Commit nivel 0: tras go revisa status/diff y ejecuta diagnostico, tests, build, stage exacto, precommit, hooks y revalidacion; no pide otra confirmacion salvo fallo o cambio material.",
     "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto por area, riesgo y accion requerida; rutas, comandos y evidencia exacta permanecen en el anexo tecnico.",
     "El detalle exacto siempre puede consultarse con /malahor-plan detalles, aunque el cliente no renderice el desplegable.",
     "Un riesgo alto o una categoria critica mantiene el anexo visible y abierto por defecto, sin interaccion adicional.",
@@ -8478,6 +8584,54 @@ function routineTool(tool) {
 function planningProjectRoot(project, directory, env) {
   const paths = resolvePaths({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
   return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside2(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
+}
+function validateLevelZeroActions(actions, projectRoot) {
+  const aliases = loadGitAliases(projectRoot);
+  for (const action of actions) {
+    if (action.action === "edit") {
+      if (!insideExistingPath(action.resource, projectRoot)) {
+        throw new Error("Nivel 0 solo modifica archivos existentes dentro del proyecto.");
+      }
+      let stat;
+      try {
+        stat = fs13.lstatSync(action.resource);
+      } catch {
+        throw new Error("Nivel 0 solo modifica un archivo existente.");
+      }
+      if (!stat.isFile() || stat.isSymbolicLink())
+        throw new Error("Nivel 0 exige un archivo regular existente.");
+      if (isProtectedDocumentationPath(projectRoot, action.resource) || classifyInfrastructurePath(projectRoot, action.resource).protected) {
+        throw new Error("Nivel 0 no modifica documentacion operativa ni superficies protegidas.");
+      }
+      continue;
+    }
+    if (action.action !== "shell")
+      continue;
+    if (classifyInfrastructureCommand(action.resource).protected || installationCommand(action.resource)) {
+      throw new Error("Nivel 0 no instala, publica ni despliega.");
+    }
+    if (destructiveCommand(action.resource))
+      throw new Error("Nivel 0 no admite comandos destructivos.");
+    const git = classifyGitCommand(action.resource, { aliases });
+    if (git.remote || git.destructive || git.failClosed || git.operations.some((operation) => !["read", "stage", "commit"].includes(operation))) {
+      throw new Error("Nivel 0 solo admite lectura Git, stage exacto y commit ordinario bajo sus hooks.");
+    }
+  }
+}
+function installationCommand(command) {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:(?:--?[a-z0-9._-]+)(?:=[^\s]+)?\s+)*(?:add|i|install|remove|rm|un|uninstall|up|update|upgrade)\b/i.test(command) || /\b(?:python(?:3)?\s+-m\s+)?(?:pip|pip3|uv(?:\s+pip)?|gem|cargo|go)\s+(?:install|uninstall)\b/i.test(command) || /\b(?:apt(?:-get)?|dnf|yum|apk|brew|choco|winget)\s+(?:install|remove|uninstall|update|upgrade)\b/i.test(command) || /\bmalahor-ai\s+(?:install|uninstall|update|codegraph\s+setup)\b/i.test(command);
+}
+function destructiveCommand(command) {
+  return /\b(?:rm|rmdir|unlink|shred|truncate|mkfs(?:\.[a-z0-9]+)?|wipefs)\b/i.test(command) || /\bdd\s+[^;&|]*\bof=/i.test(command);
+}
+function insideExistingPath(target, root) {
+  if (!inside2(target, root))
+    return false;
+  try {
+    return inside2(fs13.realpathSync(target), fs13.realpathSync(root));
+  } catch {
+    return false;
+  }
 }
 function inside2(target, root) {
   const relative = path17.relative(path17.resolve(root), path17.resolve(target));
