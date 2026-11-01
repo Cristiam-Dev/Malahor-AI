@@ -95,6 +95,8 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toMatch(/(?:comandos|rutas|identidad|digest)[\s\S]*(?:solo|únicamente)[\s\S]*\/malahor-plan detalles/i);
     expect(system[0]?.text).toMatch(/ctx\.storage de OpenCode[\s\S]*independientes de Mnemo/i);
     expect(system[0]?.text).toMatch(/malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i);
+    expect(system[0]?.text).toMatch(/inspecci[oó]n.*read-only.*sin plan.*sin.*go/is);
+    expect(system[0]?.text).toMatch(/commit expl[ií]cito.*[uú]nico plan.*nivel 0.*[uú]nico.*go/is);
   });
 
   test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {

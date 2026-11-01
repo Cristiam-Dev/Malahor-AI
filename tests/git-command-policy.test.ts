@@ -62,6 +62,19 @@ describe("politica Git local-only", () => {
     expect(result.remote).toBe(false);
   });
 
+  test.each([
+    "git ls-files -- docs README.md LICENSE THIRD_PARTY_NOTICES.md",
+    "git ls-files -z --cached",
+  ])("clasifica ls-files como lectura local: %s", (command) => {
+    const result = classifyGitCommand(command);
+
+    expect(result.hasGitCommand).toBe(true);
+    expect(result.remote).toBe(false);
+    expect(result.failClosed).toBe(false);
+    expect(result.operations).toEqual(["read"]);
+    expect(result.destructive).toBe(false);
+  });
+
   test("expande aliases Git e impide bypasses inline, recursivos o de shell", () => {
     expect(classifyGitCommand("git publicar", { aliases: { publicar: "push origin HEAD" } }).remote).toBe(true);
     expect(classifyGitCommand("git uno", { aliases: { uno: "dos", dos: "fetch --all" } }).remote).toBe(true);

@@ -14,6 +14,7 @@ import { detectSecretKinds, type PluginAdapterOptions } from "../cli/core/hooks/
 import { isProtectedDocumentationPath, parsePatchOperations } from "../cli/core/documentation-boundary";
 import { classifyInfrastructureCommand, classifyInfrastructurePath } from "../cli/core/infrastructure-boundary";
 import { classifyGitCommand, loadGitAliases } from "../cli/core/git-command-policy";
+import { classifyReadOnlyShellCommand } from "../cli/core/read-only-shell-policy";
 import {
   loadPlanRecord,
   persistPlanState,
@@ -130,6 +131,11 @@ export async function evaluatePlanningPermission(
       && action !== "external_directory") deny(input, `Tool no clasificada para planeacion: ${action}`);
     return;
   }
+  const projectRoot = resolved
+    ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env)
+    : undefined;
+  if (normalized === "shell" && resolved && resolved.scope.mode !== "advisor" && projectRoot
+    && readOnlyShellResources(input.resources, projectRoot, resolved.directory)) return;
   if (!resolved || !storage) {
     deny(input, "No hay proyecto/sesion o almacenamiento de planeacion mediable.");
     return;
@@ -157,7 +163,7 @@ export async function evaluatePlanningTool(
   if (routineTool(tool)) return;
   if (["question", "list", "todowrite", "todoread", "invalid"].includes(tool)) return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
-  if (!resolved || !storage) throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
+  if (!resolved) throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
   if (CODE_READ_TOOLS.has(tool) && resolved.scope.mode === "advisor") {
     throw new Error("Malahor: asesor no consulta archivos de codigo.");
   }
@@ -165,6 +171,9 @@ export async function evaluatePlanningTool(
   if (resolved.scope.mode === "advisor") {
     throw new Error("Malahor: el asesor no ejecuta acciones de programacion.");
   }
+  const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+  if (readOnlyShellTool(tool, input.input, projectRoot, resolved.directory)) return;
+  if (!storage) throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
   if (["edit", "write", "patch", "shell", "bash"].includes(tool)
     && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority)) return;
   const actions = toolActions(tool, input.input, resolved.directory);
@@ -518,6 +527,30 @@ function permissionResourcesAllowed(
   if (action !== "shell" || resources.length < 2) return false;
   const compound = (resources as string[]).join(" && ");
   return planAllows(state, scope, { action: "shell", resource: compound }, now, authority);
+}
+
+function readOnlyShellResources(value: unknown, projectRoot: string, workingDirectory: string): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string")) return false;
+  return value.every((command) => classifyReadOnlyShellCommand(command as string, projectRoot, {
+    workingDirectory,
+  }).readOnly);
+}
+
+function readOnlyShellTool(
+  tool: string,
+  value: unknown,
+  projectRoot: string,
+  sessionDirectory: string,
+): boolean {
+  if (tool !== "shell" && tool !== "bash") return false;
+  const args = isRecord(value) ? value : {};
+  if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && typeof cwd !== "string")) return false;
+  const cwd = typeof args.cwd === "string" ? path.resolve(sessionDirectory, args.cwd) : undefined;
+  const workdir = typeof args.workdir === "string" ? path.resolve(sessionDirectory, args.workdir) : undefined;
+  if (cwd && workdir && cwd !== workdir) return false;
+  const workingDirectory = workdir ?? cwd ?? sessionDirectory;
+  return typeof args.command === "string"
+    && classifyReadOnlyShellCommand(args.command, projectRoot, { workingDirectory }).readOnly;
 }
 
 function permissionAction(action: string): string {

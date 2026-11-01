@@ -597,6 +597,95 @@ describe("nucleo: dependencias y control persistente", () => {
 });
 
 describe("adaptador: solicitudes de permiso y segunda frontera", () => {
+  test("las lecturas shell cerradas no requieren plan y pueden variar sin replanificar", async () => {
+    configure("ejecutar");
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.mkdirSync(path.join(repo, "tests"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), "# fixture\n");
+    fs.writeFileSync(path.join(repo, "src", "fixture.ts"), "export {};\n");
+    for (const command of [
+      "git status --short --untracked-files=all",
+      "git diff --check",
+      "sha256sum README.md",
+      "rg -n fixture README.md src tests",
+    ]) {
+      const permission = { sessionID: SESSION, action: "shell", resources: [command], effect: "allow" };
+      await evaluatePlanningPermission(permission, options, storage);
+      expect(permission.effect).toBe("allow");
+      await evaluatePlanningTool({ sessionID: SESSION, tool: "shell", input: { command, workdir: repo } }, options, storage);
+    }
+
+    const split = {
+      sessionID: SESSION,
+      action: "bash",
+      resources: ["git status --short", "git diff --check"],
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(split, options, storage);
+    expect(split.effect).toBe("allow");
+    await evaluatePlanningTool({
+      sessionID: SESSION,
+      tool: "bash",
+      input: { command: "git status --short && git diff --check", workdir: repo },
+    }, options, storage);
+    await evaluatePlanningTool({
+      sessionID: SESSION,
+      tool: "shell",
+      input: { command: "sha256sum fixture.ts", workdir: path.join(repo, "src") },
+    }, options, storage);
+
+    const withoutStorage = {
+      sessionID: SESSION,
+      action: "shell",
+      resources: ["git status --short"],
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(withoutStorage, options);
+    expect(withoutStorage.effect).toBe("allow");
+    await evaluatePlanningTool({
+      sessionID: SESSION,
+      tool: "shell",
+      input: { command: "git status --short", workdir: repo },
+    }, options);
+  });
+
+  test("el fast path read-only falla cerrado en ambas fronteras y no alcanza al asesor", async () => {
+    for (const command of [
+      "git fetch origin",
+      "git add -- README.md",
+      "cat README.md > copy.md",
+      "sh -c 'git status'",
+      "sha256sum /etc/passwd",
+      "git show --output=/tmp/leak HEAD",
+      "bun test",
+    ]) {
+      const permission = { sessionID: SESSION, action: "shell", resources: [command], effect: "allow" };
+      await evaluatePlanningPermission(permission, options, storage);
+      expect(permission.effect).toBe("deny");
+      await expect(evaluatePlanningTool({
+        sessionID: SESSION,
+        tool: "shell",
+        input: { command, workdir: repo },
+      }, options, storage)).rejects.toThrow(/plan/);
+    }
+
+    await expect(evaluatePlanningTool({
+      sessionID: SESSION,
+      tool: "shell",
+      input: { command: "pwd", workdir: otherRepo },
+    }, options, storage)).rejects.toThrow(/plan/);
+
+    configure("acompanar");
+    const advisor = { sessionID: SESSION, action: "shell", resources: ["git status --short"], effect: "allow" };
+    await evaluatePlanningPermission(advisor, options, storage);
+    expect(advisor.effect).toBe("deny");
+    await expect(evaluatePlanningTool({
+      sessionID: SESSION,
+      tool: "shell",
+      input: { command: "git status --short", workdir: repo },
+    }, options, storage)).rejects.toThrow(/asesor/);
+  });
+
   test("el cambio de modo siempre pide confirmacion nativa sin exponer la version interna", async () => {
     const preview = previewModeChange("ejecutar", env, repo);
     const resources = [preview.configFile, preview.current, preview.target];

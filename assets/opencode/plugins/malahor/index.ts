@@ -1,9 +1,9 @@
 // malahor-managed
 // @ts-nocheck bundle generado desde src/plugin/index.ts; el source se typechequea con tsconfig.json
 // src/plugin/index.ts
-import fs14 from "node:fs";
+import fs15 from "node:fs";
 import os2 from "node:os";
-import path19 from "node:path";
+import path20 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -2309,6 +2309,7 @@ var READ_COMMANDS = new Set([
   "grep",
   "help",
   "log",
+  "ls-files",
   "merge-base",
   "name-rev",
   "notes",
@@ -5576,6 +5577,9 @@ Intervención y reparación
 - Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. La autorización del plan no caduca por tiempo; si cambian revisión, efectos, proyecto, modo o política, deja de autorizar.
 - Cada plan declara nivel 0, 1 o 2 dentro de su payload firmado. Nivel 0 usa un plan mínimo visible y conserva la aprobación posterior go: nunca ejecuta en el turno de presentación ni elimina malahor_run.
 - Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentación ceremonial. Tras go ejecuta el alcance aprobado en una sola pasada y usa validación enfocada; un commit conserva excepcionalmente diagnóstico, tests, build y hooks completos.
+- Una inspección puramente read-only reconocida por la política cerrada se ejecuta sin plan y sin go; no extiendas esta excepción a comandos ambiguos, mutantes, remotos, indirectos o fuera de la raíz autorizada.
+- Sustituir una lectura por otra equivalente no exige una revisión del plan cuando no cambian efectos, recursos ni riesgo. Solo un cambio material de efectos, recursos o riesgo exige una nueva revisión proporcional.
+- Un commit explícito usa un único plan nivel 0 y un único go; después ejecuta diagnóstico, tests, build, stage exacto y commit ordinario local en una sola pasada, sin planes o confirmaciones redundantes.
 - Usa divulgación progresiva: el resumen debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto, riesgo y “Qué debes hacer ahora” narrado en lenguaje técnico comprensible.
 - La vista normal no incrusta IDs, comandos ni el anexo técnico; tampoco muestra rutas exactas. Ante un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran únicamente mediante /malahor-plan detalles.
 - En asistente y ejecutor, despues de malahor_plan copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno. Una traza u output tecnico del tool en background no cuenta como presentacion. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
@@ -5685,8 +5689,8 @@ function isRecord4(value) {
 }
 
 // src/plugin/planning.ts
-import fs13 from "node:fs";
-import path17 from "node:path";
+import fs14 from "node:fs";
+import path18 from "node:path";
 
 // src/cli/core/config.ts
 import { createHash as createHash5 } from "node:crypto";
@@ -8128,6 +8132,576 @@ function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+// src/cli/core/read-only-shell-policy.ts
+import fs13 from "node:fs";
+import path17 from "node:path";
+var SAFE_GIT_COMMANDS = new Set([
+  "diff",
+  "log",
+  "ls-files",
+  "rev-parse",
+  "show",
+  "status"
+]);
+var SAFE_GIT_GLOBAL_OPTIONS = new Set([
+  "--no-pager",
+  "--no-optional-locks",
+  "--literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs"
+]);
+var GIT_STATUS_FLAGS = new Set([
+  "-s",
+  "--short",
+  "-b",
+  "--branch",
+  "--show-stash",
+  "--long",
+  "-v",
+  "-vv",
+  "-z",
+  "--null",
+  "--no-renames",
+  "--renames",
+  "--ahead-behind",
+  "--no-ahead-behind"
+]);
+var GIT_DIFF_FLAGS = new Set([
+  "-p",
+  "--patch",
+  "-s",
+  "--no-patch",
+  "--raw",
+  "--patch-with-raw",
+  "--stat",
+  "--numstat",
+  "--shortstat",
+  "--compact-summary",
+  "--summary",
+  "--name-only",
+  "--name-status",
+  "--check",
+  "--cached",
+  "--staged",
+  "--quiet",
+  "--exit-code",
+  "--binary",
+  "--full-index",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--submodule",
+  "--ignore-submodules",
+  "--no-color"
+]);
+var GIT_HISTORY_FLAGS = new Set([
+  "--oneline",
+  "--stat",
+  "--numstat",
+  "--shortstat",
+  "--summary",
+  "--name-only",
+  "--name-status",
+  "--no-patch",
+  "-s",
+  "--patch",
+  "-p",
+  "--graph",
+  "--decorate",
+  "--no-decorate",
+  "--first-parent",
+  "--merges",
+  "--no-merges",
+  "--reverse",
+  "--date-order",
+  "--author-date-order",
+  "--topo-order",
+  "--full-history",
+  "--simplify-merges",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--no-color"
+]);
+var GIT_LS_FILES_FLAGS = new Set([
+  "-c",
+  "--cached",
+  "-d",
+  "--deleted",
+  "-m",
+  "--modified",
+  "-o",
+  "--others",
+  "-i",
+  "--ignored",
+  "-s",
+  "--stage",
+  "-u",
+  "--unmerged",
+  "-k",
+  "--killed",
+  "--directory",
+  "--no-empty-directory",
+  "--exclude-standard",
+  "--full-name",
+  "--recurse-submodules",
+  "--error-unmatch",
+  "--deduplicate",
+  "-z",
+  "--debug",
+  "--eol"
+]);
+var GIT_REV_PARSE_FLAGS = new Set([
+  "--verify",
+  "--quiet",
+  "-q",
+  "--short",
+  "--abbrev-ref",
+  "--symbolic",
+  "--symbolic-full-name",
+  "--show-toplevel",
+  "--show-prefix",
+  "--show-cdup",
+  "--show-superproject-working-tree",
+  "--git-dir",
+  "--absolute-git-dir",
+  "--is-inside-git-dir",
+  "--is-inside-work-tree",
+  "--is-bare-repository",
+  "--is-shallow-repository",
+  "--show-object-format",
+  "--sq",
+  "--revs-only",
+  "--no-revs",
+  "--flags",
+  "--no-flags",
+  "--default"
+]);
+var GIT_FORMAT_OPTIONS = new Set([
+  "--format",
+  "--pretty",
+  "--date",
+  "--author",
+  "--committer",
+  "--grep"
+]);
+var GIT_NUMERIC_OPTIONS = new Set([
+  "-n",
+  "--max-count",
+  "-U",
+  "--unified",
+  "--abbrev"
+]);
+var RG_FLAGS = new Set([
+  "-n",
+  "--line-number",
+  "-i",
+  "--ignore-case",
+  "-S",
+  "--smart-case",
+  "-F",
+  "--fixed-strings",
+  "-l",
+  "--files-with-matches",
+  "--files",
+  "--hidden",
+  "--no-ignore",
+  "--stats",
+  "-c",
+  "--count",
+  "--count-matches",
+  "--json",
+  "--no-messages",
+  "--pcre2"
+]);
+var RG_OPTIONS_WITH_VALUE = new Set([
+  "-g",
+  "--glob",
+  "-t",
+  "--type",
+  "-T",
+  "--type-not",
+  "-m",
+  "--max-count",
+  "-A",
+  "--after-context",
+  "-B",
+  "--before-context",
+  "-C",
+  "--context",
+  "--max-depth"
+]);
+var TEST_PATH_OPERATORS = new Set([
+  "-e",
+  "-f",
+  "-d",
+  "-r",
+  "-w",
+  "-x",
+  "-s",
+  "-L",
+  "-h",
+  "-b",
+  "-c",
+  "-p",
+  "-S"
+]);
+function classifyReadOnlyShellCommand(command, projectRoot, options = {}) {
+  const workingDirectory = options.workingDirectory ?? projectRoot;
+  if (!safeProjectDirectory(workingDirectory, projectRoot))
+    return denied("directorio-fuera-del-proyecto");
+  const segments = splitReadOnlySegments(command);
+  if (!segments)
+    return denied("sintaxis-shell-no-admitida");
+  for (const segment of segments) {
+    const tokens = shellTokens3(segment);
+    if (!tokens || tokens.length === 0 || !segmentIsReadOnly(tokens, segment, projectRoot, workingDirectory, options.git ?? {})) {
+      return denied("segmento-no-verificable");
+    }
+  }
+  return { readOnly: true };
+}
+function segmentIsReadOnly(tokens, segment, projectRoot, workingDirectory, gitOptions) {
+  const executable = tokens[0] ?? "";
+  if (!/^[A-Za-z0-9_+.[\]-]+$/.test(executable))
+    return false;
+  switch (executable.toLowerCase()) {
+    case "git":
+    case "git.exe":
+      return gitIsReadOnly(tokens, segment, projectRoot, workingDirectory, gitOptions);
+    case "sha256sum":
+      return hashIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "cmp":
+      return cmpIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "rg":
+      return ripgrepIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "test":
+      return testIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "pwd":
+      return tokens.slice(1).every((token) => token === "-L" || token === "-P");
+    default:
+      return false;
+  }
+}
+function gitIsReadOnly(tokens, segment, projectRoot, workingDirectory, options) {
+  let index = 1;
+  while (index < tokens.length && tokens[index]?.startsWith("-")) {
+    const option = tokens[index] ?? "";
+    if (!SAFE_GIT_GLOBAL_OPTIONS.has(option))
+      return false;
+    index += 1;
+  }
+  const subcommand = tokens[index]?.toLowerCase();
+  if (!subcommand || !SAFE_GIT_COMMANDS.has(subcommand))
+    return false;
+  if (!closedGitArguments(subcommand, tokens.slice(index + 1), projectRoot, workingDirectory))
+    return false;
+  const classification = classifyGitCommand(segment, options);
+  return classification.hasGitCommand && !classification.remote && !classification.failClosed && !classification.destructive && classification.operations.length > 0 && classification.operations.every((operation) => operation === "read");
+}
+function closedGitArguments(subcommand, args, projectRoot, workingDirectory) {
+  switch (subcommand) {
+    case "status":
+      return parseGitArguments(args, GIT_STATUS_FLAGS, new Set, projectRoot, workingDirectory, "paths", [
+        /^--porcelain(?:=v[12])?$/,
+        /^--untracked-files(?:=(?:no|normal|all))?$/,
+        /^--ignored(?:=(?:traditional|matching|no))?$/,
+        /^--ignore-submodules(?:=(?:none|untracked|dirty|all))?$/,
+        /^--column(?:=[a-z,]+)?$/,
+        /^--find-renames(?:=\d+%?)?$/
+      ]);
+    case "diff":
+      return parseGitArguments(args, GIT_DIFF_FLAGS, GIT_NUMERIC_OPTIONS, projectRoot, workingDirectory, "refs", [
+        /^-U\d+$/,
+        /^--unified=\d+$/,
+        /^--abbrev=\d+$/,
+        /^--color(?:=(?:always|never|auto))?$/,
+        /^--word-diff(?:=(?:plain|color|porcelain|none))?$/,
+        /^--find-renames(?:=\d+%?)?$/,
+        /^--diff-filter=[ACDMRTUXB*]+$/i
+      ]);
+    case "log":
+    case "show":
+      return parseGitArguments(args, GIT_HISTORY_FLAGS, new Set([...GIT_FORMAT_OPTIONS, ...GIT_NUMERIC_OPTIONS]), projectRoot, workingDirectory, "refs", [
+        /^-\d+$/,
+        /^--max-count=\d+$/,
+        /^--abbrev=\d+$/,
+        /^--color(?:=(?:always|never|auto))?$/,
+        /^--format=.+$/,
+        /^--pretty=.+$/,
+        /^--date=.+$/,
+        /^--author=.+$/,
+        /^--committer=.+$/,
+        /^--grep=.+$/
+      ]);
+    case "ls-files":
+      return parseGitArguments(args, GIT_LS_FILES_FLAGS, new Set(["--format", "--with-tree"]), projectRoot, workingDirectory, "paths", [
+        /^--format=.+$/,
+        /^--with-tree=.+$/
+      ]);
+    case "rev-parse":
+      return parseGitArguments(args, GIT_REV_PARSE_FLAGS, new Set, projectRoot, workingDirectory, "refs", [
+        /^--short=\d+$/,
+        /^--abbrev-ref=(?:strict|loose)$/,
+        /^--path-format=(?:absolute|relative)$/,
+        /^--show-object-format(?:=(?:storage|input|output))?$/
+      ]);
+    default:
+      return false;
+  }
+}
+function parseGitArguments(args, flags, optionsWithValue, projectRoot, workingDirectory, positionals, optionPatterns) {
+  let pathsOnly = false;
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      pathsOnly = true;
+      continue;
+    }
+    if (!pathsOnly && flags.has(arg))
+      continue;
+    if (!pathsOnly && optionPatterns.some((pattern) => pattern.test(arg)))
+      continue;
+    if (!pathsOnly && optionsWithValue.has(arg)) {
+      const value = args[index + 1];
+      if (!value || value === "--" || !safeGitOptionValue(arg, value))
+        return false;
+      index += 1;
+      continue;
+    }
+    if (!pathsOnly && arg.startsWith("-"))
+      return false;
+    if (pathsOnly || positionals === "paths") {
+      if (!safeProjectPath(arg, projectRoot, workingDirectory, false, true))
+        return false;
+      continue;
+    }
+    if (!safeGitOperand(arg))
+      return false;
+  }
+  return true;
+}
+function safeGitOptionValue(option, value) {
+  if (GIT_NUMERIC_OPTIONS.has(option))
+    return /^\d+$/.test(value);
+  return !value.includes("\x00");
+}
+function safeGitOperand(value) {
+  return value.length > 0 && !value.includes("\x00") && !path17.isAbsolute(value) && !/^[A-Za-z]:[\\/]/.test(value) && !value.startsWith("~") && !/(^|[\\/:])\.\.(?:[\\/:]|$)/.test(value);
+}
+function hashIsReadOnly(args, projectRoot, workingDirectory) {
+  const paths = [];
+  for (const arg of args) {
+    if (["-b", "--binary", "-t", "--text", "--tag", "-z", "--zero", "--"].includes(arg))
+      continue;
+    if (arg.startsWith("-"))
+      return false;
+    paths.push(arg);
+  }
+  return paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, true));
+}
+function cmpIsReadOnly(args, projectRoot, workingDirectory) {
+  const paths = [];
+  for (const arg of args) {
+    if (["-s", "--silent", "--quiet", "-l", "--verbose", "--"].includes(arg))
+      continue;
+    if (arg.startsWith("-"))
+      return false;
+    paths.push(arg);
+  }
+  return paths.length === 2 && paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, true));
+}
+function ripgrepIsReadOnly(args, projectRoot, workingDirectory) {
+  const positionals = [];
+  let patternFromOption = false;
+  let filesMode = false;
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      positionals.push(...args.slice(index + 1));
+      break;
+    }
+    if (arg === "-e" || arg === "--regexp") {
+      if (!args[index + 1])
+        return false;
+      patternFromOption = true;
+      index += 1;
+      continue;
+    }
+    if (RG_OPTIONS_WITH_VALUE.has(arg)) {
+      if (!args[index + 1])
+        return false;
+      index += 1;
+      continue;
+    }
+    if (RG_FLAGS.has(arg)) {
+      filesMode ||= arg === "--files";
+      continue;
+    }
+    if (arg.startsWith("-"))
+      return false;
+    positionals.push(arg);
+  }
+  if (filesMode)
+    return positionals.every((value) => safeProjectPath(value, projectRoot, workingDirectory, false));
+  if (!patternFromOption && positionals.length === 0)
+    return false;
+  const paths = patternFromOption ? positionals : positionals.slice(1);
+  return paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, false));
+}
+function testIsReadOnly(args, projectRoot, workingDirectory) {
+  const normalized = args[0] === "!" ? args.slice(1) : args;
+  if (normalized.length === 2 && TEST_PATH_OPERATORS.has(normalized[0] ?? "")) {
+    return safeProjectPath(normalized[1] ?? "", projectRoot, workingDirectory, false);
+  }
+  if (normalized.length === 3 && ["-ef", "-nt", "-ot"].includes(normalized[1] ?? "")) {
+    return safeProjectPath(normalized[0] ?? "", projectRoot, workingDirectory, true) && safeProjectPath(normalized[2] ?? "", projectRoot, workingDirectory, true);
+  }
+  return false;
+}
+function safeProjectPath(value, projectRoot, workingDirectory, mustExist, allowGitPathspec = false) {
+  if (!value || value === "-" || value.startsWith("~") || value.includes("\x00"))
+    return false;
+  if (!allowGitPathspec && /[*?[\]{}]/.test(value))
+    return false;
+  try {
+    const root = fs13.realpathSync(path17.resolve(projectRoot));
+    const directory = fs13.realpathSync(path17.resolve(workingDirectory));
+    if (!inside2(directory, root))
+      return false;
+    const target = path17.resolve(directory, value);
+    if (!inside2(target, root))
+      return false;
+    if (fs13.existsSync(target))
+      return inside2(fs13.realpathSync(target), root);
+    if (mustExist)
+      return false;
+    let parent = path17.dirname(target);
+    while (!fs13.existsSync(parent)) {
+      const next = path17.dirname(parent);
+      if (next === parent)
+        return false;
+      parent = next;
+    }
+    return inside2(fs13.realpathSync(parent), root);
+  } catch {
+    return false;
+  }
+}
+function safeProjectDirectory(value, projectRoot) {
+  try {
+    const root = fs13.realpathSync(path17.resolve(projectRoot));
+    const directory = fs13.realpathSync(path17.resolve(value));
+    return fs13.statSync(directory).isDirectory() && inside2(directory, root);
+  } catch {
+    return false;
+  }
+}
+function inside2(target, root) {
+  const relative = path17.relative(path17.resolve(root), path17.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path17.isAbsolute(relative);
+}
+function splitReadOnlySegments(command) {
+  const segments = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index] ?? "";
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (quote === '"' && (character === "$" || character === "`"))
+        return;
+      current += character;
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (["$", "`", ">", "<", ";", `
+`, "\r", "(", ")", "{", "}"].includes(character))
+      return;
+    if (character === "&" || character === "|") {
+      const doubled = command[index + 1] === character;
+      if (character === "&" && !doubled)
+        return;
+      if (!current.trim())
+        return;
+      segments.push(current.trim());
+      current = "";
+      if (doubled)
+        index += 1;
+      continue;
+    }
+    current += character;
+  }
+  if (escaped || quote || !current.trim())
+    return;
+  segments.push(current.trim());
+  return segments;
+}
+function shellTokens3(command) {
+  const tokens = [];
+  let current = "";
+  let tokenStarted = false;
+  let quote;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      tokenStarted = true;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      tokenStarted = true;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      tokenStarted = true;
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (tokenStarted)
+        tokens.push(current);
+      current = "";
+      tokenStarted = false;
+      continue;
+    }
+    current += character;
+    tokenStarted = true;
+  }
+  if (escaped || quote)
+    return;
+  if (tokenStarted)
+    tokens.push(current);
+  return tokens;
+}
+function denied(reason) {
+  return { readOnly: false, reason };
+}
+
 // src/plugin/plan-retention.ts
 import { createHash as createHash8 } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -8500,6 +9074,9 @@ ${renderPlan(state2)}`;
       deny(input, `Tool no clasificada para planeacion: ${action}`);
     return;
   }
+  const projectRoot = resolved ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env) : undefined;
+  if (normalized === "shell" && resolved && resolved.scope.mode !== "advisor" && projectRoot && readOnlyShellResources(input.resources, projectRoot, resolved.directory))
+    return;
   if (!resolved || !storage) {
     deny(input, "No hay proyecto/sesion o almacenamiento de planeacion mediable.");
     return;
@@ -8523,7 +9100,7 @@ async function evaluatePlanningTool(input, options, storage, authority = fallbac
   if (["question", "list", "todowrite", "todoread", "invalid"].includes(tool))
     return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
-  if (!resolved || !storage)
+  if (!resolved)
     throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
   if (CODE_READ_TOOLS.has(tool) && resolved.scope.mode === "advisor") {
     throw new Error("Malahor: asesor no consulta archivos de codigo.");
@@ -8533,6 +9110,11 @@ async function evaluatePlanningTool(input, options, storage, authority = fallbac
   if (resolved.scope.mode === "advisor") {
     throw new Error("Malahor: el asesor no ejecuta acciones de programacion.");
   }
+  const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+  if (readOnlyShellTool(tool, input.input, projectRoot, resolved.directory))
+    return;
+  if (!storage)
+    throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
   if (["edit", "write", "patch", "shell", "bash"].includes(tool) && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority))
     return;
   const actions = toolActions(tool, input.input, resolved.directory);
@@ -8627,7 +9209,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
         if (raw.level === 0)
           validateLevelZeroActions(actions ?? [], projectRoot);
-        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs13.existsSync(item.resource));
+        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs14.existsSync(item.resource));
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call, authority), authority);
@@ -8825,7 +9407,7 @@ async function resolvePlanningScope(value, options) {
       const project = await options.resolveSessionProject(value);
       if (!project)
         return;
-      const directory2 = path17.resolve(project.root);
+      const directory2 = path18.resolve(project.root);
       const env2 = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
       const config2 = loadConfig(env2, directory2);
       return { scope: {
@@ -8842,7 +9424,7 @@ async function resolvePlanningScope(value, options) {
       return;
     const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
     const paths = resolvePaths(env, directory);
-    const root = registeredProjectRoots(paths.projectsFile).sort((a, b) => b.root.length - a.root.length).find((entry) => inside2(directory, entry.root));
+    const root = registeredProjectRoots(paths.projectsFile).sort((a, b) => b.root.length - a.root.length).find((entry) => inside3(directory, entry.root));
     if (!root)
       return;
     const config = loadConfig(env, directory);
@@ -8859,7 +9441,7 @@ async function resolvePlanningScope(value, options) {
 function toolActions(tool, value, directory) {
   const args = isRecord7(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
-    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path17.resolve(directory, cwd) !== path17.resolve(directory))))
+    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path18.resolve(directory, cwd) !== path18.resolve(directory))))
       return;
     return typeof args.command === "string" && args.command.trim() ? [{ action: "shell", resource: args.command }] : undefined;
   }
@@ -8879,7 +9461,7 @@ function toolActions(tool, value, directory) {
   return;
 }
 function normalizeAction(action, resource, directory) {
-  return { action, resource: action === "edit" ? path17.resolve(directory, resource) : resource };
+  return { action, resource: action === "edit" ? path18.resolve(directory, resource) : resource };
 }
 function permissionResourcesAllowed(state, scope, action, resources, directory, authority) {
   if (resources.length === 0 || resources.some((item) => typeof item !== "string"))
@@ -8891,6 +9473,26 @@ function permissionResourcesAllowed(state, scope, action, resources, directory, 
     return false;
   const compound = resources.join(" && ");
   return planAllows(state, scope, { action: "shell", resource: compound }, now, authority);
+}
+function readOnlyShellResources(value, projectRoot, workingDirectory) {
+  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string"))
+    return false;
+  return value.every((command) => classifyReadOnlyShellCommand(command, projectRoot, {
+    workingDirectory
+  }).readOnly);
+}
+function readOnlyShellTool(tool, value, projectRoot, sessionDirectory) {
+  if (tool !== "shell" && tool !== "bash")
+    return false;
+  const args = isRecord7(value) ? value : {};
+  if ([args.cwd, args.workdir].some((cwd2) => cwd2 !== undefined && typeof cwd2 !== "string"))
+    return false;
+  const cwd = typeof args.cwd === "string" ? path18.resolve(sessionDirectory, args.cwd) : undefined;
+  const workdir = typeof args.workdir === "string" ? path18.resolve(sessionDirectory, args.workdir) : undefined;
+  if (cwd && workdir && cwd !== workdir)
+    return false;
+  const workingDirectory = workdir ?? cwd ?? sessionDirectory;
+  return typeof args.command === "string" && classifyReadOnlyShellCommand(args.command, projectRoot, { workingDirectory }).readOnly;
 }
 function permissionAction(action) {
   if (["bash", "command"].includes(action))
@@ -8911,7 +9513,7 @@ function routineTool(tool) {
 }
 function planningProjectRoot(project, directory, env) {
   const paths = resolvePaths({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
-  return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside2(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
+  return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside3(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
 }
 function validateLevelZeroActions(actions, projectRoot) {
   const aliases = loadGitAliases(projectRoot);
@@ -8922,7 +9524,7 @@ function validateLevelZeroActions(actions, projectRoot) {
       }
       let stat;
       try {
-        stat = fs13.lstatSync(action.resource);
+        stat = fs14.lstatSync(action.resource);
       } catch {
         throw new Error("Nivel 0 solo modifica un archivo existente.");
       }
@@ -8953,17 +9555,17 @@ function destructiveCommand(command) {
   return /\b(?:rm|rmdir|unlink|shred|truncate|mkfs(?:\.[a-z0-9]+)?|wipefs)\b/i.test(command) || /\bdd\s+[^;&|]*\bof=/i.test(command);
 }
 function insideExistingPath(target, root) {
-  if (!inside2(target, root))
+  if (!inside3(target, root))
     return false;
   try {
-    return inside2(fs13.realpathSync(target), fs13.realpathSync(root));
+    return inside3(fs14.realpathSync(target), fs14.realpathSync(root));
   } catch {
     return false;
   }
 }
-function inside2(target, root) {
-  const relative = path17.relative(path17.resolve(root), path17.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path17.isAbsolute(relative);
+function inside3(target, root) {
+  const relative = path18.relative(path18.resolve(root), path18.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
 }
 function text(value) {
   return typeof value === "string" ? value : "";
@@ -9097,7 +9699,7 @@ async function registerPlanCommand(host, storage, authority, options) {
 }
 
 // src/plugin/project-affinity.ts
-import path18 from "node:path";
+import path19 from "node:path";
 import { fileURLToPath } from "node:url";
 var PROJECT_AFFINITY_MARKER = "<!-- malahor-project-affinity:v1 -->";
 function createProjectAffinityResolver(options) {
@@ -9207,7 +9809,7 @@ function loadRegistry(options) {
     for (const root of roots) {
       const info = resolveProject(root, config.projects.aliases);
       names.add(info.name);
-      names.add(path18.basename(root));
+      names.add(path19.basename(root));
       for (const alias of info.aliases)
         names.add(alias);
     }
@@ -9245,7 +9847,7 @@ function candidateFromPaths(values, projects, base) {
     if (!filePath)
       continue;
     for (const project of projects) {
-      if (project.roots.some((root) => inside3(filePath, root)))
+      if (project.roots.some((root) => inside4(filePath, root)))
         matches.add(project.canonicalKey);
     }
   }
@@ -9351,9 +9953,9 @@ function normalizedPath(value, base) {
       return;
     }
   }
-  if (!path18.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
+  if (!path19.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
     return;
-  return path18.resolve(base, plain);
+  return path19.resolve(base, plain);
 }
 function resolved(project) {
   return { canonicalKey: project.canonicalKey, root: project.roots[0] };
@@ -9376,9 +9978,9 @@ ${text2}`;
   else
     system.push({ type: "text", text: text2 });
 }
-function inside3(value, root) {
-  const relative = path18.relative(path18.resolve(root), path18.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
+function inside4(value, root) {
+  const relative = path19.relative(path19.resolve(root), path19.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path19.isAbsolute(relative);
 }
 function timestamp2(options) {
   return new Date((options.now ?? Date.now)()).toISOString();
@@ -9872,18 +10474,18 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
   const memoryProject = memoryProjectForLocation(paths, cwd, canonical2);
-  if (!fs14.existsSync(paths.mnemoIndex)) {
+  if (!fs15.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   } else if (!memoryProject) {
     warnings.push("mcp.mnemo-project-unresolved");
   }
-  if (!fs14.existsSync(paths.docsIndex)) {
+  if (!fs15.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs14.existsSync(paths.mnemoIndex)) {
+      if (fs15.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
@@ -9904,7 +10506,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
         }
       }
       const existingDocs = editor.get("docs");
-      if (fs14.existsSync(paths.docsIndex)) {
+      if (fs15.existsSync(paths.docsIndex)) {
         if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
           editor.set("docs", {
             ...existingDocs ?? {},
@@ -9919,7 +10521,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
       }
       let target;
       try {
-        const registered = canonical2 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs14.realpathSync(entry.root) === fs14.realpathSync(canonical2)) : undefined;
+        const registered = canonical2 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs15.realpathSync(entry.root) === fs15.realpathSync(canonical2)) : undefined;
         if (!canonical2 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
@@ -9961,14 +10563,14 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path19.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path20.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function memoryProjectForLocation(paths, cwd, canonical2) {
   const roots = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
   const canonicalValue = canonical2?.trim();
   const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
   const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
-  const byCanonicalPath = canonicalValue && path19.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
+  const byCanonicalPath = canonicalValue && path20.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
   const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey].filter((value) => Boolean(value)));
   if (candidates.size > 1)
     return;
@@ -9988,26 +10590,26 @@ function validMemoryProject(value) {
 }
 function canonicalLocation(value) {
   try {
-    return fs14.realpathSync(value);
+    return fs15.realpathSync(value);
   } catch {
-    return path19.resolve(value);
+    return path20.resolve(value);
   }
 }
 function pathInside(value, root) {
-  const relative = path19.relative(canonicalLocation(root), canonicalLocation(value));
-  return relative === "" || !relative.startsWith("..") && !path19.isAbsolute(relative);
+  const relative = path20.relative(canonicalLocation(root), canonicalLocation(value));
+  return relative === "" || !relative.startsWith("..") && !path20.isAbsolute(relative);
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path19.resolve(paths.opencodeDir, item) === path19.resolve(paths.mnemoIndex));
+  return command.some((item) => path20.resolve(paths.opencodeDir, item) === path20.resolve(paths.mnemoIndex));
 }
 function isMalahorDocs(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path19.resolve(paths.opencodeDir, item) === path19.resolve(paths.docsIndex));
+  return command.some((item) => path20.resolve(paths.opencodeDir, item) === path20.resolve(paths.docsIndex));
 }
 function sessionLocationDirectory(value) {
   const response = isRecord9(value) && isRecord9(value.data) ? value.data : value;
@@ -10026,7 +10628,7 @@ function sessionLocationProject(value) {
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path19.join(directory, "plugin-state.json");
+  const file = path20.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -10038,15 +10640,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs14.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path19.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs14.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs15.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path20.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs15.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs14.chmodSync(temporary, 384);
-    fs14.renameSync(temporary, file);
+    fs15.chmodSync(temporary, 384);
+    fs15.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -10056,8 +10658,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path19.resolve(override);
-  return path19.join(os2.homedir(), ".malahor");
+    return path20.resolve(override);
+  return path20.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))

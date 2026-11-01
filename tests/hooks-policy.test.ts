@@ -241,7 +241,7 @@ describe("hook policy loader", () => {
   });
 
   test("acepta todas las claves del schema v1", () => {
-    const schema = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "docs/security/policy.schema.json"), "utf8")) as Record<string, unknown>;
+    const schema = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "schemas/security-policy.schema.json"), "utf8")) as Record<string, unknown>;
     const value = sampleFromSchema(schema, schema.$defs as Record<string, unknown>);
     const result = validateSecurityLayer(value, { strict: true });
 

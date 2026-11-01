@@ -51,7 +51,7 @@ const REMOTE_COMMANDS = new Set([
 const READ_COMMANDS = new Set([
   "annotate", "blame", "cat-file", "count-objects", "describe", "diff",
   "diff-files", "diff-index", "diff-tree", "difftool", "for-each-ref",
-  "fsck", "grep", "help", "log", "merge-base", "name-rev", "notes",
+  "fsck", "grep", "help", "log", "ls-files", "merge-base", "name-rev", "notes",
   "range-diff", "reflog", "rev-list", "rev-parse", "shortlog", "show",
   "show-branch", "show-ref", "status", "tag", "verify-commit", "verify-tag",
   "version", "whatchanged",

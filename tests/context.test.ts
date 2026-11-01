@@ -175,6 +175,13 @@ describe("raíces registradas por proyecto", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/dependencia.*no hereda permisos.*nunca inicia autom[aá]ticamente/is);
   });
 
+  test("la proporcionalidad read-only y de commit es una regla estructural", () => {
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/inspecci[oó]n.*read-only.*sin plan.*sin.*go/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/lectura.*equivalente.*no.*revisi[oó]n.*plan/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/commit expl[ií]cito.*[uú]nico plan.*nivel 0.*[uú]nico.*go/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/solo.*cambio material.*efectos.*recursos.*riesgo.*revisi[oó]n/is);
+  });
+
   test("el protocolo hace estructural la frontera de infraestructura", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/CI\/CD, IaC, publicaci[oó]n y despliegue.*solo lectura por defecto/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/aprobaci[oó]n de plan, implementaci[oó]n, stage o commit no autoriza/is);

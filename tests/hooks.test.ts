@@ -371,6 +371,17 @@ describe("malahor hooks", () => {
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
   });
 
+  test("permite git ls-files como lectura local", () => {
+    const result = runHooks(baseContext({
+      event: "shell.exec.before",
+      command: "git ls-files -- docs README.md LICENSE THIRD_PARTY_NOTICES.md",
+      profile: "off",
+    }));
+
+    expect(result.decision).toBe("allow");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(false);
+  });
+
   test.each([
     "git rm -- src/fixture.ts",
     "git stash push -m temporal",

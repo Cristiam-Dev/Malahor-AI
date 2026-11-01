@@ -8,8 +8,9 @@ Disparadores validos: el usuario dice "commit", "comitea" o equivalente explicit
 
 Reglas:
 
-- La invocacion de este comando o un pedido explicito de commit crea un plan nivel 0 minimo. Presentalo y espera `go`; no uses Discovery, SDD, subagentes ni documentacion ceremonial.
-- Tras `go`, ejecuta todo el flujo en una sola pasada y, solo si esta verde, el stage exacto y un commit ordinario local de los archivos revisados. No pidas otra confirmacion humana.
+- La invocacion de este comando o un pedido explicito de commit crea un unico plan nivel 0 minimo y espera un unico `go`; no uses Discovery, SDD, subagentes ni documentacion ceremonial.
+- Las inspecciones read-only previas no crean otro plan ni obligan a revisar el vigente cuando no cambian efectos, recursos o riesgo.
+- Tras `go`, ejecuta todo el flujo en una sola pasada y, solo si esta verde, el stage exacto y un commit ordinario local de los archivos revisados. No presentes otro plan. No pidas otra confirmacion humana.
 - No uses `git add -A` por defecto: stagea solo los archivos del cambio revisado. Si hay archivos no relacionados o dudosos, pide confirmacion antes de stagear.
 - Esta orden no autoriza `--amend`, reset, rebase, cherry-pick, merge ni operaciones de ramas; cada una requiere su propio pedido. No uses `--no-verify`.
 - Git remoto es hard DENY: nunca ejecutes push, pull, fetch, clone, `ls-remote`, `remote update`, submodulos remotos ni equivalentes, aunque la persona los pida o apruebe.
