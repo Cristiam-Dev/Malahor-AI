@@ -267,7 +267,8 @@ export const HOOK_EVENTS = [
 export type HookEvent = typeof HOOK_EVENTS[number];
 
 // Code Mode/REPL puede invocar tools sin pasar por los hooks del host. No se
-// media dentro de ese sandbox: se bloquea el punto de entrada hasta T-5.5.5.
+// media dentro de ese sandbox: el punto de entrada permanece bloqueado hasta
+// que el host exponga una mediacion previa y verificable.
 export const CODE_MODE_TOOL_NAMES = new Set([
   "code",
   "code_mode",

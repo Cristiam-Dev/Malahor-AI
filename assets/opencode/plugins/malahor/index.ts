@@ -4373,7 +4373,7 @@ function toolPolicyGuard(context) {
       id: "MAL-HOOK-CODE-MODE",
       decision: "deny",
       message: `Code Mode/REPL no mediable: ${tool}`,
-      fix: "Usa tools directas que pasen por permission/tool/shell hooks; Code Mode queda bloqueado hasta T-5.5.5."
+      fix: "Usa tools directas que pasen por permission/tool/shell hooks; Code Mode permanece bloqueado sin mediacion verificable."
     });
     return violations;
   }
@@ -4789,11 +4789,10 @@ function evaluateHookRules(context, rules = builtInHookRules) {
       return rule.run(context);
     } catch (error) {
       const critical = rule.critical !== false;
-      const detail = error instanceof Error ? error.message : String(error);
       return [{
         id: critical ? "MAL-HOOK-CONTROL-ERROR" : "MAL-HOOK-CONTROL-WARN",
         decision: critical ? "deny" : "warn",
-        message: `El control ${rule.id} no pudo evaluarse: ${detail}`,
+        message: `El control ${rule.id} no pudo evaluarse; detalle omitido por seguridad.`,
         fix: critical ? "Corrige el control o la politica antes de ejecutar la operacion protegida." : "Revisa el control; la operacion auxiliar puede continuar con aviso."
       }];
     }
@@ -9526,8 +9525,11 @@ function captureSubagentsOptIn(cwd, env, canonicalKey) {
 async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
+  const memoryProject = memoryProjectForLocation(paths, cwd, canonical2);
   if (!fs14.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
+  } else if (!memoryProject) {
+    warnings.push("mcp.mnemo-project-unresolved");
   }
   if (!fs14.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
@@ -9541,7 +9543,14 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
             ...existingMnemo ?? {},
             type: "local",
             command: ["node", paths.mnemoIndex],
-            disabled: false,
+            environment: memoryProject ? {
+              ...isRecord8(existingMnemo?.environment) ? existingMnemo.environment : {},
+              MALAHOR_MEMORY_BOUND: "1",
+              MALAHOR_MEMORY_PROJECT: memoryProject
+            } : {
+              MALAHOR_MEMORY_BOUND: "1"
+            },
+            disabled: !memoryProject,
             codemode: false
           });
         } else {
@@ -9607,6 +9616,40 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
 }
 function isManagedCodegraph(config, paths) {
   return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path19.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+}
+function memoryProjectForLocation(paths, cwd, canonical2) {
+  const roots = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
+  const canonicalValue = canonical2?.trim();
+  const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
+  const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
+  const byCanonicalPath = canonicalValue && path19.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
+  const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey].filter((value) => Boolean(value)));
+  if (candidates.size > 1)
+    return;
+  if (candidates.size === 1)
+    return validMemoryProject([...candidates][0]);
+  if (roots.length === 1)
+    return validMemoryProject(roots[0]?.canonicalKey);
+  if (roots.length > 1)
+    return;
+  return validMemoryProject(resolveProject(cwd).canonicalKey);
+}
+function validMemoryProject(value) {
+  const project = value?.trim();
+  if (!project || project === "global" || /[\0\r\n\\]/.test(project) || project.startsWith("/") || project.endsWith("/") || project.includes("//"))
+    return;
+  return project;
+}
+function canonicalLocation(value) {
+  try {
+    return fs14.realpathSync(value);
+  } catch {
+    return path19.resolve(value);
+  }
+}
+function pathInside(value, root) {
+  const relative = path19.relative(canonicalLocation(root), canonicalLocation(value));
+  return relative === "" || !relative.startsWith("..") && !path19.isAbsolute(relative);
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))

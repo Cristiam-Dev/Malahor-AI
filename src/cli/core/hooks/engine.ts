@@ -28,11 +28,14 @@ export function evaluateHookRules(context: HookContext, rules: HookRule[] = buil
       return rule.run(context);
     } catch (error) {
       const critical = rule.critical !== false;
-      const detail = error instanceof Error ? error.message : String(error);
+      // Un error de control puede contener command, paths, payloads o datos del
+      // proveedor. El resultado cruza hacia UI/auditoria: falla cerrado sin
+      // propagar el detalle no confiable.
+      void error;
       return [{
         id: critical ? "MAL-HOOK-CONTROL-ERROR" : "MAL-HOOK-CONTROL-WARN",
         decision: critical ? "deny" : "warn",
-        message: `El control ${rule.id} no pudo evaluarse: ${detail}`,
+        message: `El control ${rule.id} no pudo evaluarse; detalle omitido por seguridad.`,
         fix: critical
           ? "Corrige el control o la politica antes de ejecutar la operacion protegida."
           : "Revisa el control; la operacion auxiliar puede continuar con aviso.",

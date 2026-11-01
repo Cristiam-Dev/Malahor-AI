@@ -6,11 +6,12 @@ import { usesFilesystemResources } from "../cli/core/hooks/resources";
 import { HOOK_RESOURCE_KINDS, type HookEvent, type HookResourceKind } from "../cli/core/hooks/types";
 import { resolvePaths } from "../cli/core/paths";
 import { parseGitIntent } from "../cli/core/git-intent";
-import { getObservation, listProjects, saveObservation, saveSessionSummary, searchObservations, type ObservationType } from "./db";
+import { getObservation, listProjects, normalizeProject, saveObservation, saveSessionSummary, searchObservations, type Observation, type ObservationType } from "./db";
 import { contextForProject, memoryBrief } from "./context";
 import { deleteProjectMemory, inspectProjectMemory, moveMemory, previewMemoryMove, previewProjectDeletion } from "./admin";
 import { backupMemory, previewMemoryRestore, restoreMemoryBackup } from "./admin-backup";
 import { memoryTree, pinMemory, promoteMemory, previewMemoryPromotion, unpinMemory } from "./v2-tools";
+import { memoryRuntimeIdentity, type MemoryRuntimeIdentity } from "./hook-context";
 
 export { toolDefinitions };
 
@@ -22,68 +23,221 @@ export interface ToolCall {
 
 export function callTool(call: ToolCall): unknown {
   const args = call.arguments ?? {};
+  const identity = call.name.startsWith("mem_") ? memoryRuntimeIdentity() : undefined;
 
   switch (call.name) {
-    case "mem_save":
+    case "mem_save": {
+      const project = authorizedScope(identity, stringArg(args.project, identity?.project ?? "global"));
       return saveObservation({
-        project: stringArg(args.project, "global"),
+        project,
         type: observationTypeArg(args.type),
         title: stringArg(args.title),
         content: stringArg(args.content),
         tags: stringArg(args.tags, ""),
       });
-    case "mem_search":
-      return searchObservations(stringArg(args.query, ""), stringArg(args.project, ""), stringArg(args.type, ""),
-        numberArg(args.limit, 5), booleanArg(args.subtree));
-    case "mem_get":
-      return getObservation(numberArg(args.id, 0));
-    case "mem_context":
-      return contextForProject(stringArg(args.project), numberArg(args.limit, 8), undefined, {
+    }
+    case "mem_search": {
+      const requested = stringArg(args.project, "");
+      const project = identity ? authorizedScope(identity, requested || identity.project) : requested;
+      const result = searchObservations(stringArg(args.query, ""), project, stringArg(args.type, ""),
+        numberArg(args.limit, 5), booleanArg(args.subtree) || Boolean(identity && !requested));
+      return filterObservations(result, identity);
+    }
+    case "mem_get": {
+      const result = getObservation(numberArg(args.id, 0));
+      assertAuthorizedObservation(identity, result);
+      return result;
+    }
+    case "mem_context": {
+      const project = authorizedScope(identity, stringArg(args.project));
+      const result = contextForProject(project, numberArg(args.limit, 8), undefined, {
         budget: optionalNumberArg(args.budget), rollup: booleanArg(args.rollup),
       });
-    case "mem_brief":
-      return memoryBrief(stringArg(args.request), {
-        project: optionalStringArg(args.project),
-        scope: optionalStringArg(args.scope),
+      return filterMemoryContext(result, identity);
+    }
+    case "mem_brief": {
+      const requestedProject = optionalStringArg(args.project);
+      const requestedScope = optionalStringArg(args.scope);
+      const project = identity
+        ? authorizedScope(identity, requestedProject ?? identity.project)
+        : requestedProject;
+      const scope = requestedScope ? authorizedScope(identity, requestedScope) : undefined;
+      const result = memoryBrief(stringArg(args.request), {
+        project,
+        scope,
         limit: numberArg(args.limit, 8),
         relatedLimit: numberArg(args.relatedLimit, 5),
         budget: optionalNumberArg(args.budget),
       });
-    case "mem_session_summary":
-      return saveSessionSummary(stringArg(args.project), stringArg(args.summary));
+      return filterMemoryBrief(result, identity);
+    }
+    case "mem_session_summary": {
+      const project = authorizedScope(identity, stringArg(args.project));
+      return saveSessionSummary(project, stringArg(args.summary));
+    }
     case "mem_list_projects":
-      return listProjects();
-    case "mem_tree":
-      return memoryTree(stringArg(args.prefix, ""));
-    case "mem_pin":
-      return pinMemory(numberArg(args.id, 0));
-    case "mem_unpin":
-      return unpinMemory(numberArg(args.id, 0));
-    case "mem_promote_preview":
-      return previewMemoryPromotion(numberArg(args.id, 0), stringArg(args.ancestor));
-    case "mem_promote":
-      return promoteMemory(numberArg(args.id, 0), stringArg(args.ancestor), stringArg(args.confirm));
+      return listProjects().filter((entry) => isAuthorizedScope(identity, entry.project));
+    case "mem_tree": {
+      const requested = stringArg(args.prefix, "");
+      const prefix = identity ? authorizedScope(identity, requested || identity.project) : requested;
+      return memoryTree(prefix).filter((entry) => isAuthorizedScope(identity, entry.path));
+    }
+    case "mem_pin": {
+      const id = numberArg(args.id, 0);
+      assertAuthorizedObservation(identity, getObservation(id));
+      return pinMemory(id);
+    }
+    case "mem_unpin": {
+      const id = numberArg(args.id, 0);
+      assertAuthorizedObservation(identity, getObservation(id));
+      return unpinMemory(id);
+    }
+    case "mem_promote_preview": {
+      const id = numberArg(args.id, 0);
+      assertAuthorizedObservation(identity, getObservation(id));
+      return previewMemoryPromotion(id, authorizedScope(identity, stringArg(args.ancestor)));
+    }
+    case "mem_promote": {
+      const id = numberArg(args.id, 0);
+      assertAuthorizedObservation(identity, getObservation(id));
+      return promoteMemory(id, authorizedScope(identity, stringArg(args.ancestor)), stringArg(args.confirm));
+    }
     case "mem_delete_project_preview":
-      return previewProjectDeletion(stringArg(args.project));
+      return previewProjectDeletion(authorizedScope(identity, stringArg(args.project)));
     case "mem_delete_project":
-      return deleteProjectMemory(stringArg(args.project), stringArg(args.confirm));
+      return deleteProjectMemory(authorizedScope(identity, stringArg(args.project)), stringArg(args.confirm));
     case "mem_backup":
+      assertUnboundAdministration(identity);
       return backupMemory();
     case "mem_restore_preview":
+      assertUnboundAdministration(identity);
       return previewMemoryRestore(stringArg(args.backup));
     case "mem_restore":
+      assertUnboundAdministration(identity);
       return restoreMemoryBackup(stringArg(args.backup), stringArg(args.confirm));
     case "mem_inspect_project":
-      return inspectProjectMemory(stringArg(args.project));
-    case "mem_move_preview":
-      return previewMemoryMove(numberArg(args.id, 0), stringArg(args.targetProject));
-    case "mem_move":
-      return moveMemory(numberArg(args.id, 0), stringArg(args.targetProject), stringArg(args.confirm));
+      return inspectProjectMemory(authorizedScope(identity, stringArg(args.project)));
+    case "mem_move_preview": {
+      const id = numberArg(args.id, 0);
+      assertAuthorizedObservation(identity, getObservation(id));
+      return previewMemoryMove(id, authorizedScope(identity, stringArg(args.targetProject)));
+    }
+    case "mem_move": {
+      const id = numberArg(args.id, 0);
+      assertAuthorizedObservation(identity, getObservation(id));
+      return moveMemory(id, authorizedScope(identity, stringArg(args.targetProject)), stringArg(args.confirm));
+    }
     case "malahor_hook_check":
       return checkMalahorHooks(args);
     default:
       throw new Error(`Unknown tool: ${call.name}`);
   }
+}
+
+function authorizedScope(identity: MemoryRuntimeIdentity | undefined, value: string): string {
+  if (!identity) return value;
+  if (!value.trim()) throw memoryAccessDenied();
+
+  const owner = normalizeProject(identity.project);
+  const scope = normalizeProject(value);
+  if (scope === "global" || (scope !== owner && !scope.startsWith(`${owner}/`))) {
+    throw memoryAccessDenied();
+  }
+  return scope;
+}
+
+function isAuthorizedScope(identity: MemoryRuntimeIdentity | undefined, value: string): boolean {
+  if (!identity) return true;
+  const owner = normalizeProject(identity.project);
+  const scope = normalizeProject(value);
+  return scope !== "global" && (scope === owner || scope.startsWith(`${owner}/`));
+}
+
+function assertAuthorizedObservation(identity: MemoryRuntimeIdentity | undefined, observation: Observation | null): void {
+  if (observation && !isAuthorizedScope(identity, observation.project)) throw memoryAccessDenied();
+}
+
+function filterObservations(observations: Observation[], identity: MemoryRuntimeIdentity | undefined): Observation[] {
+  return observations.filter((observation) => isAuthorizedScope(identity, observation.project));
+}
+
+function filterMemoryContext(
+  context: ReturnType<typeof contextForProject>,
+  identity: MemoryRuntimeIdentity | undefined,
+): ReturnType<typeof contextForProject> {
+  if (!identity) return context;
+  const observations = filterObservations(context.observations, identity);
+  const latestSession = context.latestSession && isAuthorizedScope(identity, context.latestSession.project)
+    ? context.latestSession : null;
+  const omittedPinnedIds = context.omittedPinnedIds.filter((id) => {
+    const observation = getObservation(id);
+    return Boolean(observation && isAuthorizedScope(identity, observation.project));
+  });
+  const budgetUsed = observations.reduce((total, observation) => total + JSON.stringify(observation).length, 0)
+    + (latestSession ? JSON.stringify(latestSession).length : 0);
+  return {
+    ...context,
+    observations,
+    latestSession,
+    scopeChain: context.scopeChain.filter((scope) => isAuthorizedScope(identity, scope)),
+    ...(context.rollupScopes
+      ? { rollupScopes: context.rollupScopes.filter((scope) => isAuthorizedScope(identity, scope)) }
+      : {}),
+    budgetUsed,
+    omittedPinnedIds,
+  };
+}
+
+type BriefWithBudget = ReturnType<typeof memoryBrief> & {
+  budgetUsed?: number;
+  omittedPinnedIds?: number[];
+  rollupScopes?: string[];
+};
+
+function filterMemoryBrief(
+  brief: ReturnType<typeof memoryBrief>,
+  identity: MemoryRuntimeIdentity | undefined,
+): ReturnType<typeof memoryBrief> {
+  if (!identity) return brief;
+  const result = brief as BriefWithBudget;
+  const observations = filterObservations(result.observations, identity);
+  const relatedMemories = result.relatedMemories.filter((observation) => isAuthorizedScope(identity, observation.project));
+  const latestSession = result.latestSession && isAuthorizedScope(identity, result.latestSession.project)
+    ? result.latestSession : null;
+  const output: BriefWithBudget = {
+    ...result,
+    scope: result.scope && isAuthorizedScope(identity, result.scope) ? result.scope : null,
+    scopeChain: result.scopeChain.filter((scope) => isAuthorizedScope(identity, scope)),
+    scopeSuggestions: result.scopeSuggestions.filter((item) => isAuthorizedScope(identity, item.scope)),
+    observations,
+    relatedMemories,
+    latestSession,
+  };
+  if (result.rollupScopes) {
+    output.rollupScopes = result.rollupScopes.filter((scope) => isAuthorizedScope(identity, scope));
+  }
+  if (result.omittedPinnedIds) {
+    output.omittedPinnedIds = result.omittedPinnedIds.filter((id) => {
+      const observation = getObservation(id);
+      return Boolean(observation && isAuthorizedScope(identity, observation.project));
+    });
+  }
+  if (result.budgetUsed !== undefined) {
+    output.budgetUsed = observations.reduce((total, observation) => total + JSON.stringify(observation).length, 0)
+      + relatedMemories.reduce((total, observation) => total + JSON.stringify(observation).length, 0)
+      + (latestSession ? JSON.stringify(latestSession).length : 0);
+  }
+  return output;
+}
+
+function assertUnboundAdministration(identity: MemoryRuntimeIdentity | undefined): void {
+  if (identity) {
+    throw new Error("La administracion global de memoria requiere una autoridad separada del proyecto vinculado.");
+  }
+}
+
+function memoryAccessDenied(): Error {
+  return new Error("Acceso de memoria denegado: el recurso no pertenece a la identidad de proyecto autorizada.");
 }
 
 function checkMalahorHooks(args: Record<string, unknown>): unknown {

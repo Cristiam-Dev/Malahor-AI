@@ -578,8 +578,11 @@ async function registerMcpTransform(
 ): Promise<{ ok: boolean; warnings: string[] }> {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings: string[] = [];
+  const memoryProject = memoryProjectForLocation(paths, cwd, canonical);
   if (!fs.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
+  } else if (!memoryProject) {
+    warnings.push("mcp.mnemo-project-unresolved");
   }
   if (!fs.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
@@ -594,7 +597,14 @@ async function registerMcpTransform(
             ...(existingMnemo ?? {}),
             type: "local",
             command: ["node", paths.mnemoIndex],
-            disabled: false,
+            environment: memoryProject ? {
+              ...(isRecord(existingMnemo?.environment) ? existingMnemo.environment : {}),
+              MALAHOR_MEMORY_BOUND: "1",
+              MALAHOR_MEMORY_PROJECT: memoryProject,
+            } : {
+              MALAHOR_MEMORY_BOUND: "1",
+            },
+            disabled: !memoryProject,
             codemode: false,
           });
         } else {
@@ -665,6 +675,44 @@ async function registerMcpTransform(
 function isManagedCodegraph(config: McpServerConfig, paths: MalahorPaths): boolean {
   return config.type === "local" && Array.isArray(config.command)
     && config.command[0] === "node" && config.command[1] === path.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+}
+
+function memoryProjectForLocation(paths: MalahorPaths, cwd: string, canonical?: string): string | undefined {
+  const roots = registeredProjectRoots(paths.projectsFile)
+    .sort((left, right) => right.root.length - left.root.length);
+  const canonicalValue = canonical?.trim();
+  const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
+  const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
+  const byCanonicalPath = canonicalValue && path.isAbsolute(canonicalValue)
+    ? roots.find((entry) => pathInside(canonicalValue, entry.root))
+    : undefined;
+  const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey]
+    .filter((value): value is string => Boolean(value)));
+  if (candidates.size > 1) return undefined;
+  if (candidates.size === 1) return validMemoryProject([...candidates][0]);
+  if (roots.length === 1) return validMemoryProject(roots[0]?.canonicalKey);
+  if (roots.length > 1) return undefined;
+  return validMemoryProject(resolveProject(cwd).canonicalKey);
+}
+
+function validMemoryProject(value: string | undefined): string | undefined {
+  const project = value?.trim();
+  if (!project || project === "global" || /[\0\r\n\\]/.test(project)
+    || project.startsWith("/") || project.endsWith("/") || project.includes("//")) return undefined;
+  return project;
+}
+
+function canonicalLocation(value: string): string {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
+function pathInside(value: string, root: string): boolean {
+  const relative = path.relative(canonicalLocation(root), canonicalLocation(value));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function isMalahorMnemo(config: McpServerConfig, paths: MalahorPaths): boolean {

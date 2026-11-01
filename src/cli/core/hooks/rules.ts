@@ -776,7 +776,7 @@ function toolPolicyGuard(context: HookContext): HookViolation[] {
       id: "MAL-HOOK-CODE-MODE",
       decision: "deny",
       message: `Code Mode/REPL no mediable: ${tool}`,
-      fix: "Usa tools directas que pasen por permission/tool/shell hooks; Code Mode queda bloqueado hasta T-5.5.5.",
+      fix: "Usa tools directas que pasen por permission/tool/shell hooks; Code Mode permanece bloqueado sin mediacion verificable.",
     });
     return violations;
   }
