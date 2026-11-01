@@ -11,7 +11,7 @@ import {
 const LEGACY_MAPPINGS = [
   { from: "mnemo", to: "memory", count: 1 },
   { from: "mnemo+graphify", to: "memory+codegraph", count: 1 },
-  { from: "mnemo+graphify+obsidian", to: "memory+codegraph+obsidian", count: 1 },
+  { from: "mnemo+graphify+obsidian", to: "memory+codegraph", count: 1 },
 ] as const;
 
 interface Fixture {
@@ -30,7 +30,7 @@ afterEach(() => {
   for (const fixture of fixtures.splice(0)) fs.rmSync(fixture, { recursive: true, force: true });
 });
 
-function fixture(): Fixture {
+function fixture(options: { hookCompatibleRegistry?: boolean } = {}): Fixture {
   const root = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-context-migration-"));
   fixtures.push(root);
   const home = path.join(root, "malahor-home");
@@ -74,15 +74,17 @@ function fixture(): Fixture {
       note: "already-modern",
     },
     "future-level": {
-      context: "memory+semantic-index",
+      context: options.hookCompatibleRegistry ? "memory" : "memory+semantic-index",
       roots: [path.join(root, "future")],
       opaque: { doNotInterpret: [1, { nested: true }] },
     },
     "entry-without-context": {
+      ...(options.hookCompatibleRegistry ? { context: "memory" } : {}),
       roots: [path.join(root, "unclassified")],
       owner: { team: "platform", flags: [true, false] },
     },
     "registry-metadata": {
+      ...(options.hookCompatibleRegistry ? { context: "memory" } : {}),
       schema: 17,
       generatedBy: "foreign-tool",
       payload: [{ key: "context", value: "mnemo" }, "literal"],
@@ -109,13 +111,16 @@ function expectedRegistry(source: Record<string, unknown>): Record<string, unkno
   const expected = JSON.parse(JSON.stringify(source)) as Record<string, Record<string, unknown>>;
   expected["legacy-memory"].context = "memory";
   expected["legacy-codegraph"].context = "memory+codegraph";
-  expected["legacy-obsidian"].context = "memory+codegraph+obsidian";
+  expected["legacy-obsidian"].context = "memory+codegraph";
   return expected;
 }
 
 function expectOnlyMappedContexts(before: Record<string, unknown>, after: Record<string, unknown>): void {
   const expected = expectedRegistry(before);
   expect(after).toEqual(expected);
+  expect((after["legacy-obsidian"] as Record<string, unknown>).obsidian).toEqual(
+    (before["legacy-obsidian"] as Record<string, unknown>).obsidian,
+  );
   expect(Object.keys(after)).toEqual(Object.keys(before));
   for (const key of Object.keys(before)) {
     if (typeof before[key] === "object" && before[key] !== null && !Array.isArray(before[key])) {
@@ -155,7 +160,7 @@ describe("migración de niveles legacy en projects.json", () => {
       changes: [
         { project: "legacy-memory", from: "mnemo", to: "memory" },
         { project: "legacy-codegraph", from: "mnemo+graphify", to: "memory+codegraph" },
-        { project: "legacy-obsidian", from: "mnemo+graphify+obsidian", to: "memory+codegraph+obsidian" },
+        { project: "legacy-obsidian", from: "mnemo+graphify+obsidian", to: "memory+codegraph" },
       ],
     });
     expect(preview.version).toMatch(/^[a-f0-9]{64}$/);
@@ -420,7 +425,7 @@ describe("migración de niveles legacy en projects.json", () => {
   });
 
   test("CLI context migrate previsualiza y exige TTY o --yes para aplicar", () => {
-    const current = fixture();
+    const current = fixture({ hookCompatibleRegistry: true });
     const configFile = path.join(current.home, "config.jsonc");
     const opencodeDir = path.join(current.root, "opencode");
     fs.mkdirSync(opencodeDir, { recursive: true, mode: 0o700 });

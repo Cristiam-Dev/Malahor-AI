@@ -7,6 +7,7 @@ import { runCodegraph } from "../../src/cli/commands/codegraph";
 import { runMemory } from "../../src/cli/commands/memory";
 import { indexCodegraph, statusCodegraph } from "../../src/cli/core/codegraph-index";
 import {
+  CODEGRAPH_RELEASE,
   codegraphBinary,
   codegraphEnvironment,
   codegraphIndex,
@@ -205,6 +206,7 @@ function writeInitialConfig(malahorHome: string): void {
 }
 
 function seedOpenCodeSdk(opencodeDir: string): void {
+  writeJson(path.join(opencodeDir, "opencode.jsonc"), { update: "disable" });
   writeJson(path.join(opencodeDir, "package.json"), { dependencies: { [OPENCODE_SDK_PACKAGE]: OPENCODE_SDK_PIN } });
   const packagePath = path.join(opencodeDir, "node_modules", ...OPENCODE_SDK_PACKAGE.split("/"), "package.json");
   writeJson(packagePath, { name: OPENCODE_SDK_PACKAGE, version: OPENCODE_SDK_PIN });
@@ -290,7 +292,7 @@ async function exerciseCodegraph(root: string, workspace: string, malahorHome: s
   const paths = resolvePaths(process.env, workspace);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
-    const expected = `https://github.com/grahambrooks/symgraph/releases/download/v${archive.version}/${archive.name}`;
+    const expected = `https://github.com/grahambrooks/symgraph/releases/download/${CODEGRAPH_RELEASE}/${archive.name}`;
     if (String(input) !== expected) throw new Error(`Acceso de red no autorizado: ${String(input)}`);
     return new Response(bytes, { status: 200, headers: { "content-length": String(bytes.length) } });
   };
@@ -495,12 +497,16 @@ function wildcard(pattern: string, value: string): boolean {
 }
 
 function normalizeAgents(payload: unknown): RuntimeAgent[] {
-  const source = Array.isArray(payload)
-    ? payload.map((item) => [undefined, item] as const)
-    : typeof payload === "object" && payload !== null && Array.isArray((payload as { agents?: unknown }).agents)
-      ? ((payload as { agents: unknown[] }).agents.map((item) => [undefined, item] as const))
-      : typeof payload === "object" && payload !== null
-        ? Object.entries(payload)
+  const normalized = typeof payload === "object" && payload !== null
+    && Array.isArray((payload as { data?: unknown }).data)
+    ? (payload as { data: unknown[] }).data
+    : payload;
+  const source = Array.isArray(normalized)
+    ? normalized.map((item) => [undefined, item] as const)
+    : typeof normalized === "object" && normalized !== null && Array.isArray((normalized as { agents?: unknown }).agents)
+      ? ((normalized as { agents: unknown[] }).agents.map((item) => [undefined, item] as const))
+      : typeof normalized === "object" && normalized !== null
+        ? Object.entries(normalized)
         : [];
   return source.flatMap(([key, value]) => {
     if (typeof value !== "object" || value === null) return [];

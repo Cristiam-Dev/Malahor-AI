@@ -25,7 +25,7 @@ import { MALAHOR_COMMAND_FILES, syncOpenCodeCommands } from "../core/opencode-co
 import { hasDuplicateConfigs } from "../core/opencode-config/preview";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths, type MalahorPackagePaths } from "../core/package";
-import { isSandbox, type MalahorPaths } from "../core/paths";
+import { ensurePrivateDirectory, isSandbox, privateDirectoryReady, type MalahorPaths } from "../core/paths";
 import { pluginHealthChecks, type PluginHealthCheck } from "../core/plugin-health";
 import { checkDocsProject, initializeDocsProject, resolveDocsProject } from "../../docs/resolver";
 
@@ -70,7 +70,7 @@ function renderReport(
   checks.push({ name: "OpenCode command", ok: detection.commands.opencode, message: detection.commands.opencode ? "found" : "not found", critical: true });
   checks.push(checkOpenCodeHost(host));
   checks.push({ name: "Malahor home", ok: fs.existsSync(paths.malahorHome), message: paths.malahorHome, critical: true });
-  checks.push({ name: "Mnemo dir", ok: fs.existsSync(paths.mnemoDir), message: paths.mnemoDir, critical: true });
+  checks.push({ name: "Mnemo dir", ok: privateDirectoryReady(paths.mnemoDir), message: `${paths.mnemoDir} (directorio privado 0700)`, critical: true });
   checks.push({ name: "Mnemo index", ok: fs.existsSync(paths.mnemoIndex), message: paths.mnemoIndex, critical: true });
   checks.push({ name: "Docs runtime dir", ok: fs.existsSync(paths.docsDir), message: paths.docsDir, critical: true });
   checks.push({ name: "Docs MCP index", ok: fs.existsSync(paths.docsIndex), message: paths.docsIndex, critical: true });
@@ -174,7 +174,12 @@ function selfHeal(
 ): string[] {
   const repairs: string[] = [];
 
-  const missingDirs = [paths.mnemoDir, paths.docsDir, paths.assetsDir, paths.vaultDir, paths.opencodeDir].filter((dir) => !fs.existsSync(dir));
+  if (!privateDirectoryReady(paths.mnemoDir)) {
+    if (!dryRun) ensurePrivateDirectory(paths.mnemoDir);
+    repairs.push(`${dryRun ? "repararia" : "reparado"} directorio privado Mnemo: ${paths.mnemoDir}`);
+  }
+
+  const missingDirs = [paths.docsDir, paths.assetsDir, paths.vaultDir, paths.opencodeDir].filter((dir) => !fs.existsSync(dir));
   if (missingDirs.length > 0) {
     if (!dryRun) {
       for (const dir of missingDirs) {
@@ -258,7 +263,7 @@ function repairInstallFiles(
 
   if (!fs.existsSync(paths.mnemoIndex) && fs.existsSync(packagePaths.mnemoBuild)) {
     if (!dryRun) {
-      fs.mkdirSync(paths.mnemoDir, { recursive: true });
+      ensurePrivateDirectory(paths.mnemoDir);
       fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
     }
     repairs.push(`${dryRun ? "restauraria" : "restaurado"} Mnemo index`);

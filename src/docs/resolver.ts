@@ -5,10 +5,10 @@ import path from "node:path";
 import {
   loadProjectsFile,
   resolveContextTarget,
-  type ProjectAliases,
   type ProjectsFile,
 } from "../cli/core/context";
 import type { MalahorPaths } from "../cli/core/paths";
+import type { ProjectAliases } from "../cli/core/project";
 
 export const DOCS_PROJECT_AREAS = ["Product", "Design", "SDD", "Discovery"] as const;
 const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;

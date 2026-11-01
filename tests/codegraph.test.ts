@@ -552,7 +552,7 @@ test("doctor sin self-heal avisa CodeGraph ausente sin bloquear un host V2 aisla
   writeJson(path.join(repo, "package.json"), { name: "malahor-ai" });
   fs.mkdirSync(path.join(repo, "assets"));
   writeJson(paths.projectsFile, { malahor: { context: "memory+codegraph", roots: [repo], defaultRoot: repo } });
-  fs.mkdirSync(paths.mnemoDir);
+  fs.mkdirSync(paths.mnemoDir, { mode: 0o700 });
   fs.writeFileSync(paths.mnemoIndex, "// synthetic Mnemo stub\n");
   fs.mkdirSync(paths.docsDir);
   fs.writeFileSync(paths.docsIndex, "// synthetic Docs stub\n");

@@ -28,7 +28,7 @@ import { assertAgentAssets, describeAgentSync, syncManagedAgents } from "../core
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
 import { resolvePackagePaths } from "../core/package";
-import { isSandbox, type MalahorPaths } from "../core/paths";
+import { ensurePrivateDirectory, isSandbox, type MalahorPaths } from "../core/paths";
 import { resolveProject } from "../core/project";
 import type { MalahorPackagePaths } from "../core/package";
 import { validateInstallation } from "../core/validate";
@@ -92,7 +92,7 @@ export async function runInstall(options: InstallOptions): Promise<void> {
   assertAgentAssets(packagePaths.assetsDir, host.kind);
 
   if (!options.dryRun) {
-    fs.mkdirSync(paths.mnemoDir, { recursive: true });
+    ensurePrivateDirectory(paths.mnemoDir);
     fs.mkdirSync(paths.docsDir, { recursive: true });
     fs.mkdirSync(paths.assetsDir, { recursive: true });
     fs.mkdirSync(paths.vaultDir, { recursive: true });

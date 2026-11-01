@@ -66,6 +66,29 @@ export function isSandbox(paths: MalahorPaths): boolean {
   return includesSandbox(paths.malahorHome) || includesSandbox(paths.opencodeDir);
 }
 
+export function privateDirectoryReady(directory: string): boolean {
+  try {
+    const stat = fs.lstatSync(directory);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    if (process.getuid && stat.uid !== process.getuid()) return false;
+    return process.platform === "win32" || (stat.mode & 0o777) === 0o700;
+  } catch {
+    return false;
+  }
+}
+
+export function ensurePrivateDirectory(directory: string): void {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`El directorio privado debe ser real y no un symlink: ${directory}`);
+  }
+  if (process.getuid && stat.uid !== process.getuid()) {
+    throw new Error(`El directorio privado pertenece a otro usuario: ${directory}`);
+  }
+  if (process.platform !== "win32") fs.chmodSync(directory, 0o700);
+}
+
 function includesSandbox(value: string): boolean {
   return value.replaceAll("\\", "/").includes("/.sandbox/");
 }

@@ -1,11 +1,76 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
-import { resolvePaths } from "../src/cli/core/paths";
+import {
+  ensurePrivateDirectory,
+  privateDirectoryReady,
+  resolvePaths,
+} from "../src/cli/core/paths";
+
+const fixtures: string[] = [];
+
+afterEach(() => {
+  for (const fixture of fixtures.splice(0)) fs.rmSync(fixture, { recursive: true, force: true });
+});
 
 function fixtureRoot(): string {
-  return fs.mkdtempSync(path.join("/tmp/opencode", "malahor-paths-"));
+  const root = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-paths-"));
+  fixtures.push(root);
+  return root;
 }
+
+describe("private directories", () => {
+  test("crea un directorio privado listo para usar", () => {
+    const directory = path.join(fixtureRoot(), "mnemo", "data");
+
+    expect(privateDirectoryReady(directory)).toBe(false);
+    ensurePrivateDirectory(directory);
+
+    expect(fs.lstatSync(directory).isDirectory()).toBe(true);
+    expect(privateDirectoryReady(directory)).toBe(true);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(directory).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  test("repara un directorio POSIX con permisos permisivos", () => {
+    const directory = path.join(fixtureRoot(), "mnemo");
+    fs.mkdirSync(directory, { mode: 0o777 });
+
+    if (process.platform !== "win32") {
+      fs.chmodSync(directory, 0o777);
+      expect(privateDirectoryReady(directory)).toBe(false);
+    }
+
+    ensurePrivateDirectory(directory);
+
+    expect(privateDirectoryReady(directory)).toBe(true);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(directory).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  test("rechaza un symlink sin alterar el directorio objetivo", () => {
+    const root = fixtureRoot();
+    const target = path.join(root, "target");
+    const link = path.join(root, "mnemo");
+    const sentinel = path.join(target, "sentinel.txt");
+    fs.mkdirSync(target, { mode: 0o755 });
+    fs.writeFileSync(sentinel, "intacto\n", "utf8");
+    fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+    const targetMode = fs.statSync(target).mode & 0o777;
+
+    expect(privateDirectoryReady(link)).toBe(false);
+    expect(() => ensurePrivateDirectory(link)).toThrow(/real|symlink/i);
+
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("intacto\n");
+    expect(fs.readdirSync(target)).toEqual(["sentinel.txt"]);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(target).mode & 0o777).toBe(targetMode);
+    }
+  });
+});
 
 describe("path resolution", () => {
   test("detecta el directorio real de OpenCode desde la API v2", () => {
