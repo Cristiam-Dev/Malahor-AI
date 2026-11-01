@@ -15,6 +15,12 @@ export interface InstructionsSyncResult {
   backup: BackupResult | null;
 }
 
+export interface InstructionsRemovalResult {
+  action: "removed" | "would-remove" | "kept-foreign" | "nothing-to-remove";
+  destination: string;
+  backup: BackupResult | null;
+}
+
 export function instructionsState(filePath: string): InstructionsState {
   if (!fs.existsSync(filePath)) {
     return "missing";
@@ -60,6 +66,20 @@ export function describeInstructionsSync(result: InstructionsSyncResult, dryRun:
     case "kept-foreign":
       return "AGENTS.md: kept (no gestionado por Malahor; no se toca)";
   }
+}
+
+export function removeManagedInstructions(
+  destination: string,
+  backupsDir: string,
+  dryRun: boolean,
+): InstructionsRemovalResult {
+  const state = instructionsState(destination);
+  if (state === "missing") return { action: "nothing-to-remove", destination, backup: null };
+  if (state === "foreign") return { action: "kept-foreign", destination, backup: null };
+
+  const backup = backupFile(destination, backupsDir, dryRun);
+  if (!dryRun) fs.unlinkSync(destination);
+  return { action: dryRun ? "would-remove" : "removed", destination, backup };
 }
 
 // Mensaje comun para instalaciones que todavia tienen el OPENCODE.md de versiones previas

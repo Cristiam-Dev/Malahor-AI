@@ -78,8 +78,9 @@ function expectProgressiveDisclosureContract(text: string): void {
   expect(text).toMatch(/(?:divulgaci[oó]n progresiva|resumen[\s\S]{0,240}anexo t[eé]cnico)/i);
   expect(text).toContain("/malahor-plan detalles");
   expect(text).toMatch(
-    /(?:riesgo alto|categor[ií]a(?:s)? cr[ií]tica(?:s)?)[\s\S]{0,300}(?:visible|abiert[oa]|expandid[oa])[\s\S]{0,120}(?:por defecto|sin interacci[oó]n)/i,
+    /(?:riesgo alto|categor[ií]a(?:s)? cr[ií]tica(?:s)?)[\s\S]{0,400}(?:riesgos?|consecuencias?|controles?)[\s\S]{0,180}visible/i,
   );
+  expect(text).toMatch(/(?:comandos|rutas|identidad|digest)[\s\S]{0,260}(?:solo|[uú]nicamente)[\s\S]{0,180}\/malahor-plan detalles/i);
 }
 
 function expectLevelZeroContract(text: string): void {
@@ -182,6 +183,7 @@ describe("scaffold del plugin", () => {
       expect(text).toMatch(/\bgo\b/i);
       expect(text).toMatch(/\bimplementa\b/i);
       expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
+      expect(text).toMatch(/malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i);
       expectProgressiveDisclosureContract(text);
       expectLevelZeroContract(text);
       expect(text).toMatch(/documentaci[oó]n mediante docs_\*/i);
@@ -195,6 +197,7 @@ describe("scaffold del plugin", () => {
     const agent = fs.readFileSync(path.resolve(import.meta.dir, "..", "assets", "opencode", "agents", "v2", "malahor.md"), "utf8");
     expectProgressiveDisclosureContract(agent);
     expectLevelZeroContract(agent);
+    expect(agent).toMatch(/malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i);
     const commit = fs.readFileSync(path.resolve(import.meta.dir, "..", "assets", "opencode", "commands", "malahor-commit.md"), "utf8");
     expect(commit).toMatch(/nivel 0[\s\S]{0,300}\bgo\b/i);
     expect(commit).toMatch(/(?:sin|no pidas) (?:otra|nueva) confirmaci[oó]n/i);

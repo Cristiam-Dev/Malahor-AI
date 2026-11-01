@@ -91,7 +91,10 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toContain("Obsidian MCP ni fallback al repositorio");
     expect(system[0]?.text).toContain("Qué debes hacer ahora");
     expect(system[0]?.text).toMatch(/no incrusta IDs, comandos ni el anexo técnico/i);
+    expect(system[0]?.text).toMatch(/riesgo alto[\s\S]*controles[\s\S]*visible/i);
+    expect(system[0]?.text).toMatch(/(?:comandos|rutas|identidad|digest)[\s\S]*(?:solo|únicamente)[\s\S]*\/malahor-plan detalles/i);
     expect(system[0]?.text).toMatch(/ctx\.storage de OpenCode[\s\S]*independientes de Mnemo/i);
+    expect(system[0]?.text).toMatch(/malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i);
   });
 
   test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {

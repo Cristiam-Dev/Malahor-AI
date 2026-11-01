@@ -5577,8 +5577,9 @@ Intervención y reparación
 - Cada plan declara nivel 0, 1 o 2 dentro de su payload firmado. Nivel 0 usa un plan mínimo visible y conserva la aprobación posterior go: nunca ejecuta en el turno de presentación ni elimina malahor_run.
 - Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentación ceremonial. Tras go ejecuta el alcance aprobado en una sola pasada y usa validación enfocada; un commit conserva excepcionalmente diagnóstico, tests, build y hooks completos.
 - Usa divulgación progresiva: el resumen debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto, riesgo y “Qué debes hacer ahora” narrado en lenguaje técnico comprensible.
-- En riesgo bajo o medio sin categorías críticas, la vista normal no incrusta IDs, comandos ni el anexo técnico; el detalle exacto se consulta con /malahor-plan detalles. Un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción mantiene ese detalle completo visible y abierto por defecto, sin interacción adicional.
+- La vista normal no incrusta IDs, comandos ni el anexo técnico; tampoco muestra rutas exactas. Ante un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran únicamente mediante /malahor-plan detalles.
 - En asistente y ejecutor, despues de malahor_plan copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno. Una traza u output tecnico del tool en background no cuenta como presentacion. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
+- malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible, pero debe coincidir exactamente y no sustituye las validaciones de scope, fase, turno o revision.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
 - Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
@@ -7404,7 +7405,7 @@ function renderSummaryView(state) {
   if (planLevel(state) === 0)
     return renderLevelZeroSummary(state);
   const presentation = state.plan.presentation;
-  const critical = requiresVisibleDetails(presentation.risk);
+  const critical = requiresReinforcedControls(presentation.risk);
   const lines = [
     planSummaryHeading(state),
     `Estado: ${phaseStatus(state)}`,
@@ -7421,9 +7422,10 @@ function renderSummaryView(state) {
   if (presentation.impact.length > 0) {
     lines.push("", "## Impacto", ...impactLines(presentation.impact));
   }
-  lines.push("", "## Riesgo", `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`, `- ${safeText(presentation.risk.summary)}`, "", "## Qué debes hacer ahora", nextAction(state), "", critical ? "Este plan contiene riesgo alto o una categoría crítica; por eso el detalle técnico se muestra completo antes de aprobar." : "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.");
+  lines.push("", "## Riesgo", `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`, `- ${safeText(presentation.risk.summary)}`);
   if (critical)
-    lines.push("", "<details open>", "<summary>Ver detalle técnico</summary>", "", ...technicalBody(state), "", "</details>");
+    lines.push("", ...reinforcedControlLines(presentation.risk));
+  lines.push("", "## Qué debes hacer ahora", nextAction(state), "", "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.");
   return lines.join(`
 `);
 }
@@ -7591,8 +7593,28 @@ function riskLevelLabel(level) {
     return "medio";
   return "alto";
 }
-function requiresVisibleDetails(risk) {
+function requiresReinforcedControls(risk) {
   return risk.level === "high" || risk.categories.length > 0;
+}
+function reinforcedControlLines(risk) {
+  const lines = [
+    "## Controles reforzados",
+    `- ${safeText(risk.details)}`
+  ];
+  if (risk.categories.length > 0) {
+    lines.push(`- **Áreas sensibles:** ${risk.categories.map(riskCategoryLabel).join(", ")}.`);
+  }
+  lines.push("- La ejecución se detendrá si cambia el alcance o falla un guardrail obligatorio.");
+  return lines;
+}
+function riskCategoryLabel(category) {
+  if (category === "security")
+    return "seguridad";
+  if (category === "data")
+    return "datos";
+  if (category === "architecture")
+    return "arquitectura";
+  return "destrucción";
 }
 function safeJson(value) {
   return JSON.stringify(value).replace(/[<>&`]/gu, (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`);
@@ -8621,14 +8643,14 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
     });
     editor.add({
       name: "run",
-      description: "En un turno posterior al plan, solicita la segunda confirmacion del asistente o la aprobacion previa del ejecutor. No ejecuta herramientas por si misma.",
-      input: { type: "object", properties: { digest: { type: "string" } }, required: ["digest"], additionalProperties: false },
+      description: "En un turno posterior al plan, resuelve el plan activo firmado y solicita la segunda confirmacion del asistente o la aprobacion previa del ejecutor. El digest explicito es opcional y solo se conserva por compatibilidad. No ejecuta herramientas por si misma.",
+      input: { type: "object", properties: { digest: { type: "string" } }, additionalProperties: false },
       options: { namespace: "malahor", codemode: false },
       execute: async (value, call) => {
         const resolved = await requireScope(call, options);
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede solicitar ejecucion.");
-        const digest = text(value.digest);
+        const digest = await resolveRunDigest(value, storage, resolved.scope, authority);
         const state = await requestPlanExecution(resolved.scope, digest, call.messageID, planningAdapter(storage, approvals, call, authority), authority);
         return { content: renderPlan(state), metadata: {
           kind: "malahor.plan.state",
@@ -8707,11 +8729,12 @@ async function injectPlanningInstructions(input, options, storage, authority = f
     "Usa nivel 0 solo con riesgo bajo, como maximo un archivo existente y sin categorias criticas, dependencias, infraestructura, instalacion, publicacion, despliegue ni destruccion; si el alcance crece, presenta nivel 1 o 2.",
     "Commit nivel 0: tras go revisa status/diff y ejecuta diagnostico, tests, build, stage exacto, precommit, hooks y revalidacion; no pide otra confirmacion salvo fallo o cambio material.",
     "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto, riesgo y una seccion 'Que debes hacer ahora' narrada en lenguaje tecnico comprensible.",
-    "En riesgo bajo o medio sin categorias criticas, no incrustes IDs, comandos ni el anexo tecnico en la vista normal; el detalle exacto se consulta con /malahor-plan detalles.",
-    "Un riesgo alto o una categoria critica mantiene el anexo completo visible y abierto por defecto, sin interaccion adicional.",
+    "La vista normal no incrusta IDs, comandos ni el anexo tecnico; tampoco muestra rutas exactas.",
+    "Ante un riesgo alto o una categoria critica, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran unicamente mediante /malahor-plan detalles.",
     "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
     "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
     "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
+    "malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible y debe coincidir exactamente.",
     "Un go previo a la presentacion no aprueba un plan todavia no visto.",
     "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
     "La autorizacion no caduca por tiempo. Pausa, reanuda, revoca o consulta estado con malahor_plan_control o /malahor-plan.",
@@ -8766,6 +8789,17 @@ async function readPlan(storage, sessionID, authority = fallbackAuthority) {
   } catch {
     return;
   }
+}
+async function resolveRunDigest(value, storage, scope, authority) {
+  if (!isRecord7(value))
+    throw new Error("Entrada de malahor_run no evaluable.");
+  const provided = value.digest;
+  if (provided !== undefined)
+    return text(provided);
+  const active = await readPlan(storage, scope.sessionID, authority);
+  if (!active)
+    throw new Error("No hay un plan activo firmado para solicitar ejecucion.");
+  return active.digest;
 }
 async function ask(port, call, action, digest) {
   await port.assert({

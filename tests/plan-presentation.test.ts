@@ -140,14 +140,6 @@ function mainFlow(markdown: string): string {
   return markdown.split(/<details(?:\s+open)?>/u)[0] ?? markdown;
 }
 
-function technicalSection(markdown: string): string {
-  return markdown.match(/<details(?:\s+open)?>([\s\S]*?)<\/details>/u)?.[1] ?? "";
-}
-
-function isExpanded(markdown: string): boolean {
-  return markdown.includes("<details open>") || !markdown.includes("<details");
-}
-
 function safeJson(value: string): string {
   return JSON.stringify(value).replace(/[<>&`]/gu, (character) =>
     `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`);
@@ -351,7 +343,7 @@ describe("divulgación progresiva del plan", () => {
     const technical = await render(state, "technical");
 
     expect(technical).not.toBe(summary);
-    expect(isExpanded(technical)).toBe(true);
+    expect(technical).toContain("## Detalle técnico");
     expect(technical).toContain(state.planID);
     expect(technical).toContain(state.revision);
     expect(technical).toContain(state.digest);
@@ -359,7 +351,7 @@ describe("divulgación progresiva del plan", () => {
     expect(state.revision).toHaveLength(32);
   });
 
-  test("riesgo alto o cualquier categoría crítica deja información y anexo visibles por defecto", async () => {
+  test("riesgo alto o cualquier categoría crítica deja controles humanos visibles y el anexo bajo demanda", async () => {
     const criticalRisks: Array<[string, TargetPresentation["risk"]]> = [
       ["high", { ...presentation().risk, level: "high" }],
       ...(["security", "data", "architecture", "destructive"] as RiskCategory[]).map((category) => [
@@ -370,11 +362,19 @@ describe("divulgación progresiva del plan", () => {
     for (const [name, risk] of criticalRisks) {
       const state = renderState({ mode: "executor", presentation: { risk }, dependencies: [] });
       const markdown = await render(state);
-      expect(isExpanded(markdown)).toBe(true);
+      const technical = await render(state, "technical");
+      expect(markdown).not.toContain("<details");
+      expect(markdown).toContain("## Controles reforzados");
       expect(markdown).toContain(risk.summary);
       expect(markdown).toContain(risk.details);
-      expect(markdown).toContain(state.digest);
-      expect(markdown).toContain(`- shell: ${safeJson("bun test tests/planning.test.ts")}`);
+      expect(markdown).toContain("/malahor-plan detalles");
+      expect(markdown).not.toContain(state.planID);
+      expect(markdown).not.toContain(state.revision);
+      expect(markdown).not.toContain(state.digest);
+      expect(markdown).not.toContain("/repo/tests/planning.test.ts");
+      expect(markdown).not.toContain("bun test tests/planning.test.ts");
+      expect(technical).toContain(state.digest);
+      expect(technical).toContain(`- shell: ${safeJson("bun test tests/planning.test.ts")}`);
     }
   });
 
@@ -387,16 +387,19 @@ describe("divulgación progresiva del plan", () => {
       presentation: { risk: { ...presentation().risk, categories: ["security"], details: hostileRisk } },
     });
     const markdown = await render(state);
-    const annex = technicalSection(markdown);
+    const technical = await render(state, "technical");
     const encoded = safeJson(resource);
-    const actionLines = annex.split("\n").filter((line) => line.startsWith("- shell: "));
+    const actionLines = technical.split("\n").filter((line) => line.startsWith("- shell: "));
 
     expect(actionLines).toEqual([`- shell: ${encoded}`]);
     expect(JSON.parse(actionLines[0]!.slice("- shell: ".length))).toBe(resource);
-    expect(markdown.match(/<\/details>/g) ?? []).toHaveLength(1);
+    expect(markdown).not.toContain("<details");
+    expect(markdown.match(/<\/details>/g) ?? []).toHaveLength(0);
     expect(markdown).toContain("&lt;/details&gt;");
     expect(markdown).toContain("&lt;script&gt;");
     expect(markdown).not.toContain(hostileRisk);
+    expect(markdown).not.toContain(encoded);
+    expect(technical).toContain(encoded);
     expect(markdown).not.toMatch(/^## Aprobado falsamente$/m);
     expect(markdown).not.toMatch(/^```md$/m);
     expect(markdown).not.toContain("</details>\\n## Aprobado falsamente");

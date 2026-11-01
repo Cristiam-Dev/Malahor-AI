@@ -101,7 +101,7 @@ export function renderPlanPresentation(
 function renderSummaryView(state: PlanState): string {
   if (planLevel(state) === 0) return renderLevelZeroSummary(state);
   const presentation = state.plan.presentation;
-  const critical = requiresVisibleDetails(presentation.risk);
+  const critical = requiresReinforcedControls(presentation.risk);
   const lines = [
     planSummaryHeading(state),
     `Estado: ${phaseStatus(state)}`,
@@ -129,22 +129,14 @@ function renderSummaryView(state: PlanState): string {
     "## Riesgo",
     `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
     `- ${safeText(presentation.risk.summary)}`,
+  );
+  if (critical) lines.push("", ...reinforcedControlLines(presentation.risk));
+  lines.push(
     "",
     "## Qué debes hacer ahora",
     nextAction(state),
     "",
-    critical
-      ? "Este plan contiene riesgo alto o una categoría crítica; por eso el detalle técnico se muestra completo antes de aprobar."
-      : "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.",
-  );
-  if (critical) lines.push(
-    "",
-    "<details open>",
-    "<summary>Ver detalle técnico</summary>",
-    "",
-    ...technicalBody(state),
-    "",
-    "</details>",
+    "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.",
   );
   return lines.join("\n");
 }
@@ -347,8 +339,27 @@ function riskLevelLabel(level: PlanRiskLevel): string {
   return "alto";
 }
 
-function requiresVisibleDetails(risk: PlanPresentationRisk): boolean {
+function requiresReinforcedControls(risk: PlanPresentationRisk): boolean {
   return risk.level === "high" || risk.categories.length > 0;
+}
+
+function reinforcedControlLines(risk: PlanPresentationRisk): string[] {
+  const lines = [
+    "## Controles reforzados",
+    `- ${safeText(risk.details)}`,
+  ];
+  if (risk.categories.length > 0) {
+    lines.push(`- **Áreas sensibles:** ${risk.categories.map(riskCategoryLabel).join(", ")}.`);
+  }
+  lines.push("- La ejecución se detendrá si cambia el alcance o falla un guardrail obligatorio.");
+  return lines;
+}
+
+function riskCategoryLabel(category: PlanRiskCategory): string {
+  if (category === "security") return "seguridad";
+  if (category === "data") return "datos";
+  if (category === "architecture") return "arquitectura";
+  return "destrucción";
 }
 
 function safeJson(value: string): string {

@@ -18,6 +18,7 @@ import { loadHookPolicy } from "../core/hooks/policy-loader";
 import { syncOpenCodeConfig } from "../core/injector";
 import { describeInstructionsSync, legacyInstructionsHint, syncManagedInstructions } from "../core/instructions";
 import { describePluginSync, syncManagedPlugin } from "../core/managed-plugin";
+import { beginManagedInstallation, pruneLegacyRuntimeArtifacts } from "../core/managed-installation";
 import { assertAgentAssets, describeAgentSync, syncManagedAgents } from "../core/opencode-agents";
 import { syncOpenCodeCommands } from "../core/opencode-commands";
 import { describeSdkEnsure, ensureOpencodeSdk } from "../core/opencode-sdk";
@@ -81,6 +82,9 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
 
   assertAgentAssets(packagePaths.assetsDir, host.kind);
 
+  const transaction = beginManagedInstallation(paths, options.dryRun);
+  try {
+
   if (!options.dryRun) {
     ensurePrivateDirectory(paths.mnemoDir);
     fs.mkdirSync(paths.docsDir, { recursive: true });
@@ -98,6 +102,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
     fs.copyFileSync(packagePaths.mnemoBuild, paths.mnemoIndex);
     fs.copyFileSync(packagePaths.docsBuild, paths.docsIndex);
   }
+  const legacyRuntimeArtifacts = pruneLegacyRuntimeArtifacts(paths, options.dryRun);
 
   copyAssets(packagePaths.assetsDir, paths.assetsDir, options.dryRun);
   const commands = syncOpenCodeCommands(commandsAsset, paths, options.dryRun);
@@ -121,6 +126,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
   printLine(agentsSync.backup?.created ? `Backup AGENTS.md: ${agentsSync.backup.destination}` : "Backup AGENTS.md: skipped");
   printLine(`Assets: ${options.dryRun ? "would refresh" : "refreshed"}`);
+  printLine(`Legacy runtime artifacts: ${legacyRuntimeArtifacts.length === 0 ? "none" : `${options.dryRun ? "would remove" : "removed"} ${legacyRuntimeArtifacts.length}`}`);
   printLine(`OpenCode commands: ${options.dryRun ? "would refresh" : "refreshed"} ${commands.files} in ${commands.destination}`);
   printLine(describeSdkEnsure(sdk));
   printLine(describePluginSync(plugin));
@@ -176,6 +182,11 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   printLine(`OpenCode build policy: ${host.kind === "v2" ? "runtime plugin (config verify-only)" : (options.dryRun ? "would sync" : "synced")} (${formatExecutionPolicy(execution)})`);
   printLine("Validation: passed (politica aplicada al final)");
   printLine("Next: run `malahor-ai doctor`. Un cambio de modo aplica desde el siguiente turno de la sesion actual.");
+  transaction.commit();
+  } catch (error) {
+    transaction.rollback();
+    throw error;
+  }
 }
 
 function ensureBuild(packagePaths: MalahorPackagePaths, detection: DetectionResult, options: UpdateOptions): void {

@@ -2,13 +2,18 @@ import fs from "node:fs";
 import { backupFile } from "../core/backup";
 import { loadConfig } from "../core/config";
 import { removeBuildPolicyConfig, removeMalahorMcpConfig } from "../core/injector";
-import { instructionsState } from "../core/instructions";
+import { removeManagedInstructions } from "../core/instructions";
 import {
   describePluginStateRemoval,
   describePluginSync,
   removeManagedPlugin,
   removePluginState,
 } from "../core/managed-plugin";
+import {
+  beginManagedInstallation,
+  pruneLegacyRuntimeArtifacts,
+  removeManagedAssets,
+} from "../core/managed-installation";
 import { removeOpenCodeCommands } from "../core/opencode-commands";
 import { describeAgentRemoval, removeManagedAgents } from "../core/opencode-agents";
 import { describeSdkRemove, removeOpencodeSdk } from "../core/opencode-sdk";
@@ -31,11 +36,12 @@ export function runUninstall(options: UninstallOptions): void {
   printLine(`Sandbox: ${isSandbox(paths) ? "yes" : "no"}`);
   printLine(`Dry-run: ${options.dryRun ? "yes" : "no"}`);
 
+  const transaction = beginManagedInstallation(paths, options.dryRun);
+  try {
+
   const configBackup = backupFile(paths.opencodeConfig, paths.backupsDir, options.dryRun);
-  const agentsState = instructionsState(paths.agentsMd);
-  const agentsBackup = agentsState === "managed" ? backupFile(paths.agentsMd, paths.backupsDir, options.dryRun) : null;
-  const mdBackup = backupFile(paths.opencodeMd, paths.backupsDir, options.dryRun);
-  const legacyExisted = fs.existsSync(paths.opencodeMd);
+  const instructionsRemoval = removeManagedInstructions(paths.agentsMd, paths.backupsDir, options.dryRun);
+  const legacyRemoval = removeManagedInstructions(paths.opencodeMd, paths.backupsDir, options.dryRun);
 
   removeMalahorMcpConfig(paths, options.dryRun);
   const buildPolicy = removeBuildPolicyConfig(paths, options.dryRun);
@@ -50,25 +56,26 @@ export function runUninstall(options: UninstallOptions): void {
   const pluginStateRemoval = removePluginState(paths.pluginState, options.dryRun);
   const agentRemovals = removeManagedAgents(paths, options.dryRun);
   const docsRuntimeExisted = fs.existsSync(paths.docsIndex);
+  const memoryRuntimeExisted = fs.existsSync(paths.mnemoIndex);
+  const assetsExisted = removeManagedAssets(paths, options.dryRun);
+  const legacyRuntimeArtifacts = pruneLegacyRuntimeArtifacts(paths, options.dryRun);
 
   if (!options.dryRun) {
-    if (agentsState === "managed" && fs.existsSync(paths.agentsMd)) {
-      fs.unlinkSync(paths.agentsMd);
-    }
-    if (legacyExisted) {
-      fs.unlinkSync(paths.opencodeMd);
-    }
     if (docsRuntimeExisted) {
       fs.unlinkSync(paths.docsIndex);
       if (fs.existsSync(paths.docsDir) && fs.readdirSync(paths.docsDir).length === 0) fs.rmdirSync(paths.docsDir);
     }
+    if (memoryRuntimeExisted) fs.unlinkSync(paths.mnemoIndex);
   }
 
   printLine(configBackup.created ? `Backup config: ${configBackup.destination}` : "Backup config: skipped");
-  printLine(agentsBackup?.created ? `Backup AGENTS.md: ${agentsBackup.destination}` : "Backup AGENTS.md: skipped");
-  printLine(mdBackup.created ? `Backup OPENCODE.md: ${mdBackup.destination}` : "Backup OPENCODE.md: skipped");
+  printLine(instructionsRemoval.backup?.created ? `Backup AGENTS.md: ${instructionsRemoval.backup.destination}` : "Backup AGENTS.md: skipped");
+  printLine(legacyRemoval.backup?.created ? `Backup OPENCODE.md: ${legacyRemoval.backup.destination}` : "Backup OPENCODE.md: skipped");
   printLine(`Managed MCP registrations (Mnemo + docs): ${options.dryRun ? "would remove" : "removed"}; foreign definitions kept`);
   printLine(`Docs runtime: ${docsRuntimeExisted ? (options.dryRun ? "would remove" : "removed") : "nothing to remove"}`);
+  printLine(`Memory runtime: ${memoryRuntimeExisted ? (options.dryRun ? "would remove" : "removed") : "nothing to remove"}`);
+  printLine(`Managed assets: ${assetsExisted ? (options.dryRun ? "would remove" : "removed") : "nothing to remove"}`);
+  printLine(`Legacy runtime artifacts: ${legacyRuntimeArtifacts.length === 0 ? "none" : `${options.dryRun ? "would remove" : "removed"} ${legacyRuntimeArtifacts.length}`}`);
   printLine(buildPolicy.removed
     ? `Build policy: ${options.dryRun ? "would remove locks" : `removed locks (${buildPolicy.cleaned.join(", ") || "marker"})`}`
     : "Build policy: nothing to remove");
@@ -82,14 +89,25 @@ export function runUninstall(options: UninstallOptions): void {
       printLine(`Backup ${agentRemoval.agent}: ${agentRemoval.backup.destination}`);
     }
   }
-  printLine(agentsState === "managed"
-    ? `AGENTS.md: ${options.dryRun ? "would remove" : "removed"}`
-    : agentsState === "foreign"
-      ? "AGENTS.md: kept (no gestionado por Malahor; no se toca)"
-      : "AGENTS.md: nothing to remove");
-  printLine(legacyExisted ? `OPENCODE.md: ${options.dryRun ? "would remove" : "removed"}` : "OPENCODE.md: nothing to remove");
+  printLine(describeInstructionRemoval("AGENTS.md", instructionsRemoval.action));
+  printLine(describeInstructionRemoval("OPENCODE.md", legacyRemoval.action));
   printLine("Local data: kept");
   printLine(`Docs vault: kept (${paths.vaultDir}); external project overrides are never removed`);
+  transaction.commit();
+  } catch (error) {
+    transaction.rollback();
+    throw error;
+  }
+}
+
+function describeInstructionRemoval(
+  label: string,
+  action: "removed" | "would-remove" | "kept-foreign" | "nothing-to-remove",
+): string {
+  if (action === "removed") return `${label}: removed`;
+  if (action === "would-remove") return `${label}: would remove`;
+  if (action === "kept-foreign") return `${label}: kept (no gestionado por Malahor; no se toca)`;
+  return `${label}: nothing to remove`;
 }
 
 function printHeader(value: string): void {
