@@ -1,7 +1,15 @@
 import { consumeApproval } from "./approvals";
 import { writeAudit } from "./audit";
 import { builtInHookRules } from "./rules";
-import type { HookContext, HookDecision, HookResult, HookRule, HookViolation } from "./types";
+import type {
+  HookContext,
+  HookDecision,
+  HookRemediation,
+  HookRemovalReason,
+  HookResult,
+  HookRule,
+  HookViolation,
+} from "./types";
 
 const DECISION_WEIGHT: Record<HookDecision, number> = {
   allow: 0,
@@ -137,6 +145,8 @@ export function formatHookResult(result: HookResult): string {
   for (const violation of result.violations) {
     lines.push(`- ${violation.decision.toUpperCase()} ${violation.id}: ${violation.message}`);
     lines.push(`  Fix: ${violation.fix}`);
+    const remediation = formatHookRemediations(violation.remediations ?? []);
+    if (remediation) lines.push(...remediation.split("\n"));
   }
 
   if (result.violations.length === 0) {
@@ -148,6 +158,48 @@ export function formatHookResult(result: HookResult): string {
   }
 
   return lines.join("\n");
+}
+
+export function formatHookRemediations(remediations: readonly HookRemediation[]): string {
+  return remediations.slice(0, 5).flatMap((remediation) => {
+    const target = `${safeOutput(remediation.path, 512)}:${remediation.startLine}`;
+    if (remediation.kind === "replace-block") {
+      return [
+        "  Remediacion manual segura:",
+        `  1. Abre ${target}.`,
+        `  2. Localiza la linea por el texto ${safeOutput(remediation.anchor, 128)}.`,
+        "  3. Referencia saneada (el valor bloqueado no se muestra):",
+        ...remediation.before.map((line) => `     ${safeOutput(line, 1_000)}`),
+        "  4. Reemplaza esa linea o bloque completo por:",
+        ...remediation.replacement.map((line) => `     ${safeOutput(line, 1_000)}`),
+        "  5. Guarda el archivo y pide a Malahor revalidar. No continues hasta obtener ALLOW.",
+      ];
+    }
+    const eligibility = remediation.reason ? removalReasonMessage(remediation.reason) : undefined;
+    return [
+      "  Accion manual segura:",
+      ...(eligibility ? [`  Motivo seguro (${remediation.reason}): ${eligibility}`] : []),
+      `  1. Abre ${target}; no copies ni compartas el valor detectado.`,
+      "  2. Retira la credencial del archivo y usa una variable segura o un gestor de secretos.",
+      "  3. Si el valor pudo ser real, rotalo antes de continuar.",
+      "  4. Guarda el archivo y pide a Malahor revalidar. No continues hasta obtener ALLOW.",
+    ];
+  }).join("\n");
+}
+
+function removalReasonMessage(reason: HookRemovalReason): string {
+  const messages: Record<HookRemovalReason, string> = {
+    "unsupported-file-type": "el archivo no es un fixture JavaScript/TypeScript elegible",
+    "line-too-long": "la linea supera el limite seguro para construir una receta",
+    "multiple-findings": "la linea contiene varios hallazgos y seria ambiguo transformarla",
+    "value-not-demonstrably-synthetic": "el valor no demuestra ser un dato sintetico permitido",
+    "unsupported-syntax": "la sintaxis no pertenece al subconjunto que el hook puede reescribir con seguridad",
+  };
+  return messages[reason];
+}
+
+function safeOutput(value: string, maxLength: number): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, maxLength);
 }
 
 function strongestDecision(violations: HookViolation[]): HookDecision {

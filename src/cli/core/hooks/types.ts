@@ -284,7 +284,7 @@ export const CODE_MODE_TOOL_NAMES = new Set([
 // OpenCode normaliza las tools MCP como `<servidor>_<tool>`. Los servidores
 // gestionados por Malahor deben pasar por el mismo punto de mediacion que el
 // prefijo legacy `mcp_`, sin convertirlos en permisos V2 desconocidos.
-export const MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "docs", "codegraph"] as const;
+export const MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "horiel", "docs", "codegraph"] as const;
 
 export function isMcpToolName(value: string): boolean {
   const normalized = value.trim().toLowerCase();
@@ -327,11 +327,49 @@ export interface HookContext {
   metadata?: Record<string, unknown>;
 }
 
+export interface HookReplacementRemediation {
+  version: 1;
+  kind: "replace-block";
+  reason: "synthetic-test-fixture";
+  path: string;
+  startLine: number;
+  endLine: number;
+  anchor: string;
+  /** Referencia saneada: nunca contiene el valor detectado. */
+  before: string[];
+  /** Bloque completo con datos sinteticos first-party. */
+  replacement: string[];
+  revalidate: true;
+}
+
+export type HookRemovalReason =
+  | "unsupported-file-type"
+  | "line-too-long"
+  | "multiple-findings"
+  | "value-not-demonstrably-synthetic"
+  | "unsupported-syntax";
+
+export interface HookRemovalRemediation {
+  version: 1;
+  kind: "remove-secret";
+  /** Clasificacion cerrada y no sensible cuando el scanner puede determinarla. */
+  reason?: HookRemovalReason;
+  path: string;
+  startLine: number;
+  endLine: number;
+  finding: string;
+  revalidate: true;
+}
+
+export type HookRemediation = HookReplacementRemediation | HookRemovalRemediation;
+
 export interface HookViolation {
   id: string;
   decision: HookDecision;
   message: string;
   fix: string;
+  /** Evidencia producida por el hook; metadata del caller nunca puede crearla. */
+  remediations?: HookRemediation[];
 }
 
 export interface HookResult {

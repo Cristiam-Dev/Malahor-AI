@@ -4,7 +4,7 @@ import path from "node:path";
 import { registeredProjectRoots } from "../context";
 import { resolvePaths, type MalahorPaths } from "../paths";
 import { resolveProject } from "../project";
-import { auditHookResult, runHooks } from "./engine";
+import { auditHookResult, formatHookRemediations, runHooks } from "./engine";
 import { loadHookPolicy } from "./policy-loader";
 import { usesFilesystemResources } from "./resources";
 import {
@@ -21,6 +21,7 @@ import {
 import { parsePatchOperations } from "../documentation-boundary";
 import { classifyGitCommand, loadGitAliases, type GitOperation } from "../git-command-policy";
 import { parseGitIntent, type GitIntent, type GitIntentRegistry } from "../git-intent";
+import { buildSecretPatchSummary, detectPayloadSecretKinds } from "./secret-scan";
 
 export type PermissionEffect = "allow" | "ask" | "deny";
 
@@ -146,6 +147,9 @@ export async function evaluateToolHook(
   const scope = await resolveEvaluationScope(
     input, options, mapped.cwd, mapped.targetPaths, mapped.resourceKind, allowUnbound,
   );
+  const secretPatchSummary = !scope.error && tool.toLowerCase() === "patch"
+    ? buildSecretPatchSummary(stringValue(recordValue(toolInput)?.patchText) ?? "", scope.options.cwd)
+    : undefined;
   const built = scope.error ? undefined : buildContext(mapped.event, scope.options, {
     command: mapped.command,
     resourceKind: mapped.resourceKind,
@@ -155,6 +159,7 @@ export async function evaluateToolHook(
     gitIntent: mapped.gitIntent,
     metadata: {
       ...mapped.metadata,
+      ...(secretPatchSummary ? { secretPatchSummary } : {}),
       origin: "opencode-v2",
       tool,
     },
@@ -295,12 +300,15 @@ export function shouldBlockPluginResult(result: HookResult, options: PluginAdapt
 }
 
 export function formatPluginBlock(result: HookResult): string {
-  return [
+  const relevant = result.violations
+    .filter((violation) => violation.decision === "deny" || violation.decision === "ask");
+  const lines = [
     `Malahor bloqueo ${result.event}: ${result.decision.toUpperCase()}`,
-    ...result.violations
-      .filter((violation) => violation.decision === "deny" || violation.decision === "ask")
-      .map((violation) => `- ${violation.id}: ${violation.message}`),
-  ].join("\n");
+    ...relevant.map((violation) => `- ${violation.id}: ${violation.message}`),
+  ];
+  const remediation = formatHookRemediations(relevant.flatMap((violation) => violation.remediations ?? []));
+  if (remediation) lines.push(remediation);
+  return lines.join("\n");
 }
 
 function evaluate(context: HookContext): HookResult {
@@ -787,20 +795,9 @@ function pathValues(value: unknown): string[] {
   return [...new Set([...direct, ...arrays, ...nested])];
 }
 
-const PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
-
 export function detectSecretKinds(value: unknown): string[] {
   const text = collectStrings(value).join("\n");
-  if (!text) return [];
-
-  const kinds: string[] = [];
-  if (PRIVATE_KEY_PATTERN.test(text)) kinds.push("private-key");
-  if (/\b(AKIA|ASIA)[A-Z0-9]{16}\b/.test(text)) kinds.push("aws-access-key");
-  if (/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i.test(text)) {
-    kinds.push("credential-assignment");
-  }
-  if (/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/.test(text)) kinds.push("bearer-token");
-  return kinds;
+  return text ? detectPayloadSecretKinds(text) : [];
 }
 
 function collectStrings(value: unknown, depth = 0, output: string[] = []): string[] {
@@ -854,7 +851,9 @@ function strongerEffect(left: PermissionEffect, right: PermissionEffect): Permis
 function pluginMessage(result: HookResult): string | null {
   const relevant = result.violations.filter((violation) => violation.decision === "deny" || violation.decision === "ask");
   if (relevant.length === 0) return null;
-  return `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
+  const summary = `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
+  const remediation = formatHookRemediations(relevant.flatMap((violation) => violation.remediations ?? []));
+  return remediation ? `${summary}\n${remediation}` : summary;
 }
 
 function mergeMessage(current: unknown, next: string): string {

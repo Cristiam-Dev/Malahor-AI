@@ -3,7 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadProjectsFile } from "../context";
 import { filesystemTargetPaths, hookResourceIssues } from "./resources";
-import { CODE_MODE_TOOL_NAMES, isMcpToolName, type HookContext, type HookEvent, type HookProfile, type HookRule, type HookViolation } from "./types";
+import {
+  CODE_MODE_TOOL_NAMES,
+  isMcpToolName,
+  type HookContext,
+  type HookEvent,
+  type HookProfile,
+  type HookRemediation,
+  type HookRule,
+  type HookViolation,
+} from "./types";
 import {
   classifyInfrastructureCommand,
   classifyInfrastructurePath,
@@ -17,6 +26,14 @@ import {
 import { classifyGitCommand, loadGitAliases, type GitOperation } from "../git-command-policy";
 import { intentAuthorizes, type GitIntent } from "../git-intent";
 import { isValidCommitSubject } from "../git-commit-message";
+import {
+  detectFileSecretCounts,
+  detectFileSecretFindings,
+  parseSecretPatchSummary,
+  secretKinds,
+  type SecretFileFinding,
+  type SecretPatchSummary,
+} from "./secret-scan";
 
 export const builtInHookRules: HookRule[] = [
   { id: "policy-integrity", run: policyIntegrityGuard },
@@ -605,17 +622,53 @@ function secretScanGuard(context: HookContext): HookViolation[] {
     ? context.security.git?.scanStagedContent !== false || context.security.persistence?.blockSecrets !== false
     : context.policy?.secrets.scanBeforeCommit !== false;
   if (!scan) return [];
+  if (context.event === "file.write.before" && context.metadata?.tool === "patch") {
+    return patchSecretScanGuard(context);
+  }
   const paths = readableTargetPaths(context);
-  const leaks = paths.flatMap((targetPath) => scanFileForSecrets(targetPath));
+  const findings = paths.flatMap((targetPath) => scanTargetForSecretFindings(targetPath, context));
 
-  if (leaks.length === 0) return [];
+  if (findings.length === 0) return [];
+  const leaks = findings.map((finding) => `${finding.path}:${finding.line}:${finding.kind}`);
+  const remediations = findings.slice(0, 5).map((finding) => finding.remediation ?? removalRemediation(finding));
 
   return [{
     id: "MAL-HOOK-SECRETS",
     decision: "deny",
     message: `Posibles secretos detectados: ${leaks.slice(0, 5).join(", ")}`,
     fix: "Remueve secretos, usa variables de entorno/secret manager y rota credenciales si fueron expuestas.",
+    remediations,
   }];
+}
+
+function patchSecretScanGuard(context: HookContext): HookViolation[] {
+  const summary = parseSecretPatchSummary(context.metadata?.secretPatchSummary);
+  if (!summary || !summary.evaluable || !patchSummaryMatchesTargets(context, summary)) {
+    return [{
+      id: "MAL-HOOK-SECRETS",
+      decision: "deny",
+      message: "No se pudo demostrar que el patch elimina hallazgos sin introducir otros.",
+      fix: "Usa un patch directo y evaluable que retire todos los hallazgos; no uses metadata manual ni editores indirectos.",
+    }];
+  }
+
+  const leaks = summary.files.flatMap((file) => secretKinds(file.after)
+    .map((kind) => `${path.basename(file.path)}:${kind}`));
+  if (leaks.length === 0) return [];
+  return [{
+    id: "MAL-HOOK-SECRETS",
+    decision: "deny",
+    message: `El patch conservaria o introduciria posibles secretos: ${leaks.slice(0, 5).join(", ")}`,
+    fix: "Retira todos los hallazgos del archivo y no agregues credenciales, tokens o llaves.",
+  }];
+}
+
+function patchSummaryMatchesTargets(context: HookContext, summary: SecretPatchSummary): boolean {
+  const targets = new Set(filesystemTargetPaths(context).map((target) => path.resolve(context.cwd, target)));
+  const summarized = new Set(summary.files.map((file) => path.resolve(context.cwd, file.path)));
+  return targets.size === summarized.size
+    && targets.size === summary.files.length
+    && [...targets].every((target) => summarized.has(target));
 }
 
 function shellPolicyGuard(context: HookContext): HookViolation[] {
@@ -1044,6 +1097,31 @@ function readableTargetPaths(context: HookContext): string[] {
     .filter((targetPath) => fs.existsSync(targetPath) && fs.statSync(targetPath).isFile() && fs.statSync(targetPath).size <= 512 * 1024);
 }
 
+function scanTargetForSecretFindings(filePath: string, context: HookContext): SecretFileFinding[] {
+  const content = fs.readFileSync(filePath, "utf8");
+  return detectFileSecretFindings(content, filePath, safeRelativePath(filePath, context.projectRoot));
+}
+
+function removalRemediation(finding: SecretFileFinding): HookRemediation {
+  return {
+    version: 1,
+    kind: "remove-secret",
+    path: finding.path,
+    startLine: finding.line,
+    endLine: finding.line,
+    finding: finding.kind,
+    revalidate: true,
+  };
+}
+
+function safeRelativePath(filePath: string, projectRoot: string): string {
+  const relative = path.relative(path.resolve(projectRoot), path.resolve(filePath));
+  const candidate = relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+    ? relative
+    : path.basename(filePath);
+  return candidate.replace(/[\r\n\t\u001b]/g, "?").slice(0, 512);
+}
+
 function scanStagedSecrets(cwd: string, includeWorktree = false): string[] | null {
   const commands = [
     ["diff", "--cached", "--name-only", "-z"],
@@ -1078,20 +1156,10 @@ function scanStagedSecrets(cwd: string, includeWorktree = false): string[] | nul
   return leaks;
 }
 
-const PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
-
 function scanFileForSecrets(filePath: string): string[] {
   const basename = path.basename(filePath);
   const content = fs.readFileSync(filePath, "utf8");
-  const patterns: Array<[RegExp, string]> = [
-    [PRIVATE_KEY_PATTERN, "private-key"],
-    [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
-    [/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i, "credential-assignment"],
-  ];
-
-  const leaks = patterns.filter(([pattern]) => pattern.test(content)).map(([, name]) => `${basename}:${name}`);
-  if (/^\.env(\.|$)/.test(basename)) leaks.push(`${basename}:env-file`);
-  return leaks;
+  return secretKinds(detectFileSecretCounts(content, filePath)).map((kind) => `${basename}:${kind}`);
 }
 
 function extractCommitMessage(command: string): string | null {

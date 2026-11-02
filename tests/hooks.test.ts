@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
-import { assertHooksAllowed, evaluateHookRules, hookExitCode, runHooks } from "../src/cli/core/hooks/engine";
+import { assertHooksAllowed, evaluateHookRules, formatHookResult, hookExitCode, runHooks } from "../src/cli/core/hooks/engine";
 import { HOOK_EVENTS, HOOK_RESOURCE_KINDS, type HookContext, type HookPolicyMeta, type HookRule } from "../src/cli/core/hooks/types";
 import { callTool } from "../src/mnemo/tools";
 
@@ -123,6 +123,250 @@ describe("malahor hooks", () => {
 
     expect(result.decision).toBe("deny");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
+  });
+
+  test("lectura y stage siguen denegando un archivo con hallazgos", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-secret-events-"));
+    const target = path.join(dir, "fixture.ts");
+    const identifier = ["api", "key"].join("_");
+    const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+    fs.writeFileSync(target, `export const ${identifier} = '${syntheticValue}';\n`, "utf8");
+
+    try {
+      for (const event of ["file.read.before", "file.stage.before"] as const) {
+        const result = runHooks(baseContext({
+          event,
+          cwd: dir,
+          projectRoot: dir,
+          targetPaths: [target],
+        }));
+
+        expect(result.decision).toBe("deny");
+        expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("entrega un bloque saneado y copiable para un fixture sintetico reconocido", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-remediation-"));
+    const target = path.join(dir, "tests", "fixtures", "redaction.test.ts");
+    const identifier = ["api", "key"].join("_");
+    const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `const redactionProbe = "${identifier}='${syntheticValue}'";\n`, "utf8");
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.read.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+      const violation = result.violations.find((item) => item.id === "MAL-HOOK-SECRETS");
+      const remediation = violation?.remediations?.find((item) => item.kind === "replace-block");
+
+      expect(result.decision).toBe("deny");
+      expect(remediation).toMatchObject({
+        version: 1,
+        kind: "replace-block",
+        reason: "synthetic-test-fixture",
+        path: "tests/fixtures/redaction.test.ts",
+        startLine: 1,
+        endLine: 1,
+        anchor: "redactionProbe",
+        revalidate: true,
+      });
+      expect(remediation?.before.join("\n")).toContain("[VALOR SINTETICO OCULTO]");
+      expect(remediation?.replacement.join("\n")).toContain('["api", "key"].join("_")');
+      expect(remediation?.replacement.join("\n")).toContain('["synthetic", "fixture", "credential"].join("-")');
+      expect(JSON.stringify(result)).not.toContain(syntheticValue);
+
+      const output = formatHookResult(result);
+      expect(output).toMatch(/abre tests\/fixtures\/redaction\.test\.ts:1/i);
+      expect(output).toMatch(/reemplaza esa linea o bloque completo/i);
+      expect(output).toMatch(/guarda.*revalidar/i);
+      expect(output).not.toContain(syntheticValue);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("un valor real o ambiguo mantiene DENY sin bloque de reemplazo", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-real-secret-"));
+    const target = path.join(dir, "tests", "fixtures", "unsafe.test.ts");
+    const identifier = ["access", "token"].join("_");
+    const unsafeValue = ["production", "fedcba9876543210"].join("-");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `export const ${identifier} = '${unsafeValue}';\n`, "utf8");
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.read.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+      const violation = result.violations.find((item) => item.id === "MAL-HOOK-SECRETS");
+
+      expect(result.decision).toBe("deny");
+      expect(violation?.remediations?.some((item) => item.kind === "replace-block")).toBe(false);
+      expect(violation?.remediations).toContainEqual(expect.objectContaining({
+        kind: "remove-secret",
+        reason: "value-not-demonstrably-synthetic",
+        path: "tests/fixtures/unsafe.test.ts",
+        startLine: 1,
+      }));
+      expect(formatHookResult(result)).toContain("value-not-demonstrably-synthetic");
+      expect(formatHookResult(result)).toMatch(/retira la credencial.*rotalo/is);
+      expect(JSON.stringify(result)).not.toContain(unsafeValue);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("un formato de fixture no soportado no recibe codigo de reemplazo", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-ambiguous-fixture-"));
+    const target = path.join(dir, "tests", "fixtures", "credentials.env");
+    const identifier = ["api", "key"].join("_");
+    const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${identifier}='${syntheticValue}'\n`, "utf8");
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.read.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+      const remediations = result.violations.flatMap((item) => item.remediations ?? []);
+
+      expect(result.decision).toBe("deny");
+      expect(remediations.some((item) => item.kind === "replace-block")).toBe(false);
+      expect(remediations).toContainEqual(expect.objectContaining({
+        kind: "remove-secret",
+        reason: "unsupported-file-type",
+        startLine: 1,
+      }));
+      expect(JSON.stringify(result)).not.toContain(syntheticValue);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("genera una receta para una asignacion sintetica dentro de una expresion compleja", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-complex-fixture-"));
+    const target = path.join(dir, "tests", "fixtures", "request.test.ts");
+    const identifier = ["api", "key"].join("_");
+    const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(
+      target,
+      `const request = { metadata: "prefix ${identifier}='${syntheticValue}' suffix" };\n`,
+      "utf8",
+    );
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.read.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+      const remediation = result.violations
+        .flatMap((item) => item.remediations ?? [])
+        .find((item) => item.kind === "replace-block");
+
+      expect(result.decision).toBe("deny");
+      expect(remediation).toMatchObject({
+        kind: "replace-block",
+        reason: "synthetic-test-fixture",
+        path: "tests/fixtures/request.test.ts",
+        startLine: 1,
+        anchor: "metadata",
+      });
+      expect(remediation?.before.join("\n")).toContain("[VALOR SINTETICO OCULTO]");
+      expect(remediation?.replacement.join("\n")).toContain('"prefix "');
+      expect(remediation?.replacement.join("\n")).toContain("\"' suffix\"");
+      expect(remediation?.replacement.join("\n")).toContain('["api", "key"].join("_")');
+      expect(JSON.stringify(result)).not.toContain(syntheticValue);
+
+      fs.writeFileSync(target, `${remediation?.replacement.join("\n")}\n`, "utf8");
+      const revalidated = runHooks(baseContext({
+        event: "file.read.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+      expect(revalidated.decision).toBe("allow");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rechaza una linea sintetica con varios hallazgos como ambigua", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-multiple-fixture-"));
+    const target = path.join(dir, "tests", "fixtures", "multiple.test.ts");
+    const firstIdentifier = ["api", "key"].join("_");
+    const secondIdentifier = ["access", "token"].join("_");
+    const firstValue = ["synthetic", "0123456789abcdef"].join("-");
+    const secondValue = ["synthetic", "fedcba9876543210"].join("-");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(
+      target,
+      `const values = ["${firstIdentifier}='${firstValue}'", "${secondIdentifier}='${secondValue}'"];\n`,
+      "utf8",
+    );
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.read.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+      const remediations = result.violations.flatMap((item) => item.remediations ?? []);
+
+      expect(result.decision).toBe("deny");
+      expect(remediations).toHaveLength(2);
+      expect(remediations.every((item) => item.kind === "remove-secret"
+        && item.reason === "multiple-findings")).toBe(true);
+      expect(JSON.stringify(result)).not.toContain(firstValue);
+      expect(JSON.stringify(result)).not.toContain(secondValue);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rechaza una cadena sintetica usada como clave porque el reemplazo seria invalido", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-key-fixture-"));
+    const target = path.join(dir, "tests", "fixtures", "object-key.test.ts");
+    const identifier = ["secret", "key"].join("_");
+    const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `const values = { "${identifier}='${syntheticValue}'": true };\n`, "utf8");
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.read.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+      const remediations = result.violations.flatMap((item) => item.remediations ?? []);
+
+      expect(result.decision).toBe("deny");
+      expect(remediations).toContainEqual(expect.objectContaining({
+        kind: "remove-secret",
+        reason: "unsupported-syntax",
+      }));
+      expect(remediations.some((item) => item.kind === "replace-block")).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(syntheticValue);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("no confunde un placeholder multilinea del codigo con una credencial", () => {
