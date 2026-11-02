@@ -1324,6 +1324,152 @@ describe("adaptador de plugin V2", () => {
     }
   });
 
+  test("hook real media una reparación de stage exacta una sola vez", async () => {
+    const sessionID = "ses_stage_repair";
+    const hooks = new Map<string, (input: Record<string, unknown>) => Promise<void> | void>();
+    const definitions = new Map<string, Record<string, unknown>>();
+    const values = new Map<string, Record<string, unknown>>();
+    const approvals: Record<string, unknown>[] = [];
+    const register = (domain: string) => (
+      name: string,
+      callback: (input: Record<string, unknown>) => Promise<void> | void,
+    ) => {
+      hooks.set(`${domain}.${name}`, callback);
+      return { dispose: () => { hooks.delete(`${domain}.${name}`); } };
+    };
+    const originalHome = process.env.MALAHOR_HOME;
+    const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
+    process.env.MALAHOR_HOME = home;
+    process.env.MALAHOR_OPENCODE_DIR = opencode;
+    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({
+      demo: { context: "memory", roots: [repo], defaultRoot: repo },
+    })}\n`, "utf8");
+    fs.writeFileSync(path.join(home, "config.jsonc"), `${JSON.stringify({
+      execution: { intervention: "ejecutar", verification: true },
+    })}\n`, "utf8");
+    writeSourceFixture("src/core/a.ts", "export const a = 1;");
+    writeSourceFixture("src/core/b.ts", "export const b = 2;");
+    writeSourceFixture("tests/fixture.test.ts", "// fixture");
+
+    const approval = async (request: Record<string, unknown>) => {
+      approvals.push(structuredClone(request));
+      if (request.action !== "malahor_plan_repair") return;
+      const nativeAsk: Record<string, unknown> = { ...request, effect: "allow" };
+      await hooks.get("permission.evaluate")?.(nativeAsk);
+      expect(nativeAsk.effect).toBe("ask");
+      expect(String(nativeAsk.message)).toContain("misma revisión");
+    };
+
+    let cleanup: unknown;
+    try {
+      cleanup = await plugin.setup({
+        location: { directory: repo },
+        session: {
+          hook: register("session"),
+          get: async ({ sessionID: requested }: { sessionID: string }) => requested === sessionID
+            ? { id: requested, location: { directory: repo } }
+            : undefined,
+        },
+        permission: { hook: register("permission"), assert: approval },
+        tool: {
+          hook: register("tool"),
+          transform: (callback: (editor: {
+            namespace: (value: Record<string, unknown>) => void;
+            add: (value: Record<string, unknown>) => void;
+          }) => void) => callback({
+            namespace: () => undefined,
+            add: (definition) => { definitions.set(String(definition.name), definition); },
+          }),
+        },
+        shell: { hook: register("shell") },
+        storage: {
+          get: async (key: string) => values.get(key),
+          set: async (key: string, value: Record<string, unknown>) => { values.set(key, structuredClone(value)); },
+          remove: async (key: string) => { values.delete(key); },
+          scan: async () => ({ entries: [] }),
+        },
+      });
+
+      const execute = (name: string) => {
+        const candidate = definitions.get(name)?.execute;
+        expect(typeof candidate).toBe("function");
+        return candidate as (value: unknown, call: Record<string, string>) => Promise<unknown>;
+      };
+      const plannedCommand = "git add -- src/core tests/fixture.test.ts";
+      const actualCommand = "git add -- src/core/a.ts src/core/b.ts tests/fixture.test.ts";
+      await execute("plan")({
+        level: 1,
+        summary: "Reparar la serialización exacta del stage",
+        steps: ["Autorizar el manifest exacto"],
+        presentation: {
+          objective: "Mantener la misma revisión para un stage equivalente.",
+          outcome: "El manifest exacto queda autorizado una sola vez.",
+          steps: [{ title: "Autorizar", description: "Validar igualdad o estrechamiento del manifest." }],
+          impact: [{ area: "Planning", description: "Solo cambia la serialización técnica del stage." }],
+          risk: { level: "medium", categories: [], summary: "Alcance cerrado.", details: "No añade recursos ni cwd." },
+          exclusions: ["No ejecutar Git"],
+          completionCriteria: ["El hook consume una sola reparación"],
+        },
+        actions: [{ action: "shell", resource: plannedCommand }],
+      }, { sessionID, agent: "malahor", messageID: "msg_plan", id: "call_plan" });
+      await execute("run")({}, { sessionID, agent: "malahor", messageID: "msg_run", id: "call_run" });
+
+      const toolBefore = hooks.get("tool.execute.before");
+      expect(typeof toolBefore).toBe("function");
+      await toolBefore?.({
+        sessionID,
+        tool: "mnemo_malahor_hook_check",
+        input: {
+          event: "file.stage.before",
+          command: actualCommand,
+          paths: ["src/core/a.ts", "src/core/b.ts", "tests/fixture.test.ts"],
+          resourceKind: "filesystem",
+          intent: "commit",
+        },
+      });
+      const source = { type: "tool", messageID: "msg_stage", id: "call_stage" };
+      const permissionInput: Record<string, unknown> = {
+        sessionID,
+        action: "bash",
+        resources: [actualCommand],
+        metadata: { command: actualCommand },
+        source,
+        effect: "allow",
+      };
+      await hooks.get("permission.evaluate")?.(permissionInput);
+      expect(permissionInput.effect).toBe("allow");
+
+      const toolInput = {
+        sessionID,
+        agent: "malahor",
+        messageID: source.messageID,
+        id: source.id,
+        tool: "bash",
+        input: { command: actualCommand, workdir: repo },
+      };
+      await toolBefore?.(toolInput);
+
+      const repairApprovals = approvals.filter((request) => request.action === "malahor_plan_repair");
+      expect(repairApprovals).toHaveLength(1);
+      expect((repairApprovals[0]?.resources as string[]).slice(-3)).toEqual([
+        "src/core/a.ts",
+        "src/core/b.ts",
+        "tests/fixture.test.ts",
+      ]);
+      expect([...values.keys()].filter((key) => key.startsWith("planning/v5/attempts/"))).toHaveLength(1);
+
+      await expect(Promise.resolve().then(() => toolBefore?.({ ...toolInput, id: "call_stage_repeat" })))
+        .rejects.toMatchObject({ code: "ACTION_REPAIR_EXHAUSTED" });
+      expect(approvals.filter((request) => request.action === "malahor_plan_repair")).toHaveLength(1);
+    } finally {
+      if (typeof cleanup === "function") await cleanup();
+      if (originalHome === undefined) delete process.env.MALAHOR_HOME;
+      else process.env.MALAHOR_HOME = originalHome;
+      if (originalOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
+      else process.env.MALAHOR_OPENCODE_DIR = originalOpenCodeDir;
+    }
+  });
+
   test("asset bundleado no importa el SDK de OpenCode y carga sin SDK", () => {
     const asset = path.join(import.meta.dir, "..", "assets", "opencode", "plugins", "malahor", "index.ts");
     const content = fs.readFileSync(asset, "utf8");

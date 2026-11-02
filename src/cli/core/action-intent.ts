@@ -68,8 +68,20 @@ export interface PlannedActionIntentContext {
   project: string;
   root: string;
   rootRef?: string;
+  plannedCwd?: string;
   cwd?: string;
   sandboxWriteRoots?: string[];
+}
+
+export interface ActionIntentRepairV1 {
+  schema: 1;
+  kind: "git-stage-manifest";
+  sourceActionID: string;
+  repairedActionID: string;
+  relation: "equal" | "narrower";
+  manifest: string[];
+  manifestHash: string;
+  repairedInputHash: string;
 }
 
 export class ActionIntentError extends Error {
@@ -218,6 +230,90 @@ export function canonicalizePlannedAction(
     return canonicalizeActionIntent({ ...base, kind: "subagent", agent: action.resource });
   }
   throw canonicalizationError("Acción de plan no soportada por ActionIntentV1.");
+}
+
+/**
+ * Reconoce la reparación cerrada de un `git add` con directorios a un manifest
+ * literal de archivos. La variante reparada solo puede conservar o estrechar
+ * el conjunto revisado y mantiene proyecto, raíz y cwd.
+ */
+export function deriveActionIntentRepair(
+  planned: PlannedActionLike,
+  actual: PlannedActionLike,
+  context: PlannedActionIntentContext,
+): ActionIntentRepairV1 | undefined {
+  if (planned.action !== "shell" || actual.action !== "shell") return undefined;
+  try {
+    const root = canonicalRoot(context.root);
+    const plannedCwd = context.plannedCwd ?? root;
+    const plannedIntents = canonicalizePlannedAction(planned, { ...context, root, cwd: plannedCwd });
+    const actualIntents = canonicalizePlannedAction(actual, {
+      ...context,
+      root,
+      cwd: context.cwd ?? plannedCwd,
+    });
+    if (plannedIntents.length !== 1 || actualIntents.length !== 1) return undefined;
+    const source = plannedIntents[0]!;
+    const repaired = actualIntents[0]!;
+    if (source.actionID === repaired.actionID || !sameRepairEnvelope(source, repaired)) return undefined;
+    const plannedTargets = gitStageTargets(source);
+    const actualTargets = gitStageTargets(repaired);
+    if (!plannedTargets || !actualTargets) return undefined;
+    if (!hasLiteralStageDirectory(plannedTargets, root, source.command!.cwd)) return undefined;
+    const plannedManifest = stageManifest(plannedTargets, root, source.command!.cwd, true);
+    const manifest = stageManifest(actualTargets, root, repaired.command!.cwd, false);
+    if (plannedManifest.length === 0 || manifest.length === 0 || !subset(manifest, plannedManifest)) return undefined;
+    const relation = sameTextSequence(manifest, plannedManifest) ? "equal" : "narrower";
+    const manifestHash = hashReference(canonical(manifest));
+    const repairedInputHash = hashReference(canonical({
+      kind: "git-stage-manifest",
+      sourceActionID: source.actionID,
+      repairedActionID: repaired.actionID,
+      relation,
+      manifestHash,
+    }));
+    return {
+      schema: 1,
+      kind: "git-stage-manifest",
+      sourceActionID: source.actionID,
+      repairedActionID: repaired.actionID,
+      relation,
+      manifest,
+      manifestHash,
+      repairedInputHash,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export function validActionIntentRepair(value: unknown, rootValue: string): value is ActionIntentRepairV1 {
+  if (!isRecord(value) || value.schema !== 1 || value.kind !== "git-stage-manifest"
+    || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID)
+    || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID)
+    || value.sourceActionID === value.repairedActionID
+    || (value.relation !== "equal" && value.relation !== "narrower")
+    || !Array.isArray(value.manifest) || value.manifest.length === 0 || value.manifest.length > 512
+    || value.manifest.some((item) => typeof item !== "string")
+    || typeof value.manifestHash !== "string" || typeof value.repairedInputHash !== "string") return false;
+  try {
+    const root = canonicalRoot(rootValue);
+    const manifest = value.manifest as string[];
+    if (!sameTextSequence(manifest, [...new Set(manifest)].sort(compareText))) return false;
+    if (!sameTextSequence(manifest, stageManifest(manifest, root, root, false))) return false;
+    const manifestHash = hashReference(canonical(manifest));
+    if (value.manifestHash !== manifestHash) return false;
+    const repairedInputHash = hashReference(canonical({
+      kind: value.kind,
+      sourceActionID: value.sourceActionID,
+      repairedActionID: value.repairedActionID,
+      relation: value.relation,
+      manifestHash,
+    }));
+    return value.repairedInputHash === repairedInputHash;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -645,6 +741,132 @@ function portableRelative(root: string, target: string): string {
   return relative.split(path.sep).join("/");
 }
 
+function sameRepairEnvelope(left: ActionIntentV1, right: ActionIntentV1): boolean {
+  if (!left.command || !right.command) return false;
+  return left.kind === "shell" && right.kind === "shell"
+    && left.effect === right.effect
+    && left.project === right.project
+    && left.rootRef === right.rootRef
+    && left.rootDigest === right.rootDigest
+    && left.command.executable === "git"
+    && right.command.executable === "git"
+    && left.command.cwd === right.command.cwd
+    && left.command.composition === "single"
+    && right.command.composition === "single"
+    && canonical(left.resources) === canonical(right.resources)
+    && canonical(left.filesystem) === canonical(right.filesystem)
+    && canonical(left.environment) === canonical(right.environment)
+    && left.network === "forbidden"
+    && right.network === "forbidden"
+    && canonical(left.constraints) === canonical(right.constraints);
+}
+
+function gitStageTargets(intent: ActionIntentV1): string[] | undefined {
+  const argv = intent.command?.argv;
+  if (!argv || argv.length < 3 || argv[0] !== "add" || argv[1] !== "--") return undefined;
+  const targets = argv.slice(2);
+  if (targets.some((target) => !safeLiteralStageTarget(target))) return undefined;
+  return targets;
+}
+
+function safeLiteralStageTarget(value: string): boolean {
+  if (value.length === 0 || value.length > 4_096 || path.isAbsolute(value) || value.startsWith(":")) return false;
+  if (value.includes("\0") || value.includes("\r") || value.includes("\n")) return false;
+  for (const marker of ["*", "?", "[", "]", "{", "}"]) {
+    if (value.includes(marker)) return false;
+  }
+  return value.split(/[\\/]/u).every((part) => part !== "" && part !== "." && part !== ".."
+    && part.toLowerCase() !== ".git");
+}
+
+function hasLiteralStageDirectory(targets: string[], root: string, cwd: string): boolean {
+  return targets.some((target) => {
+    const resolved = path.resolve(cwd, target);
+    if (!inside(resolved, root)) throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+    assertNoSymlinkTraversal(resolved, root);
+    const stat = fs.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    const canonicalTarget = fs.realpathSync(resolved);
+    return canonicalTarget !== root && path.basename(canonicalTarget).toLowerCase() !== ".git";
+  });
+}
+
+function stageManifest(targets: string[], root: string, cwd: string, allowDirectories: boolean): string[] {
+  const found = new Set<string>();
+  const traversal = { nodes: 0 };
+  for (const target of targets) {
+    if (!safeLiteralStageTarget(target)) throw canonicalizationError("Target de stage no literal.");
+    const resolved = path.resolve(cwd, target);
+    if (!inside(resolved, root)) throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+    collectStageTarget(resolved, root, allowDirectories, found, traversal, 0);
+    if (found.size > 512) throw canonicalizationError("Manifest de stage fuera de límite.");
+  }
+  const manifest = [...found].sort(compareText);
+  const size = manifest.reduce((total, item) => total + item.length, 0);
+  if (size > 16_384) throw canonicalizationError("Manifest de stage fuera de límite.");
+  return manifest;
+}
+
+function collectStageTarget(
+  target: string,
+  root: string,
+  allowDirectories: boolean,
+  found: Set<string>,
+  traversal: { nodes: number },
+  depth: number,
+): void {
+  traversal.nodes += 1;
+  if (traversal.nodes > 1_024 || depth > 128) throw canonicalizationError("Recorrido de stage fuera de límite.");
+  assertNoSymlinkTraversal(target, root);
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink()) throw resourceScopeError("Stage mediante symlink no permitido.");
+  const canonicalTarget = fs.realpathSync(target);
+  if (!inside(canonicalTarget, root)) throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+  if (stat.isFile()) {
+    if (stat.nlink > 1) throw resourceScopeError("Stage mediante hardlink no permitido.");
+    const relativePath = portableRelative(root, canonicalTarget);
+    if (!found.has(relativePath) && found.size >= 512) {
+      throw canonicalizationError("Manifest de stage fuera de límite.");
+    }
+    found.add(relativePath);
+    return;
+  }
+  if (!stat.isDirectory() || !allowDirectories || canonicalTarget === root
+    || path.basename(canonicalTarget).toLowerCase() === ".git") {
+    throw canonicalizationError("El manifest reparado exige archivos exactos.");
+  }
+  const entries = fs.readdirSync(canonicalTarget, { withFileTypes: true })
+    .sort((left, right) => compareText(left.name, right.name));
+  for (const entry of entries) {
+    if (entry.name.toLowerCase() === ".git") throw canonicalizationError("El manifest no atraviesa metadata Git.");
+    collectStageTarget(path.join(canonicalTarget, entry.name), root, true, found, traversal, depth + 1);
+  }
+}
+
+function assertNoSymlinkTraversal(target: string, root: string): void {
+  const relative = path.relative(root, target);
+  if (relative === "") return;
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+  }
+  let cursor = root;
+  for (const part of relative.split(path.sep)) {
+    cursor = path.join(cursor, part);
+    if (fs.lstatSync(cursor).isSymbolicLink()) {
+      throw resourceScopeError("Stage mediante symlink no permitido.");
+    }
+  }
+}
+
+function subset(values: string[], allowed: string[]): boolean {
+  const scope = new Set(allowed);
+  return values.every((value) => scope.has(value));
+}
+
+function sameTextSequence(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 function inside(target: string, root: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(target));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -667,6 +889,10 @@ function resourceScopeError(message: string): ActionIntentError {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function hashReference(value: string): string {
+  return `sha256:${sha256(value)}`;
 }
 
 function canonical(value: unknown): string {

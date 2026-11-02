@@ -27,6 +27,12 @@ export interface AttemptRecord {
   durationMs?: number;
   inputBytes?: number;
   outputBytes?: number;
+  repair?: {
+    kind: "git-stage-manifest";
+    repairedActionID: string;
+    manifestHash: string;
+    relation: "equal" | "narrower";
+  };
   recordedAt: number;
 }
 
@@ -45,6 +51,7 @@ export interface ExecutionGuardSnapshot {
 }
 
 export interface ExecutionGuard {
+  inspectAdapterRepair(input: Record<string, unknown>): Promise<ExecutionGuardResult>;
   recordAttempt(input: Record<string, unknown>): Promise<ExecutionGuardResult>;
   snapshot(): Promise<ExecutionGuardSnapshot>;
 }
@@ -56,6 +63,16 @@ interface PersistedGuardState extends ExecutionGuardSnapshot {
   declaredActionIDs: string[];
   lastFailureSignature?: string;
   repairs: string[];
+}
+
+interface AdapterRepair {
+  equivalent: true;
+  kind: "git-stage-manifest";
+  sourceActionID: string;
+  repairedActionID: string;
+  repairedInputHash: string;
+  manifestHash: string;
+  relation: "equal" | "narrower";
 }
 
 export function createExecutionGuard(input: Record<string, unknown>): ExecutionGuard {
@@ -82,9 +99,26 @@ export function createExecutionGuard(input: Record<string, unknown>): ExecutionG
   };
 
   return {
+    inspectAdapterRepair: (repair) => withState((state) => inspectRepair(state, repair)),
     recordAttempt: (attempt) => withState((state) => record(state, attempt, now)),
     snapshot: () => withState((state) => snapshotOf(state)),
   };
+}
+
+function inspectRepair(state: PersistedGuardState, input: Record<string, unknown>): ExecutionGuardResult {
+  const actionIDs = attemptActionIDs(input);
+  if (actionIDs.length !== 1 || !state.declaredActionIDs.includes(actionIDs[0]!)) {
+    return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
+  }
+  const repair = parseAdapterRepair(input.adapterRepair);
+  if (!repair) return { decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false };
+  if (repair.sourceActionID !== actionIDs[0]) {
+    return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
+  }
+  if (state.plan.phase === "blocked" || state.repairs.includes(adapterRepairKey(actionIDs[0]!, repair))) {
+    return { decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false };
+  }
+  return { decision: "retry", code: "ADAPTER_REPAIR_AVAILABLE", retryAllowed: true };
 }
 
 function record(
@@ -104,6 +138,11 @@ function record(
   }
 
   const primary = actionIDs[0]!;
+  const repair = parseAdapterRepair(input.adapterRepair);
+  if (repair && repair.sourceActionID !== primary) {
+    state.plan.phase = "blocked";
+    return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
+  }
   const ordinal = (state.ordinals[primary] ?? 0) + 1;
   state.ordinals[primary] = ordinal;
   const result = isRecord(input.result) ? input.result : {};
@@ -123,6 +162,12 @@ function record(
     ...(integer(result.exitCode) ? { exitCode: result.exitCode as number } : {}),
     ...(typeof result.errorHash === "string" ? { errorHash: safeHashRef(result.errorHash, "sha256:unavailable") } : {}),
     ...attemptMetrics(input),
+    ...(repair ? { repair: {
+      kind: repair.kind,
+      repairedActionID: repair.repairedActionID,
+      manifestHash: repair.manifestHash,
+      relation: repair.relation,
+    } } : {}),
     recordedAt,
   };
   state.attempts.push(attempt);
@@ -134,9 +179,8 @@ function record(
   }
 
   if (decisionCode === "ACTION_SERIALIZATION_MISMATCH") {
-    const repair = isRecord(input.adapterRepair) ? input.adapterRepair : {};
-    const repairKey = `${primary}\0${safeHashRef(repair.repairedInputHash, "sha256:unavailable")}`;
-    if (repair.equivalent === true && !state.repairs.includes(repairKey)) {
+    const repairKey = repair && adapterRepairKey(primary, repair);
+    if (repairKey && !state.repairs.includes(repairKey)) {
       state.repairs.push(repairKey);
       return { decision: "retry", code: "ADAPTER_REPAIR_APPLIED", retryAllowed: true, attempt };
     }
@@ -243,6 +287,28 @@ function attemptActionIDs(input: Record<string, unknown>): string[] {
   const ids = Array.isArray(input.actionIDs) ? input.actionIDs : [input.actionID];
   if (ids.some((item) => typeof item !== "string" || !/^[a-f0-9]{64}$/.test(item))) return [];
   return ids as string[];
+}
+
+function parseAdapterRepair(value: unknown): AdapterRepair | undefined {
+  if (!isRecord(value) || value.equivalent !== true || value.kind !== "git-stage-manifest"
+    || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID)
+    || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID)
+    || typeof value.repairedInputHash !== "string" || value.repairedInputHash.length > 256
+    || typeof value.manifestHash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.manifestHash)
+    || (value.relation !== "equal" && value.relation !== "narrower")) return undefined;
+  return {
+    equivalent: true,
+    kind: "git-stage-manifest",
+    sourceActionID: value.sourceActionID,
+    repairedActionID: value.repairedActionID,
+    repairedInputHash: safeHashRef(value.repairedInputHash, "sha256:unavailable"),
+    manifestHash: value.manifestHash,
+    relation: value.relation,
+  };
+}
+
+function adapterRepairKey(actionID: string, repair: AdapterRepair): string {
+  return [actionID, repair.repairedActionID, repair.repairedInputHash, repair.manifestHash, repair.relation].join("\0");
 }
 
 function failureSignature(actionIDs: string[], attempt: AttemptRecord): string {

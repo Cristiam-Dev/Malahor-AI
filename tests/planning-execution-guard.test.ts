@@ -15,6 +15,12 @@ interface AttemptRecord {
   decisionCode: string;
   canonicalInputHash: string;
   errorHash?: string;
+  repair?: {
+    kind: "git-stage-manifest";
+    repairedActionID: string;
+    manifestHash: string;
+    relation: "equal" | "narrower";
+  };
 }
 
 interface GuardResult {
@@ -26,6 +32,7 @@ interface GuardResult {
 }
 
 interface ExecutionGuard {
+  inspectAdapterRepair(input: Record<string, unknown>): Promise<GuardResult>;
   recordAttempt(input: Record<string, unknown>): Promise<GuardResult>;
   snapshot(): Promise<{
     plan: { planID: string; revision: string; digest: string; phase: string };
@@ -96,6 +103,7 @@ describe("A3: attempts separados de la revisión", () => {
     const api = await loadExecutionGuardApi();
 
     expect(typeof api.createExecutionGuard).toBe("function");
+    expect(typeof (await guard()).inspectAdapterRepair).toBe("function");
     expect(typeof (await guard()).recordAttempt).toBe("function");
   });
 
@@ -179,21 +187,44 @@ describe("A3: attempts separados de la revisión", () => {
 
   test("un mismatch de serialización solo admite una reparación equivalente", async () => {
     const execution = await guard();
+    const repair = {
+      equivalent: true,
+      kind: "git-stage-manifest",
+      sourceActionID: FOCUSED_ACTION,
+      repairedActionID: "8".repeat(64),
+      repairedInputHash: "sha256:focused-test",
+      manifestHash: `sha256:${"9".repeat(64)}`,
+      relation: "equal",
+    };
+    const wrongSource = await execution.inspectAdapterRepair({
+      actionID: FOCUSED_ACTION,
+      adapterRepair: { ...repair, sourceActionID: HOOKS_ACTION },
+    });
+    const available = await execution.inspectAdapterRepair({
+      actionID: FOCUSED_ACTION,
+      adapterRepair: repair,
+    });
     const first = await execution.recordAttempt({
       ...failedAttempt(),
       decisionCode: "ACTION_SERIALIZATION_MISMATCH",
-      adapterRepair: { equivalent: true, repairedInputHash: "sha256:focused-test" },
+      adapterRepair: repair,
       result: { class: "not-run" },
     });
-    const second = await execution.recordAttempt({
-      ...failedAttempt(),
-      decisionCode: "ACTION_SERIALIZATION_MISMATCH",
-      adapterRepair: { equivalent: true, repairedInputHash: "sha256:focused-test" },
-      result: { class: "not-run" },
+    const exhausted = await execution.inspectAdapterRepair({
+      actionID: FOCUSED_ACTION,
+      adapterRepair: repair,
     });
 
+    expect(wrongSource).toMatchObject({ decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false });
+    expect(available).toMatchObject({ decision: "retry", code: "ADAPTER_REPAIR_AVAILABLE", retryAllowed: true });
     expect(first).toMatchObject({ decision: "retry", code: "ADAPTER_REPAIR_APPLIED", retryAllowed: true });
-    expect(second).toMatchObject({ decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false });
+    expect(first.attempt?.repair).toEqual({
+      kind: "git-stage-manifest",
+      repairedActionID: "8".repeat(64),
+      manifestHash: `sha256:${"9".repeat(64)}`,
+      relation: "equal",
+    });
+    expect(exhausted).toMatchObject({ decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false });
   });
 });
 

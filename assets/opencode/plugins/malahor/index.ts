@@ -8179,6 +8179,82 @@ function canonicalizePlannedAction(action, context) {
   }
   throw canonicalizationError("Acción de plan no soportada por ActionIntentV1.");
 }
+function deriveActionIntentRepair(planned, actual, context) {
+  if (planned.action !== "shell" || actual.action !== "shell")
+    return;
+  try {
+    const root = canonicalRoot(context.root);
+    const plannedCwd = context.plannedCwd ?? root;
+    const plannedIntents = canonicalizePlannedAction(planned, { ...context, root, cwd: plannedCwd });
+    const actualIntents = canonicalizePlannedAction(actual, {
+      ...context,
+      root,
+      cwd: context.cwd ?? plannedCwd
+    });
+    if (plannedIntents.length !== 1 || actualIntents.length !== 1)
+      return;
+    const source = plannedIntents[0];
+    const repaired = actualIntents[0];
+    if (source.actionID === repaired.actionID || !sameRepairEnvelope(source, repaired))
+      return;
+    const plannedTargets = gitStageTargets(source);
+    const actualTargets = gitStageTargets(repaired);
+    if (!plannedTargets || !actualTargets)
+      return;
+    if (!hasLiteralStageDirectory(plannedTargets, root, source.command.cwd))
+      return;
+    const plannedManifest = stageManifest(plannedTargets, root, source.command.cwd, true);
+    const manifest = stageManifest(actualTargets, root, repaired.command.cwd, false);
+    if (plannedManifest.length === 0 || manifest.length === 0 || !subset(manifest, plannedManifest))
+      return;
+    const relation = sameTextSequence(manifest, plannedManifest) ? "equal" : "narrower";
+    const manifestHash = hashReference(canonical(manifest));
+    const repairedInputHash = hashReference(canonical({
+      kind: "git-stage-manifest",
+      sourceActionID: source.actionID,
+      repairedActionID: repaired.actionID,
+      relation,
+      manifestHash
+    }));
+    return {
+      schema: 1,
+      kind: "git-stage-manifest",
+      sourceActionID: source.actionID,
+      repairedActionID: repaired.actionID,
+      relation,
+      manifest,
+      manifestHash,
+      repairedInputHash
+    };
+  } catch {
+    return;
+  }
+}
+function validActionIntentRepair(value, rootValue) {
+  if (!isRecord5(value) || value.schema !== 1 || value.kind !== "git-stage-manifest" || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID) || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID) || value.sourceActionID === value.repairedActionID || value.relation !== "equal" && value.relation !== "narrower" || !Array.isArray(value.manifest) || value.manifest.length === 0 || value.manifest.length > 512 || value.manifest.some((item) => typeof item !== "string") || typeof value.manifestHash !== "string" || typeof value.repairedInputHash !== "string")
+    return false;
+  try {
+    const root = canonicalRoot(rootValue);
+    const manifest = value.manifest;
+    if (!sameTextSequence(manifest, [...new Set(manifest)].sort(compareText)))
+      return false;
+    if (!sameTextSequence(manifest, stageManifest(manifest, root, root, false)))
+      return false;
+    const manifestHash = hashReference(canonical(manifest));
+    if (value.manifestHash !== manifestHash)
+      return false;
+    const repairedInputHash = hashReference(canonical({
+      kind: value.kind,
+      sourceActionID: value.sourceActionID,
+      repairedActionID: value.repairedActionID,
+      relation: value.relation,
+      manifestHash
+    }));
+    return value.repairedInputHash === repairedInputHash;
+  } catch {
+    return false;
+  }
+}
 function compatibilityActionIntents(actions, project) {
   const rootDigest = sha2562(`unresolved:${project}`);
   return actions.flatMap((action) => {
@@ -8529,6 +8605,117 @@ function portableRelative(root, target) {
   const relative = path18.relative(root, target) || ".";
   return relative.split(path18.sep).join("/");
 }
+function sameRepairEnvelope(left, right) {
+  if (!left.command || !right.command)
+    return false;
+  return left.kind === "shell" && right.kind === "shell" && left.effect === right.effect && left.project === right.project && left.rootRef === right.rootRef && left.rootDigest === right.rootDigest && left.command.executable === "git" && right.command.executable === "git" && left.command.cwd === right.command.cwd && left.command.composition === "single" && right.command.composition === "single" && canonical(left.resources) === canonical(right.resources) && canonical(left.filesystem) === canonical(right.filesystem) && canonical(left.environment) === canonical(right.environment) && left.network === "forbidden" && right.network === "forbidden" && canonical(left.constraints) === canonical(right.constraints);
+}
+function gitStageTargets(intent) {
+  const argv = intent.command?.argv;
+  if (!argv || argv.length < 3 || argv[0] !== "add" || argv[1] !== "--")
+    return;
+  const targets = argv.slice(2);
+  if (targets.some((target) => !safeLiteralStageTarget(target)))
+    return;
+  return targets;
+}
+function safeLiteralStageTarget(value) {
+  if (value.length === 0 || value.length > 4096 || path18.isAbsolute(value) || value.startsWith(":"))
+    return false;
+  if (value.includes("\x00") || value.includes("\r") || value.includes(`
+`))
+    return false;
+  for (const marker of ["*", "?", "[", "]", "{", "}"]) {
+    if (value.includes(marker))
+      return false;
+  }
+  return value.split(/[\\/]/u).every((part) => part !== "" && part !== "." && part !== ".." && part.toLowerCase() !== ".git");
+}
+function hasLiteralStageDirectory(targets, root, cwd) {
+  return targets.some((target) => {
+    const resolved = path18.resolve(cwd, target);
+    if (!inside2(resolved, root))
+      throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+    assertNoSymlinkTraversal(resolved, root);
+    const stat = fs14.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isDirectory())
+      return false;
+    const canonicalTarget = fs14.realpathSync(resolved);
+    return canonicalTarget !== root && path18.basename(canonicalTarget).toLowerCase() !== ".git";
+  });
+}
+function stageManifest(targets, root, cwd, allowDirectories) {
+  const found = new Set;
+  const traversal = { nodes: 0 };
+  for (const target of targets) {
+    if (!safeLiteralStageTarget(target))
+      throw canonicalizationError("Target de stage no literal.");
+    const resolved = path18.resolve(cwd, target);
+    if (!inside2(resolved, root))
+      throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+    collectStageTarget(resolved, root, allowDirectories, found, traversal, 0);
+    if (found.size > 512)
+      throw canonicalizationError("Manifest de stage fuera de límite.");
+  }
+  const manifest = [...found].sort(compareText);
+  const size = manifest.reduce((total, item) => total + item.length, 0);
+  if (size > 16384)
+    throw canonicalizationError("Manifest de stage fuera de límite.");
+  return manifest;
+}
+function collectStageTarget(target, root, allowDirectories, found, traversal, depth) {
+  traversal.nodes += 1;
+  if (traversal.nodes > 1024 || depth > 128)
+    throw canonicalizationError("Recorrido de stage fuera de límite.");
+  assertNoSymlinkTraversal(target, root);
+  const stat = fs14.lstatSync(target);
+  if (stat.isSymbolicLink())
+    throw resourceScopeError("Stage mediante symlink no permitido.");
+  const canonicalTarget = fs14.realpathSync(target);
+  if (!inside2(canonicalTarget, root))
+    throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+  if (stat.isFile()) {
+    if (stat.nlink > 1)
+      throw resourceScopeError("Stage mediante hardlink no permitido.");
+    const relativePath = portableRelative(root, canonicalTarget);
+    if (!found.has(relativePath) && found.size >= 512) {
+      throw canonicalizationError("Manifest de stage fuera de límite.");
+    }
+    found.add(relativePath);
+    return;
+  }
+  if (!stat.isDirectory() || !allowDirectories || canonicalTarget === root || path18.basename(canonicalTarget).toLowerCase() === ".git") {
+    throw canonicalizationError("El manifest reparado exige archivos exactos.");
+  }
+  const entries = fs14.readdirSync(canonicalTarget, { withFileTypes: true }).sort((left, right) => compareText(left.name, right.name));
+  for (const entry of entries) {
+    if (entry.name.toLowerCase() === ".git")
+      throw canonicalizationError("El manifest no atraviesa metadata Git.");
+    collectStageTarget(path18.join(canonicalTarget, entry.name), root, true, found, traversal, depth + 1);
+  }
+}
+function assertNoSymlinkTraversal(target, root) {
+  const relative = path18.relative(root, target);
+  if (relative === "")
+    return;
+  if (relative.startsWith("..") || path18.isAbsolute(relative)) {
+    throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+  }
+  let cursor = root;
+  for (const part of relative.split(path18.sep)) {
+    cursor = path18.join(cursor, part);
+    if (fs14.lstatSync(cursor).isSymbolicLink()) {
+      throw resourceScopeError("Stage mediante symlink no permitido.");
+    }
+  }
+}
+function subset(values, allowed) {
+  const scope = new Set(allowed);
+  return values.every((value) => scope.has(value));
+}
+function sameTextSequence(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
 function inside2(target, root) {
   const relative = path18.relative(path18.resolve(root), path18.resolve(target));
   return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
@@ -8547,6 +8734,9 @@ function resourceScopeError(message) {
 }
 function sha2562(value) {
   return createHash7("sha256").update(value).digest("hex");
+}
+function hashReference(value) {
+  return `sha256:${sha2562(value)}`;
 }
 function canonical(value) {
   if (Array.isArray(value))
@@ -9465,6 +9655,7 @@ var AUTHORIZATION_DENIAL_CODES = [
   "ACTION_NOT_DECLARED",
   "ACTION_NOT_CANONICALIZABLE",
   "ACTION_SERIALIZATION_MISMATCH",
+  "ACTION_REPAIR_EXHAUSTED",
   "RESOURCE_OUTSIDE_SCOPE",
   "PROTECTED_APPROVAL_REQUIRED",
   "HOST_ASK",
@@ -9549,6 +9740,7 @@ function authorizationMessage(code, detail) {
     ACTION_NOT_DECLARED: "Malahor: la acción no está declarada en la revisión aprobada.",
     ACTION_NOT_CANONICALIZABLE: "Malahor: la acción no puede representarse con el canonicalizador cerrado.",
     ACTION_SERIALIZATION_MISMATCH: "Malahor: la representación técnica no coincide con los intents firmados.",
+    ACTION_REPAIR_EXHAUSTED: "Malahor: la reparación técnica equivalente ya fue consumida o dejó de ser verificable.",
     RESOURCE_OUTSIDE_SCOPE: "Malahor: un recurso queda fuera del alcance aprobado.",
     PROTECTED_APPROVAL_REQUIRED: "Malahor: la operación protegida requiere su aprobación específica.",
     HOST_ASK: "Malahor: el host requiere una aprobación humana específica.",
@@ -10532,11 +10724,265 @@ function isRecord7(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+// src/plugin/execution-guard.ts
+import { createHash as createHash10, randomBytes as randomBytes5 } from "node:crypto";
+function createExecutionGuard(input) {
+  const plan = parsePlan(input.plan);
+  const storage = isStorage(input.storage) ? input.storage : undefined;
+  const now = typeof input.now === "function" ? input.now : Date.now;
+  const key = `planning/v5/attempts/${plan.planID}/${plan.revision}`;
+  let queue = Promise.resolve();
+  let loaded;
+  const withState = async (operation) => {
+    const previous = queue;
+    let release;
+    queue = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      if (!loaded)
+        loaded = await loadState(storage, key, plan);
+      const result = await operation(loaded);
+      if (storage)
+        await storage.set(key, structuredClone(loaded));
+      return result;
+    } finally {
+      release();
+    }
+  };
+  return {
+    inspectAdapterRepair: (repair) => withState((state) => inspectRepair(state, repair)),
+    recordAttempt: (attempt) => withState((state) => record2(state, attempt, now)),
+    snapshot: () => withState((state) => snapshotOf(state))
+  };
+}
+function inspectRepair(state, input) {
+  const actionIDs = attemptActionIDs(input);
+  if (actionIDs.length !== 1 || !state.declaredActionIDs.includes(actionIDs[0])) {
+    return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
+  }
+  const repair = parseAdapterRepair(input.adapterRepair);
+  if (!repair)
+    return { decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false };
+  if (repair.sourceActionID !== actionIDs[0]) {
+    return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
+  }
+  if (state.plan.phase === "blocked" || state.repairs.includes(adapterRepairKey(actionIDs[0], repair))) {
+    return { decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false };
+  }
+  return { decision: "retry", code: "ADAPTER_REPAIR_AVAILABLE", retryAllowed: true };
+}
+function record2(state, input, now) {
+  const actionIDs = attemptActionIDs(input);
+  if (actionIDs.length === 0 || actionIDs.some((actionID) => !state.declaredActionIDs.includes(actionID))) {
+    state.plan.phase = "blocked";
+    return {
+      decision: "block",
+      code: "ACTION_NOT_DECLARED",
+      retryAllowed: false,
+      requiresPlanRevision: true
+    };
+  }
+  const primary = actionIDs[0];
+  const repair = parseAdapterRepair(input.adapterRepair);
+  if (repair && repair.sourceActionID !== primary) {
+    state.plan.phase = "blocked";
+    return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
+  }
+  const ordinal = (state.ordinals[primary] ?? 0) + 1;
+  state.ordinals[primary] = ordinal;
+  const result = isRecord8(input.result) ? input.result : {};
+  const resultClass = safeLabel(result.class, "not-run");
+  const decisionCode = safeLabel(input.decisionCode, "UNKNOWN");
+  const canonicalInputHash = safeHashRef(input.canonicalInputHash, "sha256:unavailable");
+  const candidateNow = now();
+  const recordedAt = finiteNonNegative(candidateNow) ? candidateNow : Date.now();
+  const attempt = {
+    attemptID: attemptID(state, actionIDs, ordinal, canonicalInputHash, recordedAt),
+    actionID: primary,
+    ...actionIDs.length > 1 ? { actionIDs: [...actionIDs] } : {},
+    ordinal,
+    decisionCode,
+    canonicalInputHash,
+    resultClass,
+    ...integer(result.exitCode) ? { exitCode: result.exitCode } : {},
+    ...typeof result.errorHash === "string" ? { errorHash: safeHashRef(result.errorHash, "sha256:unavailable") } : {},
+    ...attemptMetrics(input),
+    ...repair ? { repair: {
+      kind: repair.kind,
+      repairedActionID: repair.repairedActionID,
+      manifestHash: repair.manifestHash,
+      relation: repair.relation
+    } } : {},
+    recordedAt
+  };
+  state.attempts.push(attempt);
+  if (decisionCode === "HOST_ASK" || decisionCode === "HOST_DENY") {
+    state.plan.phase = "blocked";
+    state.lastFailureSignature = undefined;
+    return { decision: "block", code: decisionCode, retryAllowed: false, attempt };
+  }
+  if (decisionCode === "ACTION_SERIALIZATION_MISMATCH") {
+    const repairKey = repair && adapterRepairKey(primary, repair);
+    if (repairKey && !state.repairs.includes(repairKey)) {
+      state.repairs.push(repairKey);
+      return { decision: "retry", code: "ADAPTER_REPAIR_APPLIED", retryAllowed: true, attempt };
+    }
+    state.plan.phase = "blocked";
+    return { decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false, attempt };
+  }
+  if (resultClass === "success") {
+    state.plan.phase = "running";
+    state.lastFailureSignature = undefined;
+    return { decision: "continue", code: "AUTHORIZED", retryAllowed: false, attempt };
+  }
+  if (resultClass === "failure") {
+    const signature = failureSignature(actionIDs, attempt);
+    if (state.lastFailureSignature === signature) {
+      state.plan.phase = "blocked";
+      state.counters.loopBlocks += 1;
+      return {
+        decision: "block",
+        code: "LOOP_GUARD_STALLED",
+        retryAllowed: false,
+        requiresPlanRevision: false,
+        attempt
+      };
+    }
+    state.lastFailureSignature = signature;
+    return { decision: "retry", code: "TECHNICAL_RETRY", retryAllowed: true, attempt };
+  }
+  if (decisionCode !== "AUTHORIZED") {
+    state.plan.phase = "blocked";
+    return { decision: "block", code: decisionCode, retryAllowed: false, attempt };
+  }
+  return { decision: "continue", code: "AUTHORIZED", retryAllowed: false, attempt };
+}
+function attemptMetrics(input) {
+  const resourceDigests = isRecord8(input.resourceDigests) ? input.resourceDigests : undefined;
+  const before = stringList(resourceDigests?.before).map((value) => safeHashRef(value, "sha256:unavailable"));
+  const after = stringList(resourceDigests?.after).map((value) => safeHashRef(value, "sha256:unavailable"));
+  return {
+    ...before.length || after.length ? { resourceDigests: { before, after } } : {},
+    ...finiteNonNegative(input.durationMs) ? { durationMs: input.durationMs } : {},
+    ...finiteNonNegative(input.inputBytes) ? { inputBytes: input.inputBytes } : {},
+    ...finiteNonNegative(input.outputBytes) ? { outputBytes: input.outputBytes } : {}
+  };
+}
+function parsePlan(value) {
+  if (!isRecord8(value) || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || value.phase !== "running" || !Array.isArray(value.actionIDs) || value.actionIDs.length === 0 || value.actionIDs.some((actionID) => typeof actionID !== "string" || !/^[a-f0-9]{64}$/.test(actionID))) {
+    throw new Error("Plan de execution guard no evaluable.");
+  }
+  return {
+    planID: value.planID,
+    revision: value.revision,
+    digest: value.digest,
+    phase: "running",
+    actionIDs: [...new Set(value.actionIDs)]
+  };
+}
+async function loadState(storage, key, plan) {
+  if (storage) {
+    const existing = await storage.get(key);
+    if (validPersisted(existing, plan))
+      return structuredClone(existing);
+    if (existing !== undefined)
+      throw new Error("Ledger de intentos existente no verificable.");
+  }
+  return {
+    schema: 1,
+    kind: "malahor.execution-attempts",
+    plan: { planID: plan.planID, revision: plan.revision, digest: plan.digest, phase: "running" },
+    attempts: [],
+    counters: { modelCalls: 0, planRevisions: 0, loopBlocks: 0 },
+    ordinals: {},
+    declaredActionIDs: [...plan.actionIDs],
+    repairs: []
+  };
+}
+function validPersisted(value, plan) {
+  if (!isRecord8(value) || value.schema !== 1 || value.kind !== "malahor.execution-attempts" || !isRecord8(value.plan) || value.plan.planID !== plan.planID || value.plan.revision !== plan.revision || value.plan.digest !== plan.digest || value.plan.phase !== "running" && value.plan.phase !== "blocked" || !Array.isArray(value.attempts) || !isRecord8(value.counters) || !isRecord8(value.ordinals) || !Array.isArray(value.declaredActionIDs) || !Array.isArray(value.repairs))
+    return false;
+  return value.declaredActionIDs.every((item) => typeof item === "string" && plan.actionIDs.includes(item));
+}
+function snapshotOf(state) {
+  return structuredClone({ plan: state.plan, attempts: state.attempts, counters: state.counters });
+}
+function attemptActionIDs(input) {
+  const ids = Array.isArray(input.actionIDs) ? input.actionIDs : [input.actionID];
+  if (ids.some((item) => typeof item !== "string" || !/^[a-f0-9]{64}$/.test(item)))
+    return [];
+  return ids;
+}
+function parseAdapterRepair(value) {
+  if (!isRecord8(value) || value.equivalent !== true || value.kind !== "git-stage-manifest" || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID) || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID) || typeof value.repairedInputHash !== "string" || value.repairedInputHash.length > 256 || typeof value.manifestHash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.manifestHash) || value.relation !== "equal" && value.relation !== "narrower")
+    return;
+  return {
+    equivalent: true,
+    kind: "git-stage-manifest",
+    sourceActionID: value.sourceActionID,
+    repairedActionID: value.repairedActionID,
+    repairedInputHash: safeHashRef(value.repairedInputHash, "sha256:unavailable"),
+    manifestHash: value.manifestHash,
+    relation: value.relation
+  };
+}
+function adapterRepairKey(actionID, repair) {
+  return [actionID, repair.repairedActionID, repair.repairedInputHash, repair.manifestHash, repair.relation].join("\x00");
+}
+function failureSignature(actionIDs, attempt) {
+  return createHash10("sha256").update(JSON.stringify({
+    actionIDs,
+    canonicalInputHash: attempt.canonicalInputHash,
+    resultClass: attempt.resultClass,
+    exitCode: attempt.exitCode,
+    errorHash: attempt.errorHash,
+    resourceDigests: attempt.resourceDigests
+  })).digest("hex");
+}
+function attemptID(state, actionIDs, ordinal, inputHash, recordedAt) {
+  return `att_${createHash10("sha256").update(JSON.stringify({
+    planID: state.plan.planID,
+    revision: state.plan.revision,
+    actionIDs,
+    ordinal,
+    inputHash,
+    recordedAt,
+    nonce: randomBytes5(8).toString("hex")
+  })).digest("hex").slice(0, 24)}`;
+}
+function safeHashRef(value, fallback) {
+  if (typeof value !== "string" || value.length > 256 || /[\u0000\r\n]/u.test(value))
+    return fallback;
+  return value;
+}
+function safeLabel(value, fallback) {
+  return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : fallback;
+}
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+function integer(value) {
+  return typeof value === "number" && Number.isInteger(value);
+}
+function finiteNonNegative(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+function isStorage(value) {
+  return isRecord8(value) && typeof value.get === "function" && typeof value.set === "function";
+}
+function isRecord8(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // src/plugin/planning.ts
 var REVIEW_ACTION = "malahor_plan_review";
 var RUN_ACTION = "malahor_plan_run";
 var RESUME_ACTION = "malahor_plan_resume";
 var COMPLETE_ACTION = "malahor_plan_complete";
+var REPAIR_ACTION = "malahor_plan_repair";
+var pendingRepairApprovals = new Set;
 var FOREGROUND_START = "<!-- malahor-plan-foreground:start -->";
 var FOREGROUND_END = "<!-- malahor-plan-foreground:end -->";
 var fallbackAuthority = DEFAULT_PLANNING_AUTHORITY;
@@ -10601,6 +11047,10 @@ ${renderPlan(state)}` : `Segunda confirmacion: ejecuta SOLO las acciones del pla
 ${renderPlan(state)}`;
     return;
   }
+  if (action === REPAIR_ACTION) {
+    await evaluateRepairApproval(input, resolved, storage, options, authority);
+    return;
+  }
   if (CODE_READ_TOOLS.has(action) && resolved?.scope.mode === "advisor") {
     deny2(input, "Asesor: no consulta archivos de codigo ni verifica la implementacion.");
     return;
@@ -10626,11 +11076,17 @@ ${renderPlan(state)}`;
   const resources = Array.isArray(input.resources) ? input.resources : [];
   const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
   const decision = authorizeResources(rawState, resolved.scope, normalized, resources, resolved.directory, projectRoot ?? resolved.directory, undefined, authority);
+  if (decision.effect === "repair") {
+    if (options.toolRegistered !== true || !attributedToolSource(input.source)) {
+      denyDecision(input, { effect: "deny", code: "CRITICAL_CONTROL_UNAVAILABLE" });
+    }
+    return;
+  }
   if (decision.effect !== "allow") {
     denyDecision(input, decision);
   }
 }
-async function evaluatePlanningTool(input, options, storage, authority = fallbackAuthority) {
+async function evaluatePlanningTool(input, options, storage, authority = fallbackAuthority, approvals) {
   const tool = text(input.tool);
   if (routineTool(tool))
     return;
@@ -10656,9 +11112,16 @@ async function evaluatePlanningTool(input, options, storage, authority = fallbac
     return;
   const actions = toolActions(tool, input.input, resolved.directory);
   const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
-  const args = isRecord8(input.input) ? input.input : {};
+  const args = isRecord9(input.input) ? input.input : {};
   const operationCwd = typeof args.workdir === "string" ? path20.resolve(resolved.directory, args.workdir) : typeof args.cwd === "string" ? path20.resolve(resolved.directory, args.cwd) : resolved.directory;
   const decision = authorizeOperations(rawState, resolved.scope, actions, resolved.directory, projectRoot, operationCwd, authority);
+  if (decision.effect === "repair") {
+    if (!validState(rawState, authority) || rawState.version !== 5 || !approvals) {
+      throw new PlanningAuthorizationError("CRITICAL_CONTROL_UNAVAILABLE");
+    }
+    await applyRepairAuthorization(input, decision.candidate, decision.declaredActionIDs, rawState, approvals, storage, authority, projectRoot, resolved.directory);
+    return;
+  }
   if (decision.effect === "deny")
     throw new PlanningAuthorizationError(decision.code, decision.safeDetail);
   if (decision.effect === "defer") {
@@ -10892,7 +11355,7 @@ async function injectPlanningInstructions(input, options, storage, authority = f
     "<!-- malahor-planning:v1 -->"
   ];
   for (const part of system) {
-    if (!isRecord8(part) || part.type !== "text" || typeof part.text !== "string")
+    if (!isRecord9(part) || part.type !== "text" || typeof part.text !== "string")
       continue;
     const text = part.text;
     if (text.includes(marker)) {
@@ -10910,7 +11373,7 @@ ${instructions}`;
     }
   }
   const last = system.at(-1);
-  if (isRecord8(last) && last.type === "text" && typeof last.text === "string") {
+  if (isRecord9(last) && last.type === "text" && typeof last.text === "string") {
     last.text += `
 
 ${marker}
@@ -10931,7 +11394,7 @@ async function readPlan(storage, sessionID, authority = fallbackAuthority) {
   }
 }
 async function resolveRunDigest(value, storage, scope, authority) {
-  if (!isRecord8(value))
+  if (!isRecord9(value))
     throw new Error("Entrada de malahor_run no evaluable.");
   const provided = value.digest;
   if (provided !== undefined)
@@ -10950,6 +11413,159 @@ async function ask(port, call, action, digest) {
     resources: [digest],
     save: []
   });
+}
+async function applyRepairAuthorization(input, candidate, declaredActionIDs, state, port, storage, authority, projectRoot, directory) {
+  if (!validActionIntentRepair(candidate, projectRoot)) {
+    throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+  }
+  const call = repairToolCall(input);
+  if (!call || repairInputActionID(input, state.project, projectRoot, directory) !== candidate.repairedActionID) {
+    throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+  }
+  const reservation = [state.planID, state.revision, candidate.sourceActionID, candidate.repairedInputHash].join("\x00");
+  if (pendingRepairApprovals.has(reservation))
+    throw new PlanningAuthorizationError("ACTION_REPAIR_EXHAUSTED");
+  pendingRepairApprovals.add(reservation);
+  try {
+    const guard = createExecutionGuard({
+      plan: {
+        planID: state.planID,
+        revision: state.revision,
+        digest: state.digest,
+        phase: "running",
+        actionIDs: declaredActionIDs
+      },
+      storage
+    });
+    const adapterRepair = { equivalent: true, ...candidate };
+    const available = await guard.inspectAdapterRepair({
+      actionID: candidate.sourceActionID,
+      adapterRepair
+    });
+    if (available.code === "ADAPTER_REPAIR_EXHAUSTED") {
+      throw new PlanningAuthorizationError("ACTION_REPAIR_EXHAUSTED");
+    }
+    if (available.decision !== "retry")
+      throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+    await port.assert({
+      sessionID: state.sessionID,
+      agent: call.agent,
+      source: { type: "tool", messageID: call.messageID, id: call.id },
+      action: REPAIR_ACTION,
+      resources: repairApprovalResources(state, candidate),
+      save: []
+    });
+    const fresh = await readPlan(storage, state.sessionID, authority);
+    const currentCall = repairToolCall(input);
+    if (!fresh || fresh.version !== 5 || fresh.phase !== "running" || fresh.planID !== state.planID || fresh.revision !== state.revision || fresh.digest !== state.digest || !sameToolCall(call, currentCall) || repairInputActionID(input, state.project, projectRoot, directory) !== candidate.repairedActionID || !validActionIntentRepair(candidate, projectRoot)) {
+      throw new PlanningAuthorizationError("PLAN_INVALID");
+    }
+    const applied = await guard.recordAttempt({
+      actionID: candidate.sourceActionID,
+      decisionCode: "ACTION_SERIALIZATION_MISMATCH",
+      canonicalInputHash: candidate.repairedInputHash,
+      resourceDigests: { before: [candidate.manifestHash], after: [candidate.manifestHash] },
+      adapterRepair,
+      result: { class: "not-run" }
+    });
+    if (applied.code === "ADAPTER_REPAIR_EXHAUSTED") {
+      throw new PlanningAuthorizationError("ACTION_REPAIR_EXHAUSTED");
+    }
+    if (applied.code !== "ADAPTER_REPAIR_APPLIED")
+      throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+  } finally {
+    pendingRepairApprovals.delete(reservation);
+  }
+}
+async function evaluateRepairApproval(input, resolved, storage, options, authority) {
+  if (!resolved || !storage || !attributedToolSource(input.source)) {
+    deny2(input, "Reparación técnica sin sesión, storage o llamada de tool verificable.");
+    return;
+  }
+  const state = await readPlan(storage, resolved.scope.sessionID, authority);
+  const resources = Array.isArray(input.resources) ? input.resources : [];
+  const candidate = repairFromApprovalResources(resources);
+  const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+  let declaredActionIDs = [];
+  if (state?.version === 5) {
+    try {
+      declaredActionIDs = plannedIntentGroups(state, resolved.directory, projectRoot).flatMap((group) => group.intents.map((intent) => intent.actionID));
+    } catch {
+      deny2(input, "No se pudieron recanonicalizar las acciones del plan para aprobar la reparación.");
+      return;
+    }
+  }
+  if (!state || state.version !== 5 || state.phase !== "running" || state.project !== resolved.scope.project || state.mode !== resolved.scope.mode || state.policyRevision !== resolved.scope.policyRevision || !candidate || !validActionIntentRepair(candidate, projectRoot) || !declaredActionIDs.includes(candidate.sourceActionID) || resources[0] !== state.planID || resources[1] !== state.revision || resources[2] !== state.digest) {
+    deny2(input, "Reparación técnica inválida, desactualizada o fuera del plan vigente.");
+    return;
+  }
+  input.effect = "ask";
+  input.message = `Autoriza una reparación técnica equivalente dentro de la misma revisión para ${candidate.manifest.length} archivo(s) exacto(s). No amplía paths, cwd ni efectos.`;
+}
+function repairApprovalResources(state, candidate) {
+  return [
+    state.planID,
+    state.revision,
+    state.digest,
+    candidate.sourceActionID,
+    candidate.repairedActionID,
+    candidate.repairedInputHash,
+    candidate.manifestHash,
+    candidate.relation,
+    ...candidate.manifest
+  ];
+}
+function repairFromApprovalResources(resources) {
+  if (resources.length < 9 || resources.some((item) => typeof item !== "string"))
+    return;
+  const relation = resources[7];
+  if (relation !== "equal" && relation !== "narrower")
+    return;
+  return {
+    schema: 1,
+    kind: "git-stage-manifest",
+    sourceActionID: resources[3],
+    repairedActionID: resources[4],
+    repairedInputHash: resources[5],
+    manifestHash: resources[6],
+    relation,
+    manifest: resources.slice(8)
+  };
+}
+function repairToolCall(input) {
+  const context = isRecord9(input.context) ? input.context : {};
+  const source = isRecord9(input.source) ? input.source : {};
+  const sessionID = text(input.sessionID || context.sessionID);
+  const messageID = text(input.messageID || context.messageID || source.messageID);
+  const id = text(input.id || input.callID || input.toolCallID || context.id || context.callID || source.id);
+  const agent = text(input.agent || context.agent) || "malahor";
+  return sessionID && messageID && id ? { sessionID, messageID, id, agent } : undefined;
+}
+function repairInputActionID(input, project, projectRoot, directory) {
+  try {
+    const operations = toolActions(text(input.tool), input.input, directory);
+    if (operations?.length !== 1 || operations[0]?.action !== "shell")
+      return;
+    const args = isRecord9(input.input) ? input.input : {};
+    const operationCwd = typeof args.workdir === "string" ? path20.resolve(directory, args.workdir) : typeof args.cwd === "string" ? path20.resolve(directory, args.cwd) : directory;
+    const intents = canonicalizePlannedAction(operations[0], {
+      project,
+      root: projectRoot,
+      rootRef: "project",
+      cwd: operationCwd
+    });
+    return intents.length === 1 ? intents[0]?.actionID : undefined;
+  } catch {
+    return;
+  }
+}
+function sameToolCall(left, right) {
+  if (!right)
+    return false;
+  return left.sessionID === right.sessionID && left.agent === right.agent && left.messageID === right.messageID && left.id === right.id;
+}
+function attributedToolSource(value) {
+  return isRecord9(value) && value.type === "tool" && Boolean(text(value.messageID)) && Boolean(text(value.id));
 }
 async function requireScope(call, options) {
   const resolved = await resolvePlanningScope(call.sessionID, options);
@@ -10997,7 +11613,7 @@ async function resolvePlanningScope(value, options) {
   }
 }
 function toolActions(tool, value, directory) {
-  const args = isRecord8(value) ? value : {};
+  const args = isRecord9(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
     if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && typeof cwd !== "string"))
       return;
@@ -11070,8 +11686,22 @@ function authorizeOperations(state, scope, operations, directory, projectRoot, o
         cwd: operationCwd
       }));
       const match = planned.find((group) => group.action.action === "shell" && sameActionIntentSequence(group.intents, actual2));
-      if (!match)
+      if (!match) {
+        const repairs = operations.length === 1 ? planned.filter((group) => group.action.action === "shell" && group.intents.length === 1).map((group) => deriveActionIntentRepair(group.action, operations[0], {
+          project: scope.project,
+          root: projectRoot,
+          rootRef: "project",
+          plannedCwd: directory,
+          cwd: operationCwd
+        })).filter((candidate) => candidate !== undefined).filter((candidate) => candidate.repairedActionID === actual2[0]?.actionID && planned.some((group) => group.intents[0]?.actionID === candidate.sourceActionID)) : [];
+        if (repairs.length === 1)
+          return {
+            effect: "repair",
+            candidate: repairs[0],
+            declaredActionIDs
+          };
         return actionNotDeclaredDecision(state, scope, actual2[0], declaredActionIDs, authority);
+      }
       return authorizeIntentSequence(state, scope, actual2, declaredActionIDs, authority);
     }
     if (kind === "subagent") {
@@ -11229,7 +11859,7 @@ function readOnlyShellResources(value, projectRoot, workingDirectory) {
 function readOnlyShellTool(tool, value, projectRoot, sessionDirectory) {
   if (tool !== "shell" && tool !== "bash")
     return false;
-  const args = isRecord8(value) ? value : {};
+  const args = isRecord9(value) ? value : {};
   if ([args.cwd, args.workdir].some((cwd2) => cwd2 !== undefined && typeof cwd2 !== "string"))
     return false;
   const cwd = typeof args.cwd === "string" ? path20.resolve(sessionDirectory, args.cwd) : undefined;
@@ -11317,7 +11947,7 @@ function inside4(target, root) {
 function text(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord8(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function compareText3(left, right) {
@@ -11469,9 +12099,9 @@ function createProjectAffinityResolver(options) {
     const registry = loadRegistry(options);
     if (registry.projects.length === 0)
       return;
-    const record2 = await readRecord2(options.storage, sessionID);
-    const current = record2?.canonicalKey ? findProject(registry.projects, record2.canonicalKey) : undefined;
-    if (current && !record2?.pending) {
+    const record3 = await readRecord2(options.storage, sessionID);
+    const current = record3?.canonicalKey ? findProject(registry.projects, record3.canonicalKey) : undefined;
+    if (current && !record3?.pending) {
       const conflicting = strongestCandidate(hints, registry.projects, registry.aliases, options.cwd);
       if (conflicting && conflicting.canonicalKey !== current.canonicalKey) {
         await writePending(options, sessionID, current.canonicalKey, "conflict", [current.canonicalKey, conflicting.canonicalKey], conflicting.canonicalKey);
@@ -11496,7 +12126,7 @@ function createProjectAffinityResolver(options) {
       return bind(options, sessionID, host);
     if (!current && registry.projects.length === 1)
       return bind(options, sessionID, registry.projects[0]);
-    if (!record2?.pending) {
+    if (!record3?.pending) {
       await writePending(options, sessionID, current?.canonicalKey, current ? "conflict" : "ambiguous", current ? [current.canonicalKey] : registry.projects.map((item) => item.canonicalKey));
     }
     return;
@@ -11508,20 +12138,20 @@ function createProjectAffinityResolver(options) {
     const registry = loadRegistry(options);
     if (registry.projects.length === 0)
       return;
-    const record2 = await readRecord2(options.storage, sessionID);
+    const record3 = await readRecord2(options.storage, sessionID);
     const text2 = promptText(input);
     const promptCandidate = candidateFromText(text2, registry.projects);
     const selected = promptCandidate ?? candidateFromPaths(promptPaths(input), registry.projects, options.cwd);
-    if (record2?.pending?.kind === "conflict" && record2.pending.target && affirmative(text2)) {
-      const target = findProject(registry.projects, record2.pending.target);
+    if (record3?.pending?.kind === "conflict" && record3.pending.target && affirmative(text2)) {
+      const target = findProject(registry.projects, record3.pending.target);
       if (target)
         return bind(options, sessionID, target);
     }
     if (selected) {
-      if (!record2?.canonicalKey || record2.canonicalKey === selected.canonicalKey || record2.pending?.kind === "ambiguous" || explicitSwitch(text2)) {
+      if (!record3?.canonicalKey || record3.canonicalKey === selected.canonicalKey || record3.pending?.kind === "ambiguous" || explicitSwitch(text2)) {
         return bind(options, sessionID, selected);
       }
-      await writePending(options, sessionID, record2.canonicalKey, "conflict", [record2.canonicalKey, selected.canonicalKey], selected.canonicalKey);
+      await writePending(options, sessionID, record3.canonicalKey, "conflict", [record3.canonicalKey, selected.canonicalKey], selected.canonicalKey);
       return;
     }
     return resolveSessionProject(sessionID);
@@ -11537,17 +12167,17 @@ function createProjectAffinityResolver(options) {
     try {
       project = await resolveSessionProject(sessionID);
     } catch {}
-    const record2 = await readRecord2(options.storage, sessionID).catch(() => {
+    const record3 = await readRecord2(options.storage, sessionID).catch(() => {
       return;
     });
     const instruction = project ? `${PROJECT_AFFINITY_MARKER}
-Proyecto activo: ${project.canonicalKey}. Raiz autorizada: ${project.root}. Usa la clave canonica para memoria, docs y contexto; no infieras otro proyecto desde cwd.` : clarificationInstruction(record2);
+Proyecto activo: ${project.canonicalKey}. Raiz autorizada: ${project.root}. Usa la clave canonica para memoria, docs y contexto; no infieras otro proyecto desde cwd.` : clarificationInstruction(record3);
     appendSystemText(system, instruction);
     input.system = system;
-    if (!project && record2?.pending && !record2.pending.clarificationAsked) {
+    if (!project && record3?.pending && !record3.pending.clarificationAsked) {
       await options.storage.set(projectAffinityKey(sessionID), {
-        ...record2,
-        pending: { ...record2.pending, clarificationAsked: true },
+        ...record3,
+        pending: { ...record3.pending, clarificationAsked: true },
         updatedAt: timestamp2(options)
       });
     }
@@ -11640,10 +12270,10 @@ async function writePending(options, sessionID, canonicalKey, kind, candidates, 
 }
 async function readRecord2(storage, sessionID) {
   const value = await storage.get(projectAffinityKey(sessionID));
-  if (!isRecord9(value) || value.schema !== 1 || value.sessionID !== sessionID)
+  if (!isRecord10(value) || value.schema !== 1 || value.sessionID !== sessionID)
     return;
   const canonicalKey = stringValue5(value.canonicalKey);
-  const pendingValue = isRecord9(value.pending) ? value.pending : undefined;
+  const pendingValue = isRecord10(value.pending) ? value.pending : undefined;
   const kind = pendingValue?.kind === "ambiguous" || pendingValue?.kind === "conflict" ? pendingValue.kind : undefined;
   const candidates = Array.isArray(pendingValue?.candidates) ? pendingValue.candidates.filter((item) => typeof item === "string") : [];
   return {
@@ -11659,8 +12289,8 @@ async function readRecord2(storage, sessionID) {
     updatedAt: stringValue5(value.updatedAt) ?? new Date(0).toISOString()
   };
 }
-function clarificationInstruction(record2) {
-  const pending = record2?.pending;
+function clarificationInstruction(record3) {
+  const pending = record3?.pending;
   const candidates = pending?.candidates.join(", ") || "ninguno registrado";
   if (pending?.clarificationAsked) {
     return `${PROJECT_AFFINITY_MARKER}
@@ -11668,13 +12298,13 @@ Proyecto aun no resuelto. Ya se solicito una aclaracion; no repitas la pregunta.
   }
   if (pending?.kind === "conflict") {
     return `${PROJECT_AFFINITY_MARKER}
-Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${record2?.canonicalKey} o cambiar explicitamente a ${pending.target}. No ejecutes operaciones protegidas hasta resolverlo.`;
+Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${record3?.canonicalKey} o cambiar explicitamente a ${pending.target}. No ejecutes operaciones protegidas hasta resolverlo.`;
   }
   return `${PROJECT_AFFINITY_MARKER}
 Proyecto ambiguo. Pregunta UNA sola vez cual proyecto usar entre: ${candidates}. La respuesta fijara la afinidad de esta sesion. No pidas claves tecnicas ni ejecutes operaciones protegidas antes de resolverlo.`;
 }
 function promptText(input) {
-  const prompt = isRecord9(input.prompt) ? input.prompt : undefined;
+  const prompt = isRecord10(input.prompt) ? input.prompt : undefined;
   return [stringValue5(prompt?.text), stringValue5(input.text), stringValue5(input.message)].filter(Boolean).join(`
 `);
 }
@@ -11692,7 +12322,7 @@ function collectPaths(value, output, depth) {
     value.forEach((item) => collectPaths(item, output, depth + 1));
     return;
   }
-  if (!isRecord9(value))
+  if (!isRecord10(value))
     return;
   for (const [key, item] of Object.entries(value)) {
     if (["path", "filePath", "file_path", "directory", "cwd", "workdir", "uri"].includes(key) && typeof item === "string") {
@@ -11752,9 +12382,9 @@ function stringValue5(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 function isTextPart4(value) {
-  return isRecord9(value) && value.type === "text" && typeof value.text === "string";
+  return isRecord10(value) && value.type === "text" && typeof value.text === "string";
 }
-function isRecord9(value) {
+function isRecord10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -11773,12 +12403,12 @@ var SESSION_HOOKS = [
   "session.http-response.after"
 ];
 function detectHost(value) {
-  if (!isRecord10(value))
+  if (!isRecord11(value))
     return "unknown";
-  const isV2 = isRecord10(value.session) && typeof value.session.hook === "function" || isRecord10(value.mcp) && typeof value.mcp.transform === "function" || isRecord10(value.agent) && typeof value.agent.transform === "function";
+  const isV2 = isRecord11(value.session) && typeof value.session.hook === "function" || isRecord11(value.mcp) && typeof value.mcp.transform === "function" || isRecord11(value.agent) && typeof value.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord10(value.client) && isRecord10(value.project) && typeof value.directory === "string";
+  const isV1 = isRecord11(value.client) && isRecord11(value.project) && typeof value.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -11797,7 +12427,7 @@ async function setupV2(context) {
   const criticalGaps = [];
   const domain = (name) => {
     const value = context[name];
-    if (!isRecord10(value) || typeof value.hook !== "function")
+    if (!isRecord11(value) || typeof value.hook !== "function")
       return;
     return value;
   };
@@ -11851,8 +12481,8 @@ async function setupV2(context) {
     };
     options.resolveParentSession = async (sessionID) => {
       const raw = await session.get?.({ sessionID });
-      const value = isRecord10(raw) && isRecord10(raw.data) ? raw.data : raw;
-      return isRecord10(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
+      const value = isRecord11(raw) && isRecord11(raw.data) ? raw.data : raw;
+      return isRecord11(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
     };
   }
   const affinityStorage = storage && typeof storage.get === "function" ? storage : undefined;
@@ -11898,7 +12528,7 @@ async function setupV2(context) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord10(input.env)) {
+      if (isRecord11(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -11913,6 +12543,7 @@ async function setupV2(context) {
     criticalGaps.push("shell.create.before");
   capabilities.shell = Boolean(shell);
   capabilities["shell.create.before"] = options.shellRegistered === true;
+  const approvalPort = isRecord11(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
   const tool = domain("tool");
   if (tool) {
     const registered = await registerHook(tool, "execute.before", async (input) => {
@@ -11920,7 +12551,7 @@ async function setupV2(context) {
       if (shouldBlockPluginResult(result, options)) {
         throw new Error(formatPluginBlock(result));
       }
-      await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
+      await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority, approvalPort);
     }, cleanups);
     options.toolRegistered = registered;
     capabilities.tool = true;
@@ -11941,7 +12572,6 @@ async function setupV2(context) {
     if (!freshnessRegistered)
       degraded.push("memory.freshness");
     const planningTools = typeof tool.transform === "function" ? tool : undefined;
-    const approvalPort = isRecord10(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
     if (planningTools && approvalPort && planStorage && planningAuthority && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
@@ -11962,7 +12592,7 @@ async function setupV2(context) {
     criticalGaps.push("tool.hook");
     criticalGaps.push("planning.v5");
   }
-  const modeHost = isRecord10(context.command) && typeof context.command.transform === "function" && isRecord10(context.session) && typeof context.session.synthetic === "function" && isRecord10(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const modeHost = isRecord11(context.command) && typeof context.command.transform === "function" && isRecord11(context.session) && typeof context.session.synthetic === "function" && isRecord11(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (modeHost) {
     try {
       const registration = await registerModeCommand(modeHost, options);
@@ -11975,7 +12605,7 @@ async function setupV2(context) {
   }
   if (!capabilities["mode.command"])
     degraded.push("mode.command");
-  const planCommandHost = isRecord10(context.command) && typeof context.command.transform === "function" && isRecord10(context.session) && typeof context.session.synthetic === "function" && isRecord10(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const planCommandHost = isRecord11(context.command) && typeof context.command.transform === "function" && isRecord11(context.session) && typeof context.session.synthetic === "function" && isRecord11(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (planCommandHost && planStorage && planningAuthority) {
     try {
       const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
@@ -12082,7 +12712,7 @@ async function setupV2(context) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord10(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
+    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord11(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -12113,12 +12743,12 @@ async function setupV2(context) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord10(input.client),
-    project: isRecord10(input.project),
+    client: isRecord11(input.client),
+    project: isRecord11(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord10(input.experimental_workspace)
+    workspace: isRecord11(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -12167,7 +12797,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback, cleanups) {
   try {
     const registration = await domain.hook(name, callback);
-    if (isRecord10(registration) && typeof registration.dispose === "function") {
+    if (isRecord11(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -12196,28 +12826,28 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context) {
-  const location = isRecord10(context.location) ? context.location : undefined;
+  const location = isRecord11(context.location) ? context.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function locationCanonical(context) {
-  const location = isRecord10(context.location) ? context.location : undefined;
-  const project = location && isRecord10(location.project) ? location.project : undefined;
+  const location = isRecord11(context.location) ? context.location : undefined;
+  const project = location && isRecord11(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function transformDomain(value) {
-  if (!isRecord10(value) || typeof value.transform !== "function")
+  if (!isRecord11(value) || typeof value.transform !== "function")
     return;
   return value;
 }
 function storageDomain(value) {
-  if (!isRecord10(value) || typeof value.set !== "function")
+  if (!isRecord11(value) || typeof value.set !== "function")
     return;
   return value;
 }
 function eventDomain(value) {
-  if (!isRecord10(value) || typeof value.subscribe !== "function")
+  if (!isRecord11(value) || typeof value.subscribe !== "function")
     return;
   return value;
 }
@@ -12256,7 +12886,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
             type: "local",
             command: ["node", paths.mnemoIndex],
             environment: memoryProject ? {
-              ...isRecord10(existingMnemo?.environment) ? existingMnemo.environment : {},
+              ...isRecord11(existingMnemo?.environment) ? existingMnemo.environment : {},
               MALAHOR_MEMORY_BOUND: "1",
               MALAHOR_MEMORY_PROJECT: memoryProject
             } : {
@@ -12340,7 +12970,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
         });
       }
     });
-    if (isRecord10(registration) && typeof registration.dispose === "function") {
+    if (isRecord11(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -12406,23 +13036,23 @@ function isMalahorHoriel(config, paths) {
   return command.some((item) => path22.resolve(paths.opencodeDir, item) === path22.resolve(index));
 }
 function withoutHorielEnablement(value) {
-  if (!isRecord10(value))
+  if (!isRecord11(value))
     return {};
   return Object.fromEntries(Object.entries(value).filter(([key]) => !/HORIEL.*ENABLED/i.test(key)));
 }
 function sessionLocationDirectory(value) {
-  const response = isRecord10(value) && isRecord10(value.data) ? value.data : value;
-  if (!isRecord10(response))
+  const response = isRecord11(value) && isRecord11(value.data) ? value.data : value;
+  if (!isRecord11(response))
     return;
-  const location = isRecord10(response.location) ? response.location : undefined;
+  const location = isRecord11(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function sessionLocationProject(value) {
-  const response = isRecord10(value) && isRecord10(value.data) ? value.data : value;
-  if (!isRecord10(response))
+  const response = isRecord11(value) && isRecord11(value.data) ? value.data : value;
+  if (!isRecord11(response))
     return;
-  const location = isRecord10(response.location) ? response.location : undefined;
-  const project = location && isRecord10(location.project) ? location.project : undefined;
+  const location = isRecord11(response.location) ? response.location : undefined;
+  const project = location && isRecord11(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : typeof project?.name === "string" ? project.name : typeof project?.id === "string" ? project.id : undefined;
 }
 function recordState(inspection) {
@@ -12474,7 +13104,7 @@ function warn(message) {
 function unique2(values) {
   return [...new Set(values)];
 }
-function isRecord10(value) {
+function isRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export {

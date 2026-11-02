@@ -846,6 +846,143 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     }
   });
 
+  test("stage directorio a manifest exacto pide un allow one-shot y conserva la revisión", async () => {
+    configure("ejecutar");
+    options.toolRegistered = true;
+    const core = path.join(repo, "src", "core");
+    const fixture = path.join(repo, "tests", "fixture.test.ts");
+    fs.mkdirSync(core, { recursive: true });
+    fs.mkdirSync(path.dirname(fixture), { recursive: true });
+    fs.writeFileSync(path.join(core, "a.ts"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(core, "b.ts"), "export const b = 2;\n");
+    fs.writeFileSync(fixture, "// fixture\n");
+    fs.writeFileSync(path.join(repo, "outside.ts"), "export {};\n");
+
+    const plannedCommand = "git add -- src/core tests/fixture.test.ts";
+    const actualCommand = "git add -- src/core/a.ts src/core/b.ts tests/fixture.test.ts";
+    const presented = proposePlan(scope("executor"), {
+      ...input("shell"),
+      actions: [{ action: "shell", resource: plannedCommand }],
+    });
+    const running = authorizePlan(presented, presented.digest);
+    records.set(planKey(SESSION), running);
+    const source = { type: "tool", messageID: "msg_stage_repair", id: "call_stage_repair" };
+    const permission: Record<string, unknown> = {
+      sessionID: SESSION,
+      action: "shell",
+      resources: [actualCommand],
+      source,
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(permission, options, storage);
+    expect(permission.effect).toBe("allow");
+
+    const approvals: Array<Record<string, unknown>> = [];
+    const approvalPort = {
+      assert: async (request: Record<string, unknown>) => {
+        approvals.push(request);
+        const nativeAsk: Record<string, unknown> = { ...request, effect: "allow" };
+        await evaluatePlanningPermission(nativeAsk, options, storage);
+        expect(nativeAsk.effect).toBe("ask");
+        expect(String(nativeAsk.message)).toContain("misma revisión");
+      },
+    };
+    const toolInput = {
+      sessionID: SESSION,
+      agent: "malahor",
+      messageID: source.messageID,
+      id: source.id,
+      tool: "shell",
+      input: { command: actualCommand, workdir: repo },
+    };
+
+    await evaluatePlanningTool(toolInput, options, storage, undefined, approvalPort);
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      sessionID: SESSION,
+      agent: "malahor",
+      action: "malahor_plan_repair",
+      save: [],
+    });
+    expect((approvals[0]?.resources as string[]).slice(-3)).toEqual([
+      "src/core/a.ts",
+      "src/core/b.ts",
+      "tests/fixture.test.ts",
+    ]);
+    const stillRunning = records.get(planKey(SESSION)) as PlanState;
+    expect(stillRunning).toMatchObject({
+      planID: running.planID,
+      revision: running.revision,
+      digest: running.digest,
+      phase: "running",
+    });
+    const attempts = [...records.entries()].filter(([key]) => key.startsWith("planning/v5/attempts/"));
+    expect(attempts).toHaveLength(1);
+
+    await expect(evaluatePlanningTool({ ...toolInput, id: "call_stage_repair_repeat" }, options, storage, undefined, approvalPort))
+      .rejects.toMatchObject({ code: "ACTION_REPAIR_EXHAUSTED" });
+    expect(approvals).toHaveLength(1);
+
+    const widened = {
+      ...permission,
+      resources: ["git add -- src/core/a.ts outside.ts"],
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(widened, options, storage);
+    expect(widened.effect).toBe("deny");
+    expect(String(widened.message)).toContain("ACTION_NOT_DECLARED");
+
+    const replacementPresented = proposePlan(scope("executor"), {
+      ...input("shell"),
+      actions: [{ action: "shell", resource: plannedCommand }],
+    });
+    const replacement = authorizePlan(replacementPresented, replacementPresented.digest);
+    records.set(planKey(SESSION), replacement);
+    const mutatingInput: Record<string, unknown> = {
+      ...toolInput,
+      id: "call_stage_repair_mutated",
+      input: { command: actualCommand, workdir: repo },
+    };
+    const mutatingPort = {
+      assert: async (request: Record<string, unknown>) => {
+        const nativeAsk: Record<string, unknown> = { ...request, effect: "allow" };
+        await evaluatePlanningPermission(nativeAsk, options, storage);
+        expect(nativeAsk.effect).toBe("ask");
+        (mutatingInput.input as Record<string, unknown>).command = "git add -- src/core/a.ts outside.ts";
+      },
+    };
+    await expect(evaluatePlanningTool(mutatingInput, options, storage, undefined, mutatingPort))
+      .rejects.toMatchObject({ code: "PLAN_INVALID" });
+
+    let signalApproval!: () => void;
+    let releaseApproval!: () => void;
+    const approvalStarted = new Promise<void>((resolve) => { signalApproval = resolve; });
+    const approvalGate = new Promise<void>((resolve) => { releaseApproval = resolve; });
+    let concurrentApprovals = 0;
+    const concurrentPort = {
+      assert: async () => {
+        concurrentApprovals += 1;
+        signalApproval();
+        await approvalGate;
+      },
+    };
+    const concurrentInput = {
+      ...toolInput,
+      id: "call_stage_repair_concurrent_a",
+      input: { command: actualCommand, workdir: repo },
+    };
+    const firstRepair = evaluatePlanningTool(concurrentInput, options, storage, undefined, concurrentPort);
+    await approvalStarted;
+    await expect(evaluatePlanningTool({
+      ...concurrentInput,
+      id: "call_stage_repair_concurrent_b",
+    }, options, storage, undefined, concurrentPort)).rejects.toMatchObject({ code: "ACTION_REPAIR_EXHAUSTED" });
+    expect(concurrentApprovals).toBe(1);
+    releaseApproval();
+    await firstRepair;
+  });
+
   test("el canonicalizador cerrado rechaza sustituciones y entorno inline en ambas fronteras", async () => {
     const mktemp = "mktemp -d /tmp/opencode/.sandbox/malahor-runtime-update-XXXXXX";
     const update = "node dist/index.js update --dry-run --yes";

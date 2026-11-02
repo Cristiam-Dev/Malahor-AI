@@ -251,6 +251,8 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   capabilities.shell = Boolean(shell);
   capabilities["shell.create.before"] = options.shellRegistered === true;
 
+  const approvalPort = isRecord(context.permission) && typeof context.permission.assert === "function"
+    ? context.permission as unknown as Parameters<typeof registerPlanningTools>[1] : undefined;
   const tool = domain("tool");
   if (tool) {
     const registered = await registerHook(tool, "execute.before", async (input) => {
@@ -258,7 +260,13 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       if (shouldBlockPluginResult(result, options)) {
         throw new Error(formatPluginBlock(result));
       }
-      await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
+      await evaluatePlanningTool(
+        input,
+        options,
+        planningAuthority ? planStorage : undefined,
+        planningAuthority,
+        approvalPort,
+      );
     }, cleanups);
     options.toolRegistered = registered;
     capabilities.tool = true;
@@ -281,8 +289,6 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
 
     const planningTools = typeof (tool as Record<string, unknown>).transform === "function"
       ? tool as unknown as PlanningTools : undefined;
-    const approvalPort = isRecord(context.permission) && typeof context.permission.assert === "function"
-      ? context.permission as unknown as Parameters<typeof registerPlanningTools>[1] : undefined;
     if (planningTools && approvalPort && planStorage && planningAuthority
       && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {

@@ -152,6 +152,20 @@ interface ActionIntent {
 interface ActionIntentApi {
   ACTION_INTENT_CANONICALIZER: "action-intent-v1";
   canonicalizeActionIntent(input: Record<string, unknown>): ActionIntent[];
+  deriveActionIntentRepair(
+    planned: { action: string; resource: string },
+    actual: { action: string; resource: string },
+    context: { project: string; root: string; cwd?: string },
+  ): {
+    kind: "git-stage-manifest";
+    sourceActionID: string;
+    repairedActionID: string;
+    relation: "equal" | "narrower";
+    manifest: string[];
+    manifestHash: string;
+    repairedInputHash: string;
+  } | undefined;
+  validActionIntentRepair(value: unknown, root: string): boolean;
   sameActionIntentSequence(left: readonly ActionIntent[], right: readonly ActionIntent[]): boolean;
 }
 
@@ -372,6 +386,95 @@ describe("A1: ActionIntentV1 y decisiones tipadas", () => {
     expect(api.sameActionIntentSequence(joined, reversed)).toBe(false);
     expect(changedArgs[0]?.actionID).not.toBe(split[0]?.actionID);
     expect(changedCwd[0]?.actionID).not.toBe(split[0]?.actionID);
+  });
+
+  test("repara git stage de directorio a manifest exacto sin ampliar paths ni cwd", async () => {
+    const api = await loadActionIntentApi();
+    const sourceDirectory = path.join(repo, "src", "core");
+    const exactTest = path.join(repo, "tests", "stage.test.ts");
+    const extra = path.join(repo, "outside.ts");
+    fs.mkdirSync(sourceDirectory, { recursive: true });
+    fs.writeFileSync(path.join(sourceDirectory, "a.ts"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(sourceDirectory, "b.ts"), "export const b = 2;\n");
+    fs.writeFileSync(exactTest, "// stage fixture\n");
+    fs.writeFileSync(extra, "export {};\n");
+
+    const planned = { action: "shell", resource: "git add -- src/core tests/stage.test.ts" };
+    const actual = {
+      action: "shell",
+      resource: "git add -- src/core/a.ts src/core/b.ts tests/stage.test.ts",
+    };
+    const equal = api.deriveActionIntentRepair(planned, actual, {
+      project: PROJECT,
+      root: repo,
+      cwd: repo,
+    });
+    const narrower = api.deriveActionIntentRepair(planned, {
+      action: "shell",
+      resource: "git add -- src/core/a.ts tests/stage.test.ts",
+    }, {
+      project: PROJECT,
+      root: repo,
+      cwd: repo,
+    });
+
+    expect(equal).toMatchObject({
+      kind: "git-stage-manifest",
+      relation: "equal",
+      manifest: ["src/core/a.ts", "src/core/b.ts", "tests/stage.test.ts"],
+    });
+    expect(equal?.sourceActionID).toMatch(/^[a-f0-9]{64}$/);
+    expect(equal?.repairedActionID).toMatch(/^[a-f0-9]{64}$/);
+    expect(equal?.manifestHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(equal?.repairedInputHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(api.validActionIntentRepair(equal, repo)).toBe(true);
+    expect(api.validActionIntentRepair({ ...equal, manifest: [...equal!.manifest, "outside.ts"] }, repo)).toBe(false);
+    expect(api.validActionIntentRepair({ ...equal, manifestHash: `sha256:${"0".repeat(64)}` }, repo)).toBe(false);
+    expect(narrower).toMatchObject({
+      relation: "narrower",
+      manifest: ["src/core/a.ts", "tests/stage.test.ts"],
+    });
+    expect(api.deriveActionIntentRepair({
+      action: "shell",
+      resource: "git add -- src/core/a.ts src/core/b.ts",
+    }, {
+      action: "shell",
+      resource: "git add -- src/core/b.ts src/core/a.ts",
+    }, { project: PROJECT, root: repo, cwd: repo })).toBeUndefined();
+
+    for (const [attempted, cwd] of [
+      ["git add -- src/core/a.ts outside.ts", repo],
+      ["git add -- src/core", repo],
+      [actual.resource, path.join(repo, "src")],
+      ["git add -A", repo],
+      ["git add -- src/core/*.ts", repo],
+      ["git add -- :(glob)src/core/*.ts", repo],
+      [`git add -- ${path.join(sourceDirectory, "a.ts")}`, repo],
+      ["git add -- src/core/../core/a.ts", repo],
+    ] as const) {
+      expect(api.deriveActionIntentRepair(planned, { action: "shell", resource: attempted }, {
+        project: PROJECT,
+        root: repo,
+        cwd,
+      })).toBeUndefined();
+    }
+
+    const alias = path.join(repo, "src", "alias");
+    fs.symlinkSync(sourceDirectory, alias, "dir");
+    expect(api.deriveActionIntentRepair(planned, {
+      action: "shell",
+      resource: "git add -- src/alias/a.ts src/core/b.ts tests/stage.test.ts",
+    }, { project: PROJECT, root: repo, cwd: repo })).toBeUndefined();
+    fs.rmSync(alias);
+
+    const hardlink = path.join(sourceDirectory, "hardlink.ts");
+    fs.linkSync(extra, hardlink);
+    expect(api.deriveActionIntentRepair(planned, actual, {
+      project: PROJECT,
+      root: repo,
+      cwd: repo,
+    })).toBeUndefined();
+    fs.rmSync(hardlink);
   });
 
   test("shell V1 bloquea pipe, redirects, sustituciones, glob, eval, shell anidado y composiciones distintas de &&", async () => {

@@ -11,7 +11,10 @@ import {
   canonicalizeActionIntent,
   canonicalizePlannedAction,
   canonicalizePlannedActions,
+  deriveActionIntentRepair,
   sameActionIntentSequence,
+  validActionIntentRepair,
+  type ActionIntentRepairV1,
   type ActionIntentV1,
 } from "../cli/core/action-intent";
 import {
@@ -39,6 +42,7 @@ import {
   persistPlanState,
   type PlanningRetentionStorage,
 } from "./plan-retention";
+import { createExecutionGuard } from "./execution-guard";
 
 export type PlanningStorage = PlanningRetentionStorage;
 
@@ -75,6 +79,8 @@ const REVIEW_ACTION = "malahor_plan_review";
 const RUN_ACTION = "malahor_plan_run";
 const RESUME_ACTION = "malahor_plan_resume";
 const COMPLETE_ACTION = "malahor_plan_complete";
+const REPAIR_ACTION = "malahor_plan_repair";
+const pendingRepairApprovals = new Set<string>();
 const FOREGROUND_START = "<!-- malahor-plan-foreground:start -->";
 const FOREGROUND_END = "<!-- malahor-plan-foreground:end -->";
 const fallbackAuthority = DEFAULT_PLANNING_AUTHORITY;
@@ -139,6 +145,10 @@ export async function evaluatePlanningPermission(
         : `Segunda confirmacion: ejecuta SOLO las acciones del plan revisado:\n${renderPlan(state)}`;
     return;
   }
+  if (action === REPAIR_ACTION) {
+    await evaluateRepairApproval(input, resolved, storage, options, authority);
+    return;
+  }
 
   if (CODE_READ_TOOLS.has(action) && resolved?.scope.mode === "advisor") {
     deny(input, "Asesor: no consulta archivos de codigo ni verifica la implementacion.");
@@ -175,6 +185,12 @@ export async function evaluatePlanningPermission(
     undefined,
     authority,
   );
+  if (decision.effect === "repair") {
+    if (options.toolRegistered !== true || !attributedToolSource(input.source)) {
+      denyDecision(input, { effect: "deny", code: "CRITICAL_CONTROL_UNAVAILABLE" });
+    }
+    return;
+  }
   if (decision.effect !== "allow") {
     denyDecision(input, decision);
   }
@@ -184,6 +200,7 @@ export async function evaluatePlanningPermission(
 export async function evaluatePlanningTool(
   input: Record<string, unknown>, options: PluginAdapterOptions, storage?: PlanningStorage,
   authority: PlanningAuthority = fallbackAuthority,
+  approvals?: ApprovalPort,
 ): Promise<void> {
   const tool = text(input.tool);
   if (routineTool(tool)) return;
@@ -217,6 +234,23 @@ export async function evaluatePlanningTool(
     operationCwd,
     authority,
   );
+  if (decision.effect === "repair") {
+    if (!validState(rawState, authority) || rawState.version !== 5 || !approvals) {
+      throw new PlanningAuthorizationError("CRITICAL_CONTROL_UNAVAILABLE");
+    }
+    await applyRepairAuthorization(
+      input,
+      decision.candidate,
+      decision.declaredActionIDs,
+      rawState,
+      approvals,
+      storage,
+      authority,
+      projectRoot,
+      resolved.directory,
+    );
+    return;
+  }
   if (decision.effect === "deny") throw new PlanningAuthorizationError(decision.code, decision.safeDetail);
   if (decision.effect === "defer") {
     throw new PlanningAuthorizationError("CRITICAL_CONTROL_UNAVAILABLE", "La acción no alcanzó su frontera autoritativa.");
@@ -498,6 +532,197 @@ async function ask(port: ApprovalPort, call: ToolCall, action: string, digest: s
   });
 }
 
+async function applyRepairAuthorization(
+  input: Record<string, unknown>,
+  candidate: ActionIntentRepairV1,
+  declaredActionIDs: string[],
+  state: PlanStateV5,
+  port: ApprovalPort,
+  storage: PlanningStorage,
+  authority: PlanningAuthority,
+  projectRoot: string,
+  directory: string,
+): Promise<void> {
+  if (!validActionIntentRepair(candidate, projectRoot)) {
+    throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+  }
+  const call = repairToolCall(input);
+  if (!call || repairInputActionID(input, state.project, projectRoot, directory) !== candidate.repairedActionID) {
+    throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+  }
+  const reservation = [state.planID, state.revision, candidate.sourceActionID, candidate.repairedInputHash].join("\0");
+  if (pendingRepairApprovals.has(reservation)) throw new PlanningAuthorizationError("ACTION_REPAIR_EXHAUSTED");
+  pendingRepairApprovals.add(reservation);
+  try {
+    const guard = createExecutionGuard({
+      plan: {
+        planID: state.planID,
+        revision: state.revision,
+        digest: state.digest,
+        phase: "running",
+        actionIDs: declaredActionIDs,
+      },
+      storage,
+    });
+    const adapterRepair = { equivalent: true, ...candidate };
+    const available = await guard.inspectAdapterRepair({
+      actionID: candidate.sourceActionID,
+      adapterRepair,
+    });
+    if (available.code === "ADAPTER_REPAIR_EXHAUSTED") {
+      throw new PlanningAuthorizationError("ACTION_REPAIR_EXHAUSTED");
+    }
+    if (available.decision !== "retry") throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+
+    await port.assert({
+      sessionID: state.sessionID,
+      agent: call.agent,
+      source: { type: "tool", messageID: call.messageID, id: call.id },
+      action: REPAIR_ACTION,
+      resources: repairApprovalResources(state, candidate),
+      save: [],
+    });
+
+    const fresh = await readPlan(storage, state.sessionID, authority);
+    const currentCall = repairToolCall(input);
+    if (!fresh || fresh.version !== 5 || fresh.phase !== "running"
+      || fresh.planID !== state.planID || fresh.revision !== state.revision || fresh.digest !== state.digest
+      || !sameToolCall(call, currentCall)
+      || repairInputActionID(input, state.project, projectRoot, directory) !== candidate.repairedActionID
+      || !validActionIntentRepair(candidate, projectRoot)) {
+      throw new PlanningAuthorizationError("PLAN_INVALID");
+    }
+    const applied = await guard.recordAttempt({
+      actionID: candidate.sourceActionID,
+      decisionCode: "ACTION_SERIALIZATION_MISMATCH",
+      canonicalInputHash: candidate.repairedInputHash,
+      resourceDigests: { before: [candidate.manifestHash], after: [candidate.manifestHash] },
+      adapterRepair,
+      result: { class: "not-run" },
+    });
+    if (applied.code === "ADAPTER_REPAIR_EXHAUSTED") {
+      throw new PlanningAuthorizationError("ACTION_REPAIR_EXHAUSTED");
+    }
+    if (applied.code !== "ADAPTER_REPAIR_APPLIED") throw new PlanningAuthorizationError("ACTION_NOT_DECLARED");
+  } finally {
+    pendingRepairApprovals.delete(reservation);
+  }
+}
+
+async function evaluateRepairApproval(
+  input: Record<string, unknown>,
+  resolved: { scope: PlanScope; directory: string } | undefined,
+  storage: PlanningStorage | undefined,
+  options: PluginAdapterOptions,
+  authority: PlanningAuthority,
+): Promise<void> {
+  if (!resolved || !storage || !attributedToolSource(input.source)) {
+    deny(input, "Reparación técnica sin sesión, storage o llamada de tool verificable.");
+    return;
+  }
+  const state = await readPlan(storage, resolved.scope.sessionID, authority);
+  const resources = Array.isArray(input.resources) ? input.resources : [];
+  const candidate = repairFromApprovalResources(resources);
+  const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+  let declaredActionIDs: string[] = [];
+  if (state?.version === 5) {
+    try {
+      declaredActionIDs = plannedIntentGroups(state, resolved.directory, projectRoot)
+        .flatMap((group) => group.intents.map((intent) => intent.actionID));
+    } catch {
+      deny(input, "No se pudieron recanonicalizar las acciones del plan para aprobar la reparación.");
+      return;
+    }
+  }
+  if (!state || state.version !== 5 || state.phase !== "running"
+    || state.project !== resolved.scope.project || state.mode !== resolved.scope.mode
+    || state.policyRevision !== resolved.scope.policyRevision
+    || !candidate || !validActionIntentRepair(candidate, projectRoot)
+    || !declaredActionIDs.includes(candidate.sourceActionID)
+    || resources[0] !== state.planID || resources[1] !== state.revision || resources[2] !== state.digest) {
+    deny(input, "Reparación técnica inválida, desactualizada o fuera del plan vigente.");
+    return;
+  }
+  input.effect = "ask";
+  input.message = `Autoriza una reparación técnica equivalente dentro de la misma revisión para ${candidate.manifest.length} archivo(s) exacto(s). No amplía paths, cwd ni efectos.`;
+}
+
+function repairApprovalResources(state: PlanStateV5, candidate: ActionIntentRepairV1): string[] {
+  return [
+    state.planID,
+    state.revision,
+    state.digest,
+    candidate.sourceActionID,
+    candidate.repairedActionID,
+    candidate.repairedInputHash,
+    candidate.manifestHash,
+    candidate.relation,
+    ...candidate.manifest,
+  ];
+}
+
+function repairFromApprovalResources(resources: unknown[]): ActionIntentRepairV1 | undefined {
+  if (resources.length < 9 || resources.some((item) => typeof item !== "string")) return undefined;
+  const relation = resources[7];
+  if (relation !== "equal" && relation !== "narrower") return undefined;
+  return {
+    schema: 1,
+    kind: "git-stage-manifest",
+    sourceActionID: resources[3] as string,
+    repairedActionID: resources[4] as string,
+    repairedInputHash: resources[5] as string,
+    manifestHash: resources[6] as string,
+    relation,
+    manifest: resources.slice(8) as string[],
+  };
+}
+
+function repairToolCall(input: Record<string, unknown>): ToolCall | undefined {
+  const context = isRecord(input.context) ? input.context : {};
+  const source = isRecord(input.source) ? input.source : {};
+  const sessionID = text(input.sessionID || context.sessionID);
+  const messageID = text(input.messageID || context.messageID || source.messageID);
+  const id = text(input.id || input.callID || input.toolCallID || context.id || context.callID || source.id);
+  const agent = text(input.agent || context.agent) || "malahor";
+  return sessionID && messageID && id ? { sessionID, messageID, id, agent } : undefined;
+}
+
+function repairInputActionID(
+  input: Record<string, unknown>,
+  project: string,
+  projectRoot: string,
+  directory: string,
+): string | undefined {
+  try {
+    const operations = toolActions(text(input.tool), input.input, directory);
+    if (operations?.length !== 1 || operations[0]?.action !== "shell") return undefined;
+    const args = isRecord(input.input) ? input.input : {};
+    const operationCwd = typeof args.workdir === "string" ? path.resolve(directory, args.workdir)
+      : typeof args.cwd === "string" ? path.resolve(directory, args.cwd)
+        : directory;
+    const intents = canonicalizePlannedAction(operations[0], {
+      project,
+      root: projectRoot,
+      rootRef: "project",
+      cwd: operationCwd,
+    });
+    return intents.length === 1 ? intents[0]?.actionID : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameToolCall(left: ToolCall, right: ToolCall | undefined): boolean {
+  if (!right) return false;
+  return left.sessionID === right.sessionID && left.agent === right.agent
+    && left.messageID === right.messageID && left.id === right.id;
+}
+
+function attributedToolSource(value: unknown): boolean {
+  return isRecord(value) && value.type === "tool" && Boolean(text(value.messageID)) && Boolean(text(value.id));
+}
+
+
 async function requireScope(call: ToolCall, options: PluginAdapterOptions) {
   const resolved = await resolvePlanningScope(call.sessionID, options);
   if (!resolved) throw new Error("Proyecto registrado/sesion no evaluable: planeacion bloqueada.");
@@ -568,6 +793,14 @@ interface PlannedIntentGroup {
   intents: ActionIntentV1[];
 }
 
+interface RepairAuthorization {
+  effect: "repair";
+  candidate: ActionIntentRepairV1;
+  declaredActionIDs: string[];
+}
+
+type OperationAuthorization = AuthorizationDecision | RepairAuthorization;
+
 const DUMMY_ACTION_ID = "0".repeat(64);
 
 function authorizeResources(
@@ -579,7 +812,7 @@ function authorizeResources(
   projectRoot: string,
   operationCwd: string | undefined,
   authority: PlanningAuthority,
-): AuthorizationDecision {
+): OperationAuthorization {
   if (resources.length === 0 || resources.some((item) => typeof item !== "string")) {
     return decisionForCanonicalizationFailure(state, scope, "ACTION_NOT_CANONICALIZABLE", authority);
   }
@@ -602,7 +835,7 @@ function authorizeOperations(
   projectRoot: string,
   operationCwd: string,
   authority: PlanningAuthority,
-): AuthorizationDecision {
+): OperationAuthorization {
   const preflight = decideAuthorization({
     state,
     scope,
@@ -644,7 +877,27 @@ function authorizeOperations(
       }));
       const match = planned.find((group) => group.action.action === "shell"
         && sameActionIntentSequence(group.intents, actual));
-      if (!match) return actionNotDeclaredDecision(state, scope, actual[0], declaredActionIDs, authority);
+      if (!match) {
+        const repairs = operations.length === 1 ? planned
+          .filter((group) => group.action.action === "shell" && group.intents.length === 1)
+          .map((group) => deriveActionIntentRepair(group.action, operations[0]!, {
+            project: scope.project,
+            root: projectRoot,
+            rootRef: "project",
+            plannedCwd: directory,
+            cwd: operationCwd,
+          }))
+          .filter((candidate): candidate is ActionIntentRepairV1 => candidate !== undefined)
+          .filter((candidate) => candidate.repairedActionID === actual[0]?.actionID
+            && planned.some((group) => group.intents[0]?.actionID === candidate.sourceActionID))
+          : [];
+        if (repairs.length === 1) return {
+          effect: "repair",
+          candidate: repairs[0]!,
+          declaredActionIDs,
+        };
+        return actionNotDeclaredDecision(state, scope, actual[0], declaredActionIDs, authority);
+      }
       return authorizeIntentSequence(state, scope, actual, declaredActionIDs, authority);
     }
 
