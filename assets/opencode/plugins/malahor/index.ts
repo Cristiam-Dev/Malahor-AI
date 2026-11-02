@@ -1,9 +1,9 @@
 // malahor-managed
 // @ts-nocheck bundle generado desde src/plugin/index.ts; el source se typechequea con tsconfig.json
 // src/plugin/index.ts
-import fs15 from "node:fs";
+import fs17 from "node:fs";
 import os2 from "node:os";
-import path20 from "node:path";
+import path22 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -22,6 +22,10 @@ function resolvePaths(env = process.env, cwd = process.cwd(), platform = process
     mnemoDir: pathApi.join(malahorHome, "mnemo"),
     mnemoDb: pathApi.join(malahorHome, "mnemo", "db.json"),
     mnemoIndex: pathApi.join(malahorHome, "mnemo", "index.js"),
+    horielDir: pathApi.join(malahorHome, "horiel"),
+    horielDb: pathApi.join(malahorHome, "horiel", "horiel.sqlite"),
+    horielSnapshots: pathApi.join(malahorHome, "horiel", "snapshots"),
+    horielIndex: pathApi.join(malahorHome, "horiel", "index.js"),
     docsDir: pathApi.join(malahorHome, "docs"),
     docsIndex: pathApi.join(malahorHome, "docs", "index.js"),
     assetsDir: pathApi.join(malahorHome, "assets"),
@@ -2012,7 +2016,7 @@ function recordValue2(value) {
 
 // src/cli/core/hooks/plugin-adapter.ts
 import { execFileSync as execFileSync4 } from "node:child_process";
-import path15 from "node:path";
+import path16 from "node:path";
 
 // src/cli/core/hooks/approvals.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
@@ -2083,7 +2087,7 @@ var CODE_MODE_TOOL_NAMES = new Set([
   "typescript",
   "python"
 ]);
-var MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "docs", "codegraph"];
+var MCP_SERVER_TOOL_PREFIXES = ["mcp", "mnemo", "horiel", "docs", "codegraph"];
 function isMcpToolName(value) {
   const normalized = value.trim().toLowerCase();
   return MCP_SERVER_TOOL_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}_`) || normalized.startsWith(`${prefix}.`) || normalized.startsWith(`${prefix}:`));
@@ -3328,8 +3332,8 @@ function isRecord3(value) {
 
 // src/cli/core/hooks/rules.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import fs10 from "node:fs";
-import path14 from "node:path";
+import fs11 from "node:fs";
+import path15 from "node:path";
 
 // src/cli/core/infrastructure-boundary.ts
 import fs9 from "node:fs";
@@ -3740,6 +3744,566 @@ function isEmojiGrapheme(value) {
   return /\p{Extended_Pictographic}/u.test(value) || /^(?:\p{Regional_Indicator}){2}$/u.test(value) || /^[#*0-9]\uFE0F?\u20E3$/u.test(value);
 }
 
+// src/cli/core/hooks/secret-scan.ts
+import fs10 from "node:fs";
+import path14 from "node:path";
+var SECRET_KINDS = [
+  "private-key",
+  "aws-access-key",
+  "credential-assignment",
+  "bearer-token",
+  "env-file"
+];
+var PRIVATE_KEY_SOURCE = ["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" ");
+var CREDENTIAL_NAME_SOURCE = "api[_-]?key|access[_-]?token|secret[_-]?key|password";
+var CREDENTIAL_ASSIGNMENT_SOURCE = `(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])([^\\r\\n"']{16,})\\3`;
+var FILE_PATTERNS = [
+  { kind: "private-key", source: PRIVATE_KEY_SOURCE },
+  { kind: "aws-access-key", source: "\\b(AKIA|ASIA)[A-Z0-9]{16}\\b" },
+  {
+    kind: "credential-assignment",
+    source: CREDENTIAL_ASSIGNMENT_SOURCE,
+    flags: "i"
+  }
+];
+var PAYLOAD_PATTERNS = [
+  ...FILE_PATTERNS,
+  { kind: "bearer-token", source: "\\bBearer\\s+[A-Za-z0-9._~+/=-]{20,}" }
+];
+var SECRET_KIND_SET = new Set(SECRET_KINDS);
+var SECRET_PATCH_SUMMARY_BRAND = Symbol("malahor.secret-patch-summary");
+var MAX_SCANNED_FILE_BYTES = 512 * 1024;
+var MAX_PATCH_FILES = 100;
+var MAX_FINDINGS_PER_KIND = 1e6;
+var MAX_EXPORTED_FINDINGS = 100;
+var MAX_REMEDIATION_LINE_CHARS = 500;
+var SYNTHETIC_VALUE_EXPRESSION = '["synthetic", "fixture", "credential"].join("-")';
+var SYNTHETIC_VALUE_PATTERN = /^synthetic[-_][A-Za-z0-9._-]{8,80}$/i;
+var DIRECT_SYNTHETIC_ASSIGNMENT = new RegExp(`^(\\s*(?:(?:export\\s+)?(?:const|let)\\s+)?)(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\4([,;]?\\s*)$`, "i");
+var SERIALIZED_DECLARATION = /^(\s*(?:(?:export\s+)?(?:const|let))\s+([A-Za-z_$][A-Za-z0-9_$]{0,127})\s*=\s*)(["'`])(.+)\3(;?\s*)$/;
+var SERIALIZED_SYNTHETIC_ASSIGNMENT = new RegExp(`^(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\3$`, "i");
+function detectFileSecretCounts(content, filePath) {
+  const counts = countPatterns(content, FILE_PATTERNS);
+  if (filePath && /^\.env(\.|$)/.test(path14.basename(filePath)))
+    counts["env-file"] = 1;
+  return counts;
+}
+function detectFileSecretFindings(content, filePath, displayPath = path14.basename(filePath)) {
+  const findings = [];
+  const lines = content.split(/\r?\n/);
+  for (let index = 0;index < lines.length && findings.length < MAX_EXPORTED_FINDINGS; index += 1) {
+    const line = lines[index] ?? "";
+    const matchesByPattern = FILE_PATTERNS.map((pattern) => {
+      const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
+      return { pattern, matches: [...line.matchAll(new RegExp(pattern.source, flags))] };
+    });
+    const lineFindingCount = matchesByPattern.reduce((count, item) => count + item.matches.length, 0);
+    for (const { pattern, matches } of matchesByPattern) {
+      for (const match of matches) {
+        const remediation = pattern.kind === "credential-assignment" ? buildSyntheticFixtureRemediation(line, filePath, displayPath, index + 1, match, lineFindingCount) : undefined;
+        findings.push({
+          kind: pattern.kind,
+          path: displayPath,
+          line: index + 1,
+          ...remediation ? { remediation } : {}
+        });
+        if (findings.length >= MAX_EXPORTED_FINDINGS)
+          break;
+      }
+      if (findings.length >= MAX_EXPORTED_FINDINGS)
+        break;
+    }
+  }
+  if (/^\.env(\.|$)/.test(path14.basename(filePath)) && !findings.some((finding) => finding.kind === "env-file")) {
+    findings.push({ kind: "env-file", path: displayPath, line: 1 });
+  }
+  return findings;
+}
+function detectPayloadSecretKinds(content) {
+  return secretKinds(countPatterns(content, PAYLOAD_PATTERNS));
+}
+function secretKinds(counts) {
+  return SECRET_KINDS.filter((kind) => (counts[kind] ?? 0) > 0);
+}
+function buildSecretPatchSummary(patchText, cwd) {
+  const parsed = parsePatchSections(patchText);
+  if (!parsed.evaluable || parsed.sections.length === 0 || parsed.sections.length > MAX_PATCH_FILES) {
+    return brandedSummary(false, []);
+  }
+  const root = path14.resolve(cwd);
+  const seen = new Set;
+  const files = [];
+  for (const section of parsed.sections) {
+    const absolute = path14.resolve(root, section.path);
+    if (!isWithin2(absolute, root) || seen.has(absolute))
+      return brandedSummary(false, []);
+    seen.add(absolute);
+    if (section.operation === "delete") {
+      files.push({ path: section.path, operation: section.operation, before: {}, after: {} });
+      continue;
+    }
+    if (section.operation === "add") {
+      if (fs10.existsSync(absolute))
+        return brandedSummary(false, []);
+      files.push({
+        path: section.path,
+        operation: section.operation,
+        before: {},
+        after: detectFileSecretCounts(section.added.join(`
+`), absolute)
+      });
+      continue;
+    }
+    const current = readRegularTextFile(absolute);
+    if (current === null || section.added.length + section.removed.length === 0 || !removedLinesExist(current, section.removed)) {
+      return brandedSummary(false, []);
+    }
+    const before = detectFileSecretCounts(current, absolute);
+    const removed = detectFileSecretCounts(section.removed.join(`
+`));
+    const added = detectFileSecretCounts(section.added.join(`
+`));
+    const after = applySecretDelta(before, removed, added);
+    if (!after)
+      return brandedSummary(false, []);
+    files.push({ path: section.path, operation: section.operation, before, after });
+  }
+  return brandedSummary(true, files);
+}
+function parseSecretPatchSummary(value) {
+  if (typeof value !== "object" || value === null || value[SECRET_PATCH_SUMMARY_BRAND] !== true)
+    return null;
+  const record = objectValue(value);
+  if (!record || record.version !== 1 || typeof record.evaluable !== "boolean" || !Array.isArray(record.files) || record.files.length === 0 || record.files.length > MAX_PATCH_FILES)
+    return null;
+  const seen = new Set;
+  const files = [];
+  for (const item of record.files) {
+    const file = objectValue(item);
+    if (!file || typeof file.path !== "string" || !file.path.trim() || file.path.length > 4096 || !["add", "update", "delete"].includes(String(file.operation)))
+      return null;
+    if (seen.has(file.path))
+      return null;
+    seen.add(file.path);
+    const before = parseSecretCounts(file.before);
+    const after = parseSecretCounts(file.after);
+    if (!before || !after)
+      return null;
+    files.push({
+      path: file.path,
+      operation: file.operation,
+      before,
+      after
+    });
+  }
+  return { version: 1, evaluable: record.evaluable, files };
+}
+function countPatterns(content, patterns) {
+  const counts = {};
+  for (const pattern of patterns) {
+    const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
+    const count = [...content.matchAll(new RegExp(pattern.source, flags))].length;
+    if (count > 0)
+      counts[pattern.kind] = count;
+  }
+  return counts;
+}
+function parsePatchSections(patchText) {
+  const sections = [];
+  let current;
+  let evaluable = true;
+  const flush = () => {
+    if (current)
+      sections.push(current);
+    current = undefined;
+  };
+  for (const line of patchText.split(/\r?\n/)) {
+    let match = line.match(/^\*\*\* (Add|Update|Delete) File: (.+)$/);
+    if (match) {
+      flush();
+      current = {
+        operation: match[1].toLowerCase(),
+        path: match[2].trim(),
+        added: [],
+        removed: []
+      };
+      if (!current.path)
+        evaluable = false;
+      continue;
+    }
+    if (/^\*\*\* Move to: /.test(line)) {
+      evaluable = false;
+      continue;
+    }
+    if (line === "*** Begin Patch" || line === "*** End Patch" || line.startsWith("@@"))
+      continue;
+    if (!current) {
+      if (line.trim())
+        evaluable = false;
+      continue;
+    }
+    if (current.operation === "delete") {
+      if (line.trim())
+        evaluable = false;
+      continue;
+    }
+    if (line.startsWith("+"))
+      current.added.push(line.slice(1));
+    else if (line.startsWith("-"))
+      current.removed.push(line.slice(1));
+    else if (current.operation === "add" && line.trim())
+      evaluable = false;
+  }
+  flush();
+  return { evaluable, sections };
+}
+function readRegularTextFile(filePath) {
+  try {
+    const stat = fs10.lstatSync(filePath);
+    if (!stat.isFile() || stat.size > MAX_SCANNED_FILE_BYTES)
+      return null;
+    return fs10.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+function removedLinesExist(content, removed) {
+  const available = new Map;
+  for (const line of content.split(/\r?\n/))
+    available.set(line, (available.get(line) ?? 0) + 1);
+  for (const line of removed) {
+    const count = available.get(line) ?? 0;
+    if (count === 0)
+      return false;
+    available.set(line, count - 1);
+  }
+  return true;
+}
+function applySecretDelta(before, removed, added) {
+  const after = {};
+  for (const kind of SECRET_KINDS) {
+    const existing = before[kind] ?? 0;
+    const removedCount = removed[kind] ?? 0;
+    if (removedCount > existing)
+      return null;
+    const remaining = existing - removedCount + (added[kind] ?? 0);
+    if (remaining > 0)
+      after[kind] = remaining;
+  }
+  return after;
+}
+function parseSecretCounts(value) {
+  const record = objectValue(value);
+  if (!record)
+    return null;
+  const counts = {};
+  for (const [kind, count] of Object.entries(record)) {
+    if (!SECRET_KIND_SET.has(kind) || typeof count !== "number" || !Number.isSafeInteger(count) || count < 0 || count > MAX_FINDINGS_PER_KIND)
+      return null;
+    if (count > 0)
+      counts[kind] = count;
+  }
+  return counts;
+}
+function buildSyntheticFixtureRemediation(line, filePath, displayPath, lineNumber, match, lineFindingCount) {
+  if (!isSyntheticFixturePath(filePath)) {
+    return removalRemediation(displayPath, lineNumber, "unsupported-file-type");
+  }
+  if (line.length > MAX_REMEDIATION_LINE_CHARS) {
+    return removalRemediation(displayPath, lineNumber, "line-too-long");
+  }
+  if (lineFindingCount !== 1) {
+    return removalRemediation(displayPath, lineNumber, "multiple-findings");
+  }
+  const detectedValue = match[4];
+  if (typeof detectedValue !== "string" || !SYNTHETIC_VALUE_PATTERN.test(detectedValue)) {
+    return removalRemediation(displayPath, lineNumber, "value-not-demonstrably-synthetic");
+  }
+  const direct = DIRECT_SYNTHETIC_ASSIGNMENT.exec(line);
+  if (direct) {
+    const [, prefix = "", credentialName = "", operator = "", quote = "", , suffix = ""] = direct;
+    return replacementRemediation({
+      path: displayPath,
+      line: lineNumber,
+      anchor: credentialName,
+      before: `${prefix}${credentialName}${operator}${quote}[VALOR SINTETICO OCULTO]${quote}${suffix}`,
+      replacement: `${prefix}${credentialName}${operator}${SYNTHETIC_VALUE_EXPRESSION}${suffix}`
+    });
+  }
+  const declaration = SERIALIZED_DECLARATION.exec(line);
+  if (declaration) {
+    const [, prefix = "", variableName = "", outerQuote = "", serialized = "", suffix = ""] = declaration;
+    const assignment = SERIALIZED_SYNTHETIC_ASSIGNMENT.exec(serialized);
+    if (assignment) {
+      const [, credentialName = "", operator = "", innerQuote = ""] = assignment;
+      const credentialExpression = credentialNameExpression(credentialName);
+      if (credentialExpression) {
+        const replacementExpression = [
+          credentialExpression,
+          JSON.stringify(`${operator}${innerQuote}`),
+          SYNTHETIC_VALUE_EXPRESSION,
+          JSON.stringify(innerQuote)
+        ].join(", ");
+        return replacementRemediation({
+          path: displayPath,
+          line: lineNumber,
+          anchor: variableName,
+          before: `${prefix}${outerQuote}${credentialName}${operator}${innerQuote}[VALOR SINTETICO OCULTO]${innerQuote}${outerQuote}${suffix}`,
+          replacement: `${prefix}[${replacementExpression}].join("")${suffix}`
+        });
+      }
+    }
+  }
+  return buildComplexStringRemediation(line, filePath, displayPath, lineNumber, match) ?? removalRemediation(displayPath, lineNumber, "unsupported-syntax");
+}
+function buildComplexStringRemediation(line, filePath, displayPath, lineNumber, match) {
+  if (/\.[cm]?[jt]sx$/i.test(path14.basename(filePath)))
+    return;
+  const matchStart = match.index;
+  const credentialName = match[1];
+  const operator = match[2];
+  const innerQuote = match[3];
+  const detectedValue = match[4];
+  if (matchStart === undefined || !credentialName || operator === undefined || !innerQuote || !detectedValue) {
+    return;
+  }
+  const matchEnd = matchStart + match[0].length;
+  const literal = scanSourceStringLiterals(line).find((item) => item.contentStart <= matchStart && item.contentEnd >= matchEnd);
+  if (!literal || literal.interpolated || !isExpressionStringContext(line, literal))
+    return;
+  const leading = decodeStringFragment(line.slice(literal.contentStart, matchStart), literal.quote);
+  const trailing = decodeStringFragment(line.slice(matchEnd, literal.contentEnd), literal.quote);
+  const credentialExpression = credentialNameExpression(credentialName);
+  const before = sanitizedLineReference(line, match, detectedValue);
+  if (leading === undefined || trailing === undefined || !credentialExpression || !before)
+    return;
+  const expression = [
+    JSON.stringify(leading),
+    credentialExpression,
+    JSON.stringify(`${operator}${innerQuote}`),
+    SYNTHETIC_VALUE_EXPRESSION,
+    JSON.stringify(`${innerQuote}${trailing}`)
+  ].join(", ");
+  const replacement = `${line.slice(0, literal.start)}[${expression}].join("")${line.slice(literal.end)}`;
+  if (before.includes(detectedValue) || replacement.includes(detectedValue) || secretKinds(detectFileSecretCounts(replacement)).length > 0)
+    return;
+  return replacementRemediation({
+    path: displayPath,
+    line: lineNumber,
+    anchor: sourceAnchor(line.slice(0, literal.start), credentialName),
+    before,
+    replacement
+  });
+}
+function scanSourceStringLiterals(line) {
+  const literals = [];
+  let index = 0;
+  while (index < line.length) {
+    if (line[index] === "/" && line[index + 1] === "/")
+      break;
+    const quote = line[index];
+    if (quote !== '"' && quote !== "'" && quote !== "`") {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    let interpolated = false;
+    index += 1;
+    while (index < line.length) {
+      const current = line[index];
+      if (current === "\\") {
+        index += 2;
+        continue;
+      }
+      if (quote === "`" && current === "$" && line[index + 1] === "{")
+        interpolated = true;
+      if (current === quote) {
+        literals.push({
+          start,
+          contentStart: start + 1,
+          contentEnd: index,
+          end: index + 1,
+          quote,
+          interpolated
+        });
+        index += 1;
+        break;
+      }
+      index += 1;
+    }
+    if (index >= line.length && line[index - 1] !== quote)
+      return [];
+  }
+  return literals;
+}
+function isExpressionStringContext(line, literal) {
+  const before = line.slice(0, literal.start).trimEnd();
+  const after = line.slice(literal.end).trimStart();
+  if (!before || /^(?:\/\/|\/\*|\*)/.test(before.trimStart()))
+    return false;
+  if (/\b(?:import|interface|enum|type)\b/.test(before))
+    return false;
+  if (after.startsWith(":"))
+    return false;
+  return ["=", "(", "[", ",", ":"].includes(before.at(-1) ?? "");
+}
+function decodeStringFragment(raw, quote) {
+  let output = "";
+  for (let index = 0;index < raw.length; index += 1) {
+    const current = raw[index] ?? "";
+    if (quote === "`" && current === "$" && raw[index + 1] === "{")
+      return;
+    if (current !== "\\") {
+      if (current === quote)
+        return;
+      output += current;
+      continue;
+    }
+    const escaped = raw[++index];
+    if (escaped === undefined)
+      return;
+    const simple = {
+      "\\": "\\",
+      '"': '"',
+      "'": "'",
+      "`": "`",
+      n: `
+`,
+      r: "\r",
+      t: "\t",
+      b: "\b",
+      f: "\f",
+      v: "\v",
+      0: "\x00"
+    };
+    if (escaped in simple) {
+      output += simple[escaped];
+      continue;
+    }
+    if (escaped === "x") {
+      const value = decodeHexEscape(raw.slice(index + 1, index + 3), 2);
+      if (value === undefined)
+        return;
+      output += value;
+      index += 2;
+      continue;
+    }
+    if (escaped === "u") {
+      const value = decodeUnicodeEscape(raw, index + 1);
+      if (!value)
+        return;
+      output += value.character;
+      index = value.end;
+      continue;
+    }
+    return;
+  }
+  return output;
+}
+function decodeHexEscape(raw, length) {
+  if (raw.length !== length || !new RegExp(`^[0-9A-Fa-f]{${length}}$`).test(raw))
+    return;
+  return String.fromCodePoint(Number.parseInt(raw, 16));
+}
+function decodeUnicodeEscape(raw, start) {
+  if (raw[start] === "{") {
+    const close = raw.indexOf("}", start + 1);
+    if (close < 0)
+      return;
+    const digits2 = raw.slice(start + 1, close);
+    if (!/^[0-9A-Fa-f]{1,6}$/.test(digits2))
+      return;
+    const codePoint = Number.parseInt(digits2, 16);
+    if (codePoint > 1114111)
+      return;
+    return { character: String.fromCodePoint(codePoint), end: close };
+  }
+  const digits = raw.slice(start, start + 4);
+  const character = decodeHexEscape(digits, 4);
+  return character === undefined ? undefined : { character, end: start + 3 };
+}
+function sanitizedLineReference(line, match, detectedValue) {
+  const matchStart = match.index;
+  const credentialName = match[1];
+  const operator = match[2];
+  const innerQuote = match[3];
+  if (matchStart === undefined || !credentialName || operator === undefined || !innerQuote)
+    return;
+  const valueStart = matchStart + credentialName.length + operator.length + innerQuote.length;
+  const valueEnd = valueStart + detectedValue.length;
+  if (line.slice(valueStart, valueEnd) !== detectedValue)
+    return;
+  return `${line.slice(0, valueStart)}[VALOR SINTETICO OCULTO]${line.slice(valueEnd)}`;
+}
+function sourceAnchor(prefix, fallback) {
+  return prefix.match(/([A-Za-z_$][A-Za-z0-9_$]{0,127})\s*[:=]?\s*$/)?.[1] ?? fallback;
+}
+function removalRemediation(displayPath, lineNumber, reason) {
+  return {
+    version: 1,
+    kind: "remove-secret",
+    reason,
+    path: displayPath,
+    startLine: lineNumber,
+    endLine: lineNumber,
+    finding: "credential-assignment",
+    revalidate: true
+  };
+}
+function replacementRemediation(input) {
+  return {
+    version: 1,
+    kind: "replace-block",
+    reason: "synthetic-test-fixture",
+    path: input.path,
+    startLine: input.line,
+    endLine: input.line,
+    anchor: input.anchor,
+    before: [input.before],
+    replacement: [input.replacement],
+    revalidate: true
+  };
+}
+function credentialNameExpression(value) {
+  const separator = value.includes("_") ? "_" : value.includes("-") ? "-" : "";
+  let parts = separator ? value.split(separator) : credentialCamelParts(value);
+  parts = parts.filter(Boolean);
+  if (parts.length < 2 || parts.join(separator) !== value)
+    return;
+  return `[${parts.map((part) => JSON.stringify(part)).join(", ")}].join(${JSON.stringify(separator)})`;
+}
+function credentialCamelParts(value) {
+  const normalized = value.toLowerCase();
+  if (normalized === "apikey")
+    return [value.slice(0, 3), value.slice(3)];
+  if (normalized === "accesstoken")
+    return [value.slice(0, 6), value.slice(6)];
+  if (normalized === "secretkey")
+    return [value.slice(0, 6), value.slice(6)];
+  if (normalized === "password")
+    return [value.slice(0, 4), value.slice(4)];
+  return [];
+}
+function isSyntheticFixturePath(filePath) {
+  const normalized = filePath.replaceAll("\\", "/");
+  const basename = path14.basename(normalized);
+  if (!/\.[cm]?[jt]sx?$/i.test(basename))
+    return false;
+  return /\/(?:tests?|__tests__|fixtures?)(?:\/|$)/i.test(normalized) || /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(basename);
+}
+function brandedSummary(evaluable, files) {
+  const summary = { version: 1, evaluable, files };
+  Object.defineProperty(summary, SECRET_PATCH_SUMMARY_BRAND, { value: true, enumerable: false });
+  return summary;
+}
+function isWithin2(value, root) {
+  const relative = path14.relative(root, value);
+  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
+}
+function objectValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+
 // src/cli/core/hooks/rules.ts
 var builtInHookRules = [
   { id: "policy-integrity", run: policyIntegrityGuard },
@@ -3798,7 +4362,7 @@ function repoBoundaryGuard(context) {
   const targets = filesystemTargetPaths(context);
   if (!writesMalahorData || targets.length === 0)
     return [];
-  const unsafe = targets.map((targetPath) => path14.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
+  const unsafe = targets.map((targetPath) => path15.resolve(context.cwd, targetPath)).filter((targetPath) => isInside(targetPath, context.projectRoot) && !isInside(targetPath, context.malahorHome));
   if (unsafe.length === 0)
     return [];
   return [{
@@ -3818,7 +4382,7 @@ function infrastructureBoundaryGuard(context) {
   const command = (context.command ?? "").trim();
   const commandMatch = context.event === "shell.exec.before" || context.event === "tool.execute.before" ? classifyInfrastructureCommand(command) : { protected: false };
   const resolution = infrastructureTargetPaths(context, command);
-  const pathMatches = resolution.paths.map((targetPath) => classifyInfrastructurePath(context.projectRoot, path14.resolve(context.cwd, targetPath))).filter((classification) => classification.protected);
+  const pathMatches = resolution.paths.map((targetPath) => classifyInfrastructurePath(context.projectRoot, path15.resolve(context.cwd, targetPath))).filter((classification) => classification.protected);
   if (!commandMatch.protected && pathMatches.length === 0 && !resolution.unresolved)
     return [];
   const evidence = [...new Set([
@@ -3947,7 +4511,7 @@ function documentationBoundaryGuard(context) {
   if (!relevant)
     return [];
   if (context.event === "file.write.before") {
-    const directTargets = filesystemTargetPaths(context).map((targetPath) => path14.resolve(context.cwd, targetPath));
+    const directTargets = filesystemTargetPaths(context).map((targetPath) => path15.resolve(context.cwd, targetPath));
     let docsRoots;
     try {
       docsRoots = managedDocsRoots(context.malahorHome);
@@ -3994,7 +4558,7 @@ function documentationBoundaryGuard(context) {
   const unsafe = operations.filter((operation) => {
     if (isRemovalOperation(operation.kind))
       return false;
-    return classifyDocumentationPath(context.projectRoot, path14.resolve(context.cwd, operation.path)).protected;
+    return classifyDocumentationPath(context.projectRoot, path15.resolve(context.cwd, operation.path)).protected;
   });
   if (unsafe.length === 0)
     return [];
@@ -4006,28 +4570,28 @@ function documentationBoundaryGuard(context) {
   }];
 }
 function managedDocsRoots(malahorHome) {
-  const projects = loadProjectsFile(path14.join(malahorHome, "projects.json"));
+  const projects = loadProjectsFile(path15.join(malahorHome, "projects.json"));
   return [...new Set([
-    path14.join(malahorHome, "vault"),
+    path15.join(malahorHome, "vault"),
     ...Object.values(projects).flatMap((entry) => entry.docs?.path ? [entry.docs.path] : [])
-  ].map((value) => path14.resolve(value)))];
+  ].map((value) => path15.resolve(value)))];
 }
 function canonicalPlannedPath2(value) {
-  const resolved = path14.resolve(value);
+  const resolved = path15.resolve(value);
   let current = resolved;
   const suffix = [];
-  while (!fs10.existsSync(current)) {
-    const parent = path14.dirname(current);
+  while (!fs11.existsSync(current)) {
+    const parent = path15.dirname(current);
     if (parent === current)
       break;
-    suffix.unshift(path14.basename(current));
+    suffix.unshift(path15.basename(current));
     current = parent;
   }
   let canonical = current;
   try {
-    canonical = fs10.realpathSync(current);
+    canonical = fs11.realpathSync(current);
   } catch {}
-  return path14.resolve(canonical, ...suffix);
+  return path15.resolve(canonical, ...suffix);
 }
 function metadataOperations(value) {
   if (!Array.isArray(value))
@@ -4072,11 +4636,11 @@ function isExactStagedRemoval(context, targetPath) {
   return isExactGitRemoval(context, targetPath, true);
 }
 function isExactGitRemoval(context, targetPath, cached) {
-  const projectRoot = path14.resolve(context.projectRoot);
-  const absoluteTarget = path14.resolve(context.cwd, targetPath);
+  const projectRoot = path15.resolve(context.projectRoot);
+  const absoluteTarget = path15.resolve(context.cwd, targetPath);
   if (absoluteTarget === projectRoot || !isInside(absoluteTarget, projectRoot))
     return false;
-  const relativeTarget = path14.relative(projectRoot, absoluteTarget);
+  const relativeTarget = path15.relative(projectRoot, absoluteTarget);
   try {
     const output = execFileSync3("git", [
       "diff",
@@ -4094,7 +4658,7 @@ function isExactGitRemoval(context, targetPath, cached) {
       stdio: ["ignore", "pipe", "ignore"]
     });
     const removals = output.split("\x00").filter(Boolean);
-    return removals.length === 1 && path14.resolve(projectRoot, removals[0]) === absoluteTarget;
+    return removals.length === 1 && path15.resolve(projectRoot, removals[0]) === absoluteTarget;
   } catch {
     return false;
   }
@@ -4259,16 +4823,47 @@ function secretScanGuard(context) {
   const scan = context.security ? context.security.git?.scanStagedContent !== false || context.security.persistence?.blockSecrets !== false : context.policy?.secrets.scanBeforeCommit !== false;
   if (!scan)
     return [];
+  if (context.event === "file.write.before" && context.metadata?.tool === "patch") {
+    return patchSecretScanGuard(context);
+  }
   const paths = readableTargetPaths(context);
-  const leaks = paths.flatMap((targetPath) => scanFileForSecrets(targetPath));
+  const findings = paths.flatMap((targetPath) => scanTargetForSecretFindings(targetPath, context));
+  if (findings.length === 0)
+    return [];
+  const leaks = findings.map((finding) => `${finding.path}:${finding.line}:${finding.kind}`);
+  const remediations = findings.slice(0, 5).map((finding) => finding.remediation ?? removalRemediation2(finding));
+  return [{
+    id: "MAL-HOOK-SECRETS",
+    decision: "deny",
+    message: `Posibles secretos detectados: ${leaks.slice(0, 5).join(", ")}`,
+    fix: "Remueve secretos, usa variables de entorno/secret manager y rota credenciales si fueron expuestas.",
+    remediations
+  }];
+}
+function patchSecretScanGuard(context) {
+  const summary = parseSecretPatchSummary(context.metadata?.secretPatchSummary);
+  if (!summary || !summary.evaluable || !patchSummaryMatchesTargets(context, summary)) {
+    return [{
+      id: "MAL-HOOK-SECRETS",
+      decision: "deny",
+      message: "No se pudo demostrar que el patch elimina hallazgos sin introducir otros.",
+      fix: "Usa un patch directo y evaluable que retire todos los hallazgos; no uses metadata manual ni editores indirectos."
+    }];
+  }
+  const leaks = summary.files.flatMap((file) => secretKinds(file.after).map((kind) => `${path15.basename(file.path)}:${kind}`));
   if (leaks.length === 0)
     return [];
   return [{
     id: "MAL-HOOK-SECRETS",
     decision: "deny",
-    message: `Posibles secretos detectados: ${leaks.slice(0, 5).join(", ")}`,
-    fix: "Remueve secretos, usa variables de entorno/secret manager y rota credenciales si fueron expuestas."
+    message: `El patch conservaria o introduciria posibles secretos: ${leaks.slice(0, 5).join(", ")}`,
+    fix: "Retira todos los hallazgos del archivo y no agregues credenciales, tokens o llaves."
   }];
+}
+function patchSummaryMatchesTargets(context, summary) {
+  const targets = new Set(filesystemTargetPaths(context).map((target) => path15.resolve(context.cwd, target)));
+  const summarized = new Set(summary.files.map((file) => path15.resolve(context.cwd, file.path)));
+  return targets.size === summarized.size && targets.size === summary.files.length && [...targets].every((target) => summarized.has(target));
 }
 function shellPolicyGuard(context) {
   if (context.event !== "shell.exec.before")
@@ -4351,13 +4946,13 @@ function fileBoundaryGuard(context) {
   if (context.event !== "file.read.before" && context.event !== "file.write.before")
     return [];
   const controls = context.security?.files;
-  const paths = filesystemTargetPaths(context).map((target) => path14.resolve(context.cwd, target));
+  const paths = filesystemTargetPaths(context).map((target) => path15.resolve(context.cwd, target));
   if (paths.length === 0)
     return [];
   const violations = [];
   const write = context.event === "file.write.before";
   const roots = (write ? controls?.allowedWriteRoots : controls?.allowedReadRoots) ?? [];
-  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path14.resolve(context.cwd, root));
+  const resolvedRoots = (roots.length > 0 ? roots : [context.projectRoot]).map((root) => path15.resolve(context.cwd, root));
   const enforceRoots = controls?.enforceRoots === true;
   for (const target of paths) {
     const canonical = resolveTargetPath(target, controls?.resolveSymlinks !== false);
@@ -4370,7 +4965,7 @@ function fileBoundaryGuard(context) {
       });
       continue;
     }
-    const outsideRoots = !resolvedRoots.some((root) => isWithin2(canonical, root));
+    const outsideRoots = !resolvedRoots.some((root) => isWithin3(canonical, root));
     if (outsideRoots && (enforceRoots || controls?.requireApprovalOutsideRoots === true)) {
       violations.push({
         id: "MAL-HOOK-FILE-ROOT",
@@ -4379,7 +4974,7 @@ function fileBoundaryGuard(context) {
         fix: "Limita la operacion al proyecto/raiz aprobada o genera aprobacion vinculada."
       });
     }
-    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path14.basename(canonical)));
+    const denied = controls?.deniedPathGlobs?.find((pattern) => globMatches(pattern, canonical) || globMatches(pattern, path15.basename(canonical)));
     if (denied) {
       violations.push({
         id: "MAL-HOOK-FILE-DENYLIST",
@@ -4466,8 +5061,8 @@ function egressPolicyGuard(context) {
     return [];
   const violations = [];
   if (context.metadata?.secretDetected === true && context.security?.persistence?.blockSecrets !== false) {
-    const secretKinds = Array.isArray(context.metadata.secretKinds) ? context.metadata.secretKinds.filter((kind) => typeof kind === "string") : [];
-    const classification = secretKinds.length > 0 ? ` (${secretKinds.join(", ")})` : "";
+    const secretKinds2 = Array.isArray(context.metadata.secretKinds) ? context.metadata.secretKinds.filter((kind) => typeof kind === "string") : [];
+    const classification = secretKinds2.length > 0 ? ` (${secretKinds2.join(", ")})` : "";
     violations.push({
       id: "MAL-HOOK-EGRESS-SECRET",
       decision: "deny",
@@ -4594,25 +5189,25 @@ function isIndirectExecution(command) {
 }
 function resolveTargetPath(target, followSymlinks) {
   try {
-    if (fs10.existsSync(target)) {
-      return followSymlinks ? fs10.realpathSync(target) : path14.resolve(target);
+    if (fs11.existsSync(target)) {
+      return followSymlinks ? fs11.realpathSync(target) : path15.resolve(target);
     }
-    let parent = path14.dirname(target);
-    while (!fs10.existsSync(parent)) {
-      const next = path14.dirname(parent);
+    let parent = path15.dirname(target);
+    while (!fs11.existsSync(parent)) {
+      const next = path15.dirname(parent);
       if (next === parent)
         return null;
       parent = next;
     }
-    const canonicalParent = followSymlinks ? fs10.realpathSync(parent) : path14.resolve(parent);
-    return path14.join(canonicalParent, path14.relative(parent, target));
+    const canonicalParent = followSymlinks ? fs11.realpathSync(parent) : path15.resolve(parent);
+    return path15.join(canonicalParent, path15.relative(parent, target));
   } catch {
     return null;
   }
 }
 function isSecretPath(target) {
   const normalized = target.replaceAll("\\", "/");
-  const base = path14.basename(normalized);
+  const base = path15.basename(normalized);
   if (base === ".env.example")
     return false;
   return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
@@ -4632,7 +5227,7 @@ function parseHttpUrl(value) {
 function programmingQualityGuard(context) {
   const violations = [];
   const files = filesystemTargetPaths(context);
-  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path14.resolve(context.cwd, file)) > 1024 * 1024);
+  const largeFiles = context.policy?.quality.warnLargeFiles === false ? [] : files.filter((file) => fileSize(path15.resolve(context.cwd, file)) > 1024 * 1024);
   if (largeFiles.length > 0) {
     violations.push({
       id: "MAL-HOOK-LARGE-FILES",
@@ -4653,7 +5248,27 @@ function programmingQualityGuard(context) {
   return violations;
 }
 function readableTargetPaths(context) {
-  return filesystemTargetPaths(context).map((targetPath) => path14.resolve(context.cwd, targetPath)).filter((targetPath) => fs10.existsSync(targetPath) && fs10.statSync(targetPath).isFile() && fs10.statSync(targetPath).size <= 512 * 1024);
+  return filesystemTargetPaths(context).map((targetPath) => path15.resolve(context.cwd, targetPath)).filter((targetPath) => fs11.existsSync(targetPath) && fs11.statSync(targetPath).isFile() && fs11.statSync(targetPath).size <= 512 * 1024);
+}
+function scanTargetForSecretFindings(filePath, context) {
+  const content = fs11.readFileSync(filePath, "utf8");
+  return detectFileSecretFindings(content, filePath, safeRelativePath(filePath, context.projectRoot));
+}
+function removalRemediation2(finding) {
+  return {
+    version: 1,
+    kind: "remove-secret",
+    path: finding.path,
+    startLine: finding.line,
+    endLine: finding.line,
+    finding: finding.kind,
+    revalidate: true
+  };
+}
+function safeRelativePath(filePath, projectRoot) {
+  const relative = path15.relative(path15.resolve(projectRoot), path15.resolve(filePath));
+  const candidate = relative && !relative.startsWith("..") && !path15.isAbsolute(relative) ? relative : path15.basename(filePath);
+  return candidate.replace(/[\r\n\t\u001b]/g, "?").slice(0, 512);
 }
 function scanStagedSecrets(cwd, includeWorktree = false) {
   const commands = [
@@ -4675,8 +5290,8 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
       return null;
     }
     for (const relative of output.split("\x00").filter(Boolean)) {
-      const file = path14.resolve(cwd, relative);
-      if (!fs10.existsSync(file))
+      const file = path15.resolve(cwd, relative);
+      if (!fs11.existsSync(file))
         continue;
       try {
         leaks.push(...scanFileForSecrets(file));
@@ -4687,19 +5302,10 @@ function scanStagedSecrets(cwd, includeWorktree = false) {
   }
   return leaks;
 }
-var PRIVATE_KEY_PATTERN = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function scanFileForSecrets(filePath) {
-  const basename = path14.basename(filePath);
-  const content = fs10.readFileSync(filePath, "utf8");
-  const patterns = [
-    [PRIVATE_KEY_PATTERN, "private-key"],
-    [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/, "aws-access-key"],
-    [/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i, "credential-assignment"]
-  ];
-  const leaks = patterns.filter(([pattern]) => pattern.test(content)).map(([, name]) => `${basename}:${name}`);
-  if (/^\.env(\.|$)/.test(basename))
-    leaks.push(`${basename}:env-file`);
-  return leaks;
+  const basename = path15.basename(filePath);
+  const content = fs11.readFileSync(filePath, "utf8");
+  return secretKinds(detectFileSecretCounts(content, filePath)).map((kind) => `${basename}:${kind}`);
 }
 function extractCommitMessage(command) {
   const match = /\s-m\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(command);
@@ -4743,8 +5349,8 @@ function inferredGitTarget(operations) {
 }
 function normalizedGitPaths(context, values) {
   return [...new Set(values.map((value) => {
-    const absolute = path14.resolve(context.cwd, value);
-    const relative = path14.relative(context.projectRoot, absolute);
+    const absolute = path15.resolve(context.cwd, value);
+    const relative = path15.relative(context.projectRoot, absolute);
     return (relative || ".").replaceAll("\\", "/");
   }))].sort();
 }
@@ -4755,7 +5361,7 @@ function unsafeStageTarget(context, target) {
   if (target === "." || target === ":/" || /[*?\[\]$`]/.test(target))
     return true;
   try {
-    return fs10.statSync(path14.resolve(context.projectRoot, target)).isDirectory();
+    return fs11.statSync(path15.resolve(context.projectRoot, target)).isDirectory();
   } catch {
     return false;
   }
@@ -4772,7 +5378,7 @@ function strictness(profile, fallback) {
 }
 function fileSize(filePath) {
   try {
-    return fs10.statSync(filePath).size;
+    return fs11.statSync(filePath).size;
   } catch {
     return 0;
   }
@@ -4801,13 +5407,13 @@ function controlAffectsEvent(gap, event) {
   }
   return true;
 }
-function isWithin2(targetPath, rootPath) {
-  const relative = path14.relative(path14.resolve(rootPath), path14.resolve(targetPath));
-  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
+function isWithin3(targetPath, rootPath) {
+  const relative = path15.relative(path15.resolve(rootPath), path15.resolve(targetPath));
+  return relative === "" || !relative.startsWith("..") && !path15.isAbsolute(relative);
 }
 function isInside(targetPath, rootPath) {
-  const relative = path14.relative(path14.resolve(rootPath), path14.resolve(targetPath));
-  return Boolean(relative) && !relative.startsWith("..") && !path14.isAbsolute(relative);
+  const relative = path15.relative(path15.resolve(rootPath), path15.resolve(targetPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path15.isAbsolute(relative);
 }
 
 // src/cli/core/hooks/engine.ts
@@ -4914,6 +5520,10 @@ function formatHookResult(result) {
   for (const violation of result.violations) {
     lines.push(`- ${violation.decision.toUpperCase()} ${violation.id}: ${violation.message}`);
     lines.push(`  Fix: ${violation.fix}`);
+    const remediation = formatHookRemediations(violation.remediations ?? []);
+    if (remediation)
+      lines.push(...remediation.split(`
+`));
   }
   if (result.violations.length === 0) {
     lines.push("- OK: sin hallazgos.");
@@ -4923,6 +5533,46 @@ function formatHookResult(result) {
   }
   return lines.join(`
 `);
+}
+function formatHookRemediations(remediations) {
+  return remediations.slice(0, 5).flatMap((remediation) => {
+    const target = `${safeOutput(remediation.path, 512)}:${remediation.startLine}`;
+    if (remediation.kind === "replace-block") {
+      return [
+        "  Remediacion manual segura:",
+        `  1. Abre ${target}.`,
+        `  2. Localiza la linea por el texto ${safeOutput(remediation.anchor, 128)}.`,
+        "  3. Referencia saneada (el valor bloqueado no se muestra):",
+        ...remediation.before.map((line) => `     ${safeOutput(line, 1000)}`),
+        "  4. Reemplaza esa linea o bloque completo por:",
+        ...remediation.replacement.map((line) => `     ${safeOutput(line, 1000)}`),
+        "  5. Guarda el archivo y pide a Malahor revalidar. No continues hasta obtener ALLOW."
+      ];
+    }
+    const eligibility = remediation.reason ? removalReasonMessage(remediation.reason) : undefined;
+    return [
+      "  Accion manual segura:",
+      ...eligibility ? [`  Motivo seguro (${remediation.reason}): ${eligibility}`] : [],
+      `  1. Abre ${target}; no copies ni compartas el valor detectado.`,
+      "  2. Retira la credencial del archivo y usa una variable segura o un gestor de secretos.",
+      "  3. Si el valor pudo ser real, rotalo antes de continuar.",
+      "  4. Guarda el archivo y pide a Malahor revalidar. No continues hasta obtener ALLOW."
+    ];
+  }).join(`
+`);
+}
+function removalReasonMessage(reason) {
+  const messages = {
+    "unsupported-file-type": "el archivo no es un fixture JavaScript/TypeScript elegible",
+    "line-too-long": "la linea supera el limite seguro para construir una receta",
+    "multiple-findings": "la linea contiene varios hallazgos y seria ambiguo transformarla",
+    "value-not-demonstrably-synthetic": "el valor no demuestra ser un dato sintetico permitido",
+    "unsupported-syntax": "la sintaxis no pertenece al subconjunto que el hook puede reescribir con seguridad"
+  };
+  return messages[reason];
+}
+function safeOutput(value, maxLength) {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, maxLength);
 }
 function strongestDecision(violations) {
   return violations.reduce((current, violation) => DECISION_WEIGHT[violation.decision] > DECISION_WEIGHT[current] ? violation.decision : current, "allow");
@@ -4974,6 +5624,7 @@ async function evaluateToolHook(input, options) {
   const mapped = toolDetails(tool, toolInput, options);
   const allowUnbound = ["question", "list", "todowrite", "todoread"].includes(tool.toLowerCase());
   const scope = await resolveEvaluationScope(input, options, mapped.cwd, mapped.targetPaths, mapped.resourceKind, allowUnbound);
+  const secretPatchSummary = !scope.error && tool.toLowerCase() === "patch" ? buildSecretPatchSummary(stringValue4(recordValue3(toolInput)?.patchText) ?? "", scope.options.cwd) : undefined;
   const built = scope.error ? undefined : buildContext(mapped.event, scope.options, {
     command: mapped.command,
     resourceKind: mapped.resourceKind,
@@ -4983,6 +5634,7 @@ async function evaluateToolHook(input, options) {
     gitIntent: mapped.gitIntent,
     metadata: {
       ...mapped.metadata,
+      ...secretPatchSummary ? { secretPatchSummary } : {},
       origin: "opencode-v2",
       tool
     }
@@ -5084,10 +5736,10 @@ async function evaluateSessionHook(event, input, options) {
   if (requestURL)
     metadata.url = requestURL;
   const contentEvent = event === "session.prompt.before" || event === "session.context.before" || event === "session.compaction.before" || event === "session.generate.before" || event === "session.title.before";
-  const secretKinds = contentEvent ? detectSecretKinds(input) : [];
-  if (secretKinds.length > 0) {
+  const secretKinds2 = contentEvent ? detectSecretKinds(input) : [];
+  if (secretKinds2.length > 0) {
     metadata.secretDetected = true;
-    metadata.secretKinds = secretKinds;
+    metadata.secretKinds = secretKinds2;
   }
   const scope = await resolveEvaluationScope(input, options, undefined, undefined, undefined, true);
   const built = scope.error ? undefined : buildContext(event, scope.options, { metadata }, scope.project);
@@ -5103,10 +5755,15 @@ function shouldBlockPluginResult(result, options, blockingAskIds = []) {
   return options.permissionRegistered !== true;
 }
 function formatPluginBlock(result) {
-  return [
+  const relevant = result.violations.filter((violation) => violation.decision === "deny" || violation.decision === "ask");
+  const lines = [
     `Malahor bloqueo ${result.event}: ${result.decision.toUpperCase()}`,
-    ...result.violations.filter((violation) => violation.decision === "deny" || violation.decision === "ask").map((violation) => `- ${violation.id}: ${violation.message}`)
-  ].join(`
+    ...relevant.map((violation) => `- ${violation.id}: ${violation.message}`)
+  ];
+  const remediation = formatHookRemediations(relevant.flatMap((violation) => violation.remediations ?? []));
+  if (remediation)
+    lines.push(remediation);
+  return lines.join(`
 `);
 }
 function evaluate(context) {
@@ -5153,9 +5810,9 @@ function gitIntentPaths(context, operations, classifiedTargets) {
   const explicit = context.targetPaths?.length ? context.targetPaths : undefined;
   const paths = explicit ?? (operations.some((operation) => operation === "commit" || operation === "amend") ? stagedGitPaths(context.projectRoot) : classifiedTargets);
   return [...new Set(paths.map((value) => {
-    const absolute = path15.resolve(context.cwd, value);
-    const relative = path15.relative(context.projectRoot, absolute);
-    return relative && !relative.startsWith("..") && !path15.isAbsolute(relative) ? relative : value;
+    const absolute = path16.resolve(context.cwd, value);
+    const relative = path16.relative(context.projectRoot, absolute);
+    return relative && !relative.startsWith("..") && !path16.isAbsolute(relative) ? relative : value;
   }))].sort();
 }
 function stagedGitPaths(cwd) {
@@ -5183,8 +5840,8 @@ function requiresRegisteredIntent(operation) {
   ].includes(operation);
 }
 async function resolveEvaluationScope(input, options, operationCwd, targetPaths, resourceKind, allowUnbound = false) {
-  const fallback = path15.resolve(options.cwd);
-  const operationDirectory = operationCwd ? path15.resolve(fallback, operationCwd) : undefined;
+  const fallback = path16.resolve(options.cwd);
+  const operationDirectory = operationCwd ? path16.resolve(fallback, operationCwd) : undefined;
   const sessionID = stringValue4(input.sessionID);
   if (options.resolveSessionProject && sessionID) {
     try {
@@ -5207,7 +5864,7 @@ async function resolveEvaluationScope(input, options, operationCwd, targetPaths,
           error: `el directorio de operacion no pertenece al proyecto ${project.canonicalKey}`
         };
       }
-      const cwd = operationDirectory ?? path15.resolve(project.root);
+      const cwd = operationDirectory ?? path16.resolve(project.root);
       const conflict = conflictingProjectTarget(cwd, targetPaths, resourceKind, project, options);
       if (conflict) {
         return {
@@ -5245,7 +5902,7 @@ async function resolveEvaluationScope(input, options, operationCwd, targetPaths,
         error: `la sesion ${sessionID} no expuso una ubicacion evaluable`
       };
     }
-    return { options: { ...options, cwd: path15.resolve(directory) } };
+    return { options: { ...options, cwd: path16.resolve(directory) } };
   } catch (error) {
     return {
       options: { ...options, cwd: fallback },
@@ -5254,7 +5911,7 @@ async function resolveEvaluationScope(input, options, operationCwd, targetPaths,
   }
 }
 function buildContext(event, options, details, boundProject) {
-  const cwd = path15.resolve(options.cwd);
+  const cwd = path16.resolve(options.cwd);
   const env = options.env ?? process.env;
   try {
     const paths = pluginPaths(cwd, env);
@@ -5302,7 +5959,7 @@ function policyFailure(event, options, detail, boundProject) {
     }]
   };
   try {
-    const cwd = path15.resolve(options.cwd);
+    const cwd = path16.resolve(options.cwd);
     const paths = pluginPaths(cwd, options.env ?? process.env);
     const project = boundProject ? { ...resolveProject(boundProject.root), canonicalKey: boundProject.canonicalKey, root: boundProject.root } : resolveProject(cwd);
     const context = {
@@ -5326,7 +5983,7 @@ function pluginPaths(cwd, env) {
 }
 function resolveOperationProject(cwd, resourceKind, targetPaths, paths) {
   const candidates = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
-  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path15.resolve(cwd, target)) : [];
+  const absoluteTargets = usesFilesystemResources(resourceKind) ? (targetPaths ?? []).map((target) => path16.resolve(cwd, target)) : [];
   const candidate = candidates.find((entry) => isWithinPath2(cwd, entry.root) || absoluteTargets.some((target) => isWithinPath2(target, entry.root)));
   if (!candidate)
     return resolveProject(cwd);
@@ -5338,12 +5995,12 @@ function conflictingProjectTarget(cwd, targetPaths, resourceKind, project, optio
     return;
   const paths = pluginPaths(cwd, options.env ?? process.env);
   const roots = registeredProjectRoots(paths.projectsFile);
-  const targets = targetPaths.map((target) => path15.resolve(cwd, target));
+  const targets = targetPaths.map((target) => path16.resolve(cwd, target));
   return roots.find((entry) => entry.canonicalKey !== project.canonicalKey && targets.some((target) => isWithinPath2(target, entry.root)))?.canonicalKey;
 }
 function isWithinPath2(value, root) {
-  const relative = path15.relative(path15.resolve(root), path15.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path15.isAbsolute(relative);
+  const relative = path16.relative(path16.resolve(root), path16.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path16.isAbsolute(relative);
 }
 function permissionDetails(action, resources, metadata, deferToolWrite) {
   const normalized = action.toLowerCase();
@@ -5496,23 +6153,10 @@ function pathValues(value) {
   const nested = ["arguments", "args", "input"].flatMap((key) => pathValues(record[key]));
   return [...new Set([...direct, ...arrays, ...nested])];
 }
-var PRIVATE_KEY_PATTERN2 = new RegExp(["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" "));
 function detectSecretKinds(value) {
   const text = collectStrings(value).join(`
 `);
-  if (!text)
-    return [];
-  const kinds = [];
-  if (PRIVATE_KEY_PATTERN2.test(text))
-    kinds.push("private-key");
-  if (/\b(AKIA|ASIA)[A-Z0-9]{16}\b/.test(text))
-    kinds.push("aws-access-key");
-  if (/(api[_-]?key|access[_-]?token|secret[_-]?key|password)\s*[:=]\s*["'][^\r\n"']{16,}["']/i.test(text)) {
-    kinds.push("credential-assignment");
-  }
-  if (/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/.test(text))
-    kinds.push("bearer-token");
-  return kinds;
+  return text ? detectPayloadSecretKinds(text) : [];
 }
 function collectStrings(value, depth = 0, output = []) {
   if (depth > 6 || output.length >= 500)
@@ -5564,7 +6208,10 @@ function pluginMessage(result) {
   const relevant = result.violations.filter((violation) => violation.decision === "deny" || violation.decision === "ask");
   if (relevant.length === 0)
     return null;
-  return `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
+  const summary = `[malahor] ${relevant.map((violation) => `${violation.id}: ${violation.message}`).join("; ")}`;
+  const remediation = formatHookRemediations(relevant.flatMap((violation) => violation.remediations ?? []));
+  return remediation ? `${summary}
+${remediation}` : summary;
 }
 function mergeMessage(current, next) {
   const prefix = stringValue4(current);
@@ -5590,8 +6237,9 @@ function recordValue3(value) {
 }
 
 // src/plugin/protocol.ts
-var MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v4 -->";
+var MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v5 -->";
 var LEGACY_PROTOCOL_MARKERS = [
+  "<!-- malahor-runtime-protocol:v4 -->",
   "<!-- malahor-runtime-protocol:v3 -->",
   "<!-- malahor-runtime-protocol:v2 -->",
   "<!-- malahor-runtime-protocol:v1 -->"
@@ -5622,6 +6270,7 @@ Intervención y reparación
 - Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentación ceremonial. Tras go ejecuta el alcance aprobado en una sola pasada y usa validación enfocada; un commit conserva excepcionalmente diagnóstico, tests, build y hooks completos.
 - Una inspección puramente read-only reconocida por la política cerrada se ejecuta sin plan y sin go; no extiendas esta excepción a comandos ambiguos, mutantes, remotos, indirectos o fuera de la raíz autorizada.
 - Sustituir una lectura por otra equivalente no exige una revisión del plan cuando no cambian efectos, recursos ni riesgo. Solo un cambio material de efectos, recursos o riesgo exige una nueva revisión proporcional.
+- Los intentos técnicos equivalentes reutilizan la misma revisión V5 y crean otro attempt; solo un cambio material exige otro plan. ASK, DENY y controles críticos nunca se reintentan automáticamente.
 - Un commit explícito usa un único plan nivel 0 y un único go; después ejecuta diagnóstico, tests, build, stage exacto y commit ordinario local en una sola pasada, sin planes o confirmaciones redundantes.
 - Usa divulgación progresiva: el resumen debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto, riesgo y “Qué debes hacer ahora” narrado en lenguaje técnico comprensible.
 - La vista normal no incrusta IDs, comandos ni el anexo técnico; tampoco muestra rutas exactas. Ante un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran únicamente mediante /malahor-plan detalles.
@@ -5629,6 +6278,9 @@ Intervención y reparación
 - malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible, pero debe coincidir exactamente y no sustituye las validaciones de scope, fase, turno o revision.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
+- Si un guardrail bloquea una lectura o edición, detente y no pruebes rutas indirectas. Cuando el hook entregue una remediación estructurada y saneada, explícasela a una persona no desarrolladora con este formato: abre el archivo y la línea indicados, identifica la referencia saneada, reemplaza el bloque completo por el bloque propuesto, guarda y pide revalidar.
+- No pidas a la persona interpretar variables, payloads o sintaxis si existe un bloque de reemplazo verificable. Si el hook no aporta esa evidencia, no inventes números de línea, contenido ni código: un ASK requiere aprobación; un hard DENY no admite instrucciones de ejecución; y un secreto real o ambiguo exige retirada, rotación o gestor de secretos, nunca ofuscación.
+- Una modificación manual reportada por la persona no demuestra éxito ni amplía autorización. Relee o revalida el recurso mediante el guardrail antes de reanudar el plan o afirmar que quedó corregido.
 - Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
 - Los estados de planning viven en ctx.storage de OpenCode y son independientes de Mnemo. Una revisión terminal deja de actuar como plan activo: primero se archiva completa, firmada y comprimida; solo después se retiran copias vivas que aún coincidan exactamente. Sin verificación o sin capacidades de scan/remove se conservan las copias originales.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni las escrituras documentales autorizadas mediante docs_*.
@@ -5737,12 +6389,12 @@ function isRecord4(value) {
 }
 
 // src/plugin/planning.ts
-import fs14 from "node:fs";
-import path18 from "node:path";
+import fs16 from "node:fs";
+import path20 from "node:path";
 
 // src/cli/core/config.ts
 import { createHash as createHash5 } from "node:crypto";
-import fs11 from "node:fs";
+import fs12 from "node:fs";
 
 // src/docs/client.ts
 var DOCS_CLIENTS = ["system", "vscode", "obsidian"];
@@ -5802,10 +6454,10 @@ function modeForIntervention(intervention) {
   }
 }
 function readConfigFile(filePath) {
-  if (!fs11.existsSync(filePath)) {
+  if (!fs12.existsSync(filePath)) {
     return {};
   }
-  const raw = fs11.readFileSync(filePath, "utf8").trim();
+  const raw = fs12.readFileSync(filePath, "utf8").trim();
   if (!raw)
     return {};
   try {
@@ -5908,8 +6560,8 @@ function readOptionalBoolean(value, key) {
 
 // src/cli/core/mode.ts
 import { createHash as createHash6, randomBytes as randomBytes3 } from "node:crypto";
-import fs12 from "node:fs";
-import path16 from "node:path";
+import fs13 from "node:fs";
+import path17 from "node:path";
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
 function createScanner(text, ignoreTrivia = false) {
@@ -6711,12 +7363,12 @@ function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
   }
   return result;
 }
-function findNodeAtLocation(root, path16) {
+function findNodeAtLocation(root, path17) {
   if (!root) {
     return;
   }
   let node = root;
-  for (let segment of path16) {
+  for (let segment of path17) {
     if (typeof segment === "string") {
       if (node.type !== "object" || !Array.isArray(node.children)) {
         return;
@@ -7017,14 +7669,14 @@ function getNodeType(value) {
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/edit.js
 function setProperty(text, originalPath, value, options) {
-  const path16 = originalPath.slice();
+  const path17 = originalPath.slice();
   const errors = [];
   const root = parseTree(text, errors);
   let parent = undefined;
   let lastSegment = undefined;
-  while (path16.length > 0) {
-    lastSegment = path16.pop();
-    parent = findNodeAtLocation(root, path16);
+  while (path17.length > 0) {
+    lastSegment = path17.pop();
+    parent = findNodeAtLocation(root, path17);
     if (parent === undefined && value !== undefined) {
       if (typeof lastSegment === "string") {
         value = { [lastSegment]: value };
@@ -7210,8 +7862,8 @@ var ParseErrorCode;
   ParseErrorCode2[ParseErrorCode2["InvalidEscapeCharacter"] = 15] = "InvalidEscapeCharacter";
   ParseErrorCode2[ParseErrorCode2["InvalidCharacter"] = 16] = "InvalidCharacter";
 })(ParseErrorCode || (ParseErrorCode = {}));
-function modify(text, path16, value, options) {
-  return setProperty(text, path16, value, options);
+function modify(text, path17, value, options) {
+  return setProperty(text, path17, value, options);
 }
 function applyEdits(text, edits) {
   let sortedEdits = edits.slice(0).sort((a, b) => {
@@ -7296,13 +7948,13 @@ function applyModeChange(target, expectedVersion, beforeWrite, env = process.env
     return { mode: plan.target, backup: null, configFile: plan.configFile };
   const config = loadConfig(env, cwd);
   beforeWrite(plan.configFile, config.paths.backupsDir);
-  fs12.mkdirSync(path16.dirname(plan.configFile), { recursive: true, mode: 448 });
+  fs13.mkdirSync(path17.dirname(plan.configFile), { recursive: true, mode: 448 });
   assertSafePath(plan.configFile);
   assertSafePath(config.paths.backupsDir);
   const lock = `${plan.configFile}.mode.lock`;
   let lockFd;
   try {
-    lockFd = fs12.openSync(lock, "wx", 384);
+    lockFd = fs13.openSync(lock, "wx", 384);
   } catch (error) {
     throw new Error(`Cambio de modo bloqueado (lock activo o directorio inexistente): ${error.message}`);
   }
@@ -7314,38 +7966,38 @@ function applyModeChange(target, expectedVersion, beforeWrite, env = process.env
     const raw = readConfig(plan.configFile);
     const revision = randomBytes3(16).toString("hex");
     const after = editExecution(raw, target, revision);
-    const backup = fs12.existsSync(plan.configFile) ? path16.join(config.paths.backupsDir, `${path16.basename(plan.configFile)}.${timestamp()}.${randomBytes3(6).toString("hex")}.bak`) : null;
+    const backup = fs13.existsSync(plan.configFile) ? path17.join(config.paths.backupsDir, `${path17.basename(plan.configFile)}.${timestamp()}.${randomBytes3(6).toString("hex")}.bak`) : null;
     if (backup) {
-      fs12.mkdirSync(config.paths.backupsDir, { recursive: true, mode: 448 });
+      fs13.mkdirSync(config.paths.backupsDir, { recursive: true, mode: 448 });
       assertSafePath(config.paths.backupsDir);
-      fs12.copyFileSync(plan.configFile, backup, fs12.constants.COPYFILE_EXCL);
-      fs12.chmodSync(backup, 384);
+      fs13.copyFileSync(plan.configFile, backup, fs13.constants.COPYFILE_EXCL);
+      fs13.chmodSync(backup, 384);
     }
     temporary = `${plan.configFile}.${randomBytes3(8).toString("hex")}.tmp`;
-    fs12.writeFileSync(temporary, after, { flag: "wx", mode: 384 });
+    fs13.writeFileSync(temporary, after, { flag: "wx", mode: 384 });
     if (readConfig(plan.configFile) !== raw)
       throw new Error("La configuracion cambio durante el respaldo: no se aplica.");
-    fs12.renameSync(temporary, plan.configFile);
+    fs13.renameSync(temporary, plan.configFile);
     temporary = undefined;
     return { mode: modeName(target), backup, configFile: plan.configFile };
   } finally {
     if (temporary)
-      fs12.rmSync(temporary, { force: true });
-    fs12.closeSync(lockFd);
-    fs12.unlinkSync(lock);
+      fs13.rmSync(temporary, { force: true });
+    fs13.closeSync(lockFd);
+    fs13.unlinkSync(lock);
   }
 }
 function readConfig(file) {
   assertSafePath(file);
   try {
-    if (!fs12.lstatSync(file).isFile())
+    if (!fs13.lstatSync(file).isFile())
       throw new Error("La configuracion de Malahor debe ser archivo regular, no symlink.");
   } catch (error) {
     if (error.code === "ENOENT")
       return "";
     throw error;
   }
-  return fs12.readFileSync(file, "utf8");
+  return fs13.readFileSync(file, "utf8");
 }
 function hasConfiguredIntervention(file) {
   const raw = readConfig(file);
@@ -7358,15 +8010,15 @@ function hasConfiguredIntervention(file) {
   return parsed?.execution?.intervention !== undefined;
 }
 function assertSafePath(file) {
-  for (let current = path16.resolve(file);; current = path16.dirname(current)) {
+  for (let current = path17.resolve(file);; current = path17.dirname(current)) {
     try {
-      if (fs12.lstatSync(current).isSymbolicLink())
+      if (fs13.lstatSync(current).isSymbolicLink())
         throw new Error(`Ruta con symlink no permitida: ${current}`);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
     }
-    if (path16.dirname(current) === current)
+    if (path17.dirname(current) === current)
       break;
   }
 }
@@ -7399,8 +8051,521 @@ function hash(input) {
   return createHash6("sha256").update(input).digest("hex");
 }
 
+// src/cli/core/action-intent.ts
+import { createHash as createHash7 } from "node:crypto";
+import fs14 from "node:fs";
+import path18 from "node:path";
+var ACTION_INTENT_CANONICALIZER = "action-intent-v1";
+
+class ActionIntentError extends Error {
+  code;
+  constructor(code, message) {
+    super(message);
+    this.name = "ActionIntentError";
+    this.code = code;
+  }
+}
+function canonicalizeActionIntent(input) {
+  const kind = input.kind;
+  if (kind !== "edit" && kind !== "shell" && kind !== "subagent") {
+    throw canonicalizationError("Tipo de acción no soportado por ActionIntentV1.");
+  }
+  const project = requiredText(input.project, "Proyecto no evaluable.", 256);
+  const root = canonicalRoot(requiredText(input.root, "Raíz de acción no evaluable.", 8192));
+  const rootRef = requiredText(input.rootRef ?? "project", "Referencia de raíz no evaluable.", 256);
+  const rootDigest = sha2562(root);
+  const constraints = normalizeConstraints(input.constraints);
+  if (kind === "edit") {
+    const target = requiredText(input.path, "Ruta de edición no evaluable.", 8192);
+    const existence = input.existence === "may-create" ? "may-create" : input.existence === "must-exist" || input.existence === undefined ? "must-exist" : undefined;
+    if (!existence)
+      throw canonicalizationError("Contrato de existencia no evaluable.");
+    const resource = filesystemResource(target, root, "write", existence);
+    return [sealIntent({
+      schema: 1,
+      canonicalizer: ACTION_INTENT_CANONICALIZER,
+      kind,
+      effect: "write",
+      project,
+      rootRef,
+      rootDigest,
+      resources: [resource],
+      constraints
+    })];
+  }
+  if (kind === "subagent") {
+    const agent = input.agent;
+    if (agent !== "malahor-diagnostico" && agent !== "malahor-testing") {
+      throw canonicalizationError("El especialista no está gestionado por Malahor.");
+    }
+    return [sealIntent({
+      schema: 1,
+      canonicalizer: ACTION_INTENT_CANONICALIZER,
+      kind,
+      effect: "delegate",
+      project,
+      rootRef,
+      rootDigest,
+      resources: [],
+      delegate: { agent },
+      constraints
+    })];
+  }
+  const command = requiredText(input.command, "Comando shell no evaluable.", 16384);
+  const cwd = canonicalPathInsideRoot(typeof input.cwd === "string" && input.cwd.trim() ? input.cwd : root, root, "El cwd queda fuera de la raíz autorizada.");
+  if (input.network !== undefined && input.network !== "forbidden") {
+    throw canonicalizationError("ActionIntentV1 no autoriza red.");
+  }
+  const filesystem = normalizeFilesystem(input.filesystem, root);
+  const resources = filesystemResources(filesystem, root);
+  const environment = normalizeEnvironment(input.environment);
+  const segments = parseClosedShell(command);
+  return segments.map(({ executable, argv }) => sealIntent({
+    schema: 1,
+    canonicalizer: ACTION_INTENT_CANONICALIZER,
+    kind,
+    effect: "execute",
+    project,
+    rootRef,
+    rootDigest,
+    resources,
+    command: { executable, argv, cwd, composition: "single" },
+    filesystem,
+    network: "forbidden",
+    environment,
+    constraints
+  }));
+}
+function canonicalizePlannedActions(actions, context) {
+  const output = [];
+  for (const action of actions) {
+    output.push(...canonicalizePlannedAction(action, context));
+  }
+  return output;
+}
+function canonicalizePlannedAction(action, context) {
+  const base = {
+    project: context.project,
+    root: context.root,
+    rootRef: context.rootRef ?? "project",
+    constraints: { remote: false, infrastructure: false }
+  };
+  if (action.action === "edit") {
+    return canonicalizeActionIntent({
+      ...base,
+      kind: "edit",
+      path: action.resource,
+      existence: pathExistsWithoutFollowingSymlink(action.resource, context.root) ? "must-exist" : "may-create"
+    });
+  }
+  if (action.action === "shell") {
+    return canonicalizeActionIntent({
+      ...base,
+      kind: "shell",
+      command: action.resource,
+      cwd: context.cwd ?? context.root,
+      filesystem: {
+        readRoots: [context.root],
+        writePaths: [],
+        createPaths: [],
+        sandboxWriteRoots: context.sandboxWriteRoots ?? []
+      },
+      network: "forbidden",
+      environment: []
+    });
+  }
+  if (action.action === "subagent") {
+    return canonicalizeActionIntent({ ...base, kind: "subagent", agent: action.resource });
+  }
+  throw canonicalizationError("Acción de plan no soportada por ActionIntentV1.");
+}
+function compatibilityActionIntents(actions, project) {
+  const rootDigest = sha2562(`unresolved:${project}`);
+  return actions.flatMap((action) => {
+    const base = {
+      schema: 1,
+      canonicalizer: ACTION_INTENT_CANONICALIZER,
+      project,
+      rootRef: "planning:unresolved",
+      rootDigest,
+      constraints: { remote: false, infrastructure: false, protectedOperation: "runtime-recanonicalization" }
+    };
+    if (action.action === "edit") {
+      return [sealIntent({
+        ...base,
+        kind: "edit",
+        effect: "write",
+        resources: [{
+          kind: "filesystem",
+          canonicalPath: path18.resolve(action.resource),
+          relativePath: action.resource,
+          access: "write",
+          existence: "may-create"
+        }]
+      })];
+    }
+    if (action.action === "subagent") {
+      if (action.resource !== "malahor-diagnostico" && action.resource !== "malahor-testing") {
+        throw canonicalizationError("El especialista no está gestionado por Malahor.");
+      }
+      return [sealIntent({
+        ...base,
+        kind: "subagent",
+        effect: "delegate",
+        resources: [],
+        delegate: { agent: action.resource }
+      })];
+    }
+    if (action.action !== "shell")
+      throw canonicalizationError("Acción de plan no soportada.");
+    return [sealIntent({
+      ...base,
+      kind: "shell",
+      effect: "execute",
+      resources: [],
+      command: {
+        executable: "planning-exact",
+        argv: [action.resource],
+        cwd: "planning:unresolved",
+        composition: "single"
+      },
+      filesystem: { readRoots: [], writePaths: [], createPaths: [], sandboxWriteRoots: [] },
+      network: "forbidden",
+      environment: []
+    })];
+  });
+}
+function sameActionIntentSequence(left, right) {
+  return left.length === right.length && left.every((intent, index) => intent.actionID === right[index]?.actionID);
+}
+function validActionIntentV1(value) {
+  if (!isRecord5(value) || value.schema !== 1 || value.canonicalizer !== ACTION_INTENT_CANONICALIZER || typeof value.actionID !== "string" || !/^[a-f0-9]{64}$/.test(value.actionID) || !["edit", "shell", "subagent"].includes(String(value.kind)) || !["write", "execute", "delegate"].includes(String(value.effect)) || typeof value.project !== "string" || !value.project || typeof value.rootRef !== "string" || !value.rootRef || typeof value.rootDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.rootDigest) || !Array.isArray(value.resources) || !value.resources.every(validFilesystemResource) || !validConstraints(value.constraints))
+    return false;
+  const common = ["schema", "canonicalizer", "actionID", "kind", "effect", "project", "rootRef", "rootDigest", "resources", "constraints"];
+  if (value.kind === "edit" && (value.effect !== "write" || value.resources.length !== 1 || !hasOnlyKeys(value, common)))
+    return false;
+  if (value.kind === "subagent" && (value.effect !== "delegate" || !isRecord5(value.delegate) || !hasOnlyKeys(value, [...common, "delegate"]) || !hasOnlyKeys(value.delegate, ["agent"]) || !["malahor-diagnostico", "malahor-testing"].includes(String(value.delegate.agent))))
+    return false;
+  if (value.kind === "shell" && (value.effect !== "execute" || !validCommand(value.command) || value.network !== "forbidden" || !validFilesystem(value.filesystem) || !Array.isArray(value.environment) || !value.environment.every(validEnvironment) || !hasOnlyKeys(value, [...common, "command", "filesystem", "network", "environment"])))
+    return false;
+  const { actionID: _actionID, ...unsigned } = value;
+  return sha2562(canonical(unsigned)) === value.actionID;
+}
+function parseClosedShell(command) {
+  const segments = splitAndSequence(command);
+  return segments.map((segment) => {
+    const words = shellWords(segment);
+    if (words.length === 0)
+      throw canonicalizationError("Segmento shell vacío.");
+    const [executable, ...argv] = words;
+    if (!executable || /^[A-Za-z_][A-Za-z0-9_]*=/.test(executable)) {
+      throw canonicalizationError("ActionIntentV1 no admite asignaciones shell inline.");
+    }
+    const basename = path18.basename(executable).toLowerCase();
+    if (basename === "eval" || ["sh", "bash", "zsh", "dash", "fish", "cmd", "powershell", "pwsh"].includes(basename) && argv.some((item) => item === "-c" || item === "/c" || item === "-command")) {
+      throw canonicalizationError("ActionIntentV1 no admite shells anidados ni eval.");
+    }
+    return { executable, argv };
+  });
+}
+function splitAndSequence(command) {
+  const segments = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index];
+    const next = command[index + 1];
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === "&" && next === "&") {
+      if (!current.trim())
+        throw canonicalizationError("Secuencia shell incompleta.");
+      segments.push(current.trim());
+      current = "";
+      index += 1;
+      continue;
+    }
+    if (character === "&" || character === "|" || character === ";" || character === "<" || character === ">" || character === `
+` || character === "\r" || character === "`" || character === "$" || character === "*" || character === "?" || character === "[") {
+      throw canonicalizationError("Operador o expansión shell fuera del subconjunto cerrado.");
+    }
+    current += character;
+  }
+  if (escaped || quote || !current.trim())
+    throw canonicalizationError("Comando shell incompleto o con quoting inválido.");
+  segments.push(current.trim());
+  return segments;
+}
+function shellWords(segment) {
+  const words = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  let started = false;
+  for (let index = 0;index < segment.length; index += 1) {
+    const character = segment[index];
+    if (escaped) {
+      current += character;
+      started = true;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      started = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      if (started) {
+        words.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += character;
+    started = true;
+  }
+  if (escaped || quote)
+    throw canonicalizationError("Token shell incompleto.");
+  if (started)
+    words.push(current);
+  return words;
+}
+function normalizeFilesystem(value, root) {
+  const record = value === undefined ? {} : value;
+  if (!isRecord5(record))
+    throw canonicalizationError("Footprint de filesystem no evaluable.");
+  return {
+    readRoots: normalizedPathList(record.readRoots ?? [root], root, true),
+    writePaths: normalizedPathList(record.writePaths ?? [], root, true),
+    createPaths: normalizedPathList(record.createPaths ?? [], root, true),
+    sandboxWriteRoots: normalizedPathList(record.sandboxWriteRoots ?? [], root, false)
+  };
+}
+function normalizedPathList(value, root, confined) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw canonicalizationError("Lista de paths no evaluable.");
+  }
+  return [...new Set(value.map((item) => confined ? canonicalPathInsideRoot(item, root, "Recurso fuera de la raíz autorizada.") : canonicalLoosePath(item, root)))].sort(compareText);
+}
+function filesystemResources(filesystem, root) {
+  const resources = [];
+  for (const target of filesystem.readRoots) {
+    resources.push(resourceFromCanonical(target, root, "read", "must-exist"));
+  }
+  for (const target of filesystem.writePaths) {
+    resources.push(resourceFromCanonical(target, root, "write", "must-exist"));
+  }
+  for (const target of filesystem.createPaths) {
+    resources.push(resourceFromCanonical(target, root, "write", "may-create"));
+  }
+  for (const target of filesystem.sandboxWriteRoots) {
+    resources.push({
+      kind: "filesystem",
+      canonicalPath: target,
+      relativePath: path18.relative(root, target) || ".",
+      access: "write",
+      existence: "may-create",
+      sandbox: true
+    });
+  }
+  return resources.sort((left, right) => compareText(`${left.access}\x00${left.canonicalPath}\x00${left.existence}`, `${right.access}\x00${right.canonicalPath}\x00${right.existence}`));
+}
+function filesystemResource(target, root, access, existence) {
+  const canonicalPath = canonicalPathInsideRoot(target, root, "Recurso fuera de la raíz autorizada.");
+  if (existence === "must-exist" && !fs14.existsSync(canonicalPath)) {
+    throw canonicalizationError("El recurso declarado como existente no existe.");
+  }
+  return resourceFromCanonical(canonicalPath, root, access, existence);
+}
+function resourceFromCanonical(canonicalPath, root, access, existence) {
+  return {
+    kind: "filesystem",
+    canonicalPath,
+    relativePath: portableRelative(root, canonicalPath),
+    access,
+    existence
+  };
+}
+function canonicalRoot(value) {
+  const resolved = path18.resolve(value);
+  try {
+    const stat = fs14.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isDirectory())
+      throw new Error("not-directory");
+    return fs14.realpathSync(resolved);
+  } catch (error) {
+    if (error instanceof ActionIntentError)
+      throw error;
+    throw canonicalizationError("La raíz física no es un directorio regular evaluable.");
+  }
+}
+function canonicalPathInsideRoot(target, root, message) {
+  const resolved = path18.resolve(root, target);
+  if (!inside2(resolved, root))
+    throw resourceScopeError(message);
+  const canonical = canonicalExistingOrFuturePath(resolved);
+  if (!inside2(canonical, root))
+    throw resourceScopeError(message);
+  return canonical;
+}
+function canonicalExistingOrFuturePath(target) {
+  if (fs14.existsSync(target))
+    return fs14.realpathSync(target);
+  const suffix = [];
+  let cursor = target;
+  while (!fs14.existsSync(cursor)) {
+    const parent = path18.dirname(cursor);
+    if (parent === cursor)
+      throw canonicalizationError("No se pudo resolver el ancestro físico del recurso.");
+    suffix.unshift(path18.basename(cursor));
+    cursor = parent;
+  }
+  const stat = fs14.lstatSync(cursor);
+  if (stat.isSymbolicLink())
+    throw resourceScopeError("El recurso atraviesa un enlace simbólico no evaluable.");
+  return path18.join(fs14.realpathSync(cursor), ...suffix);
+}
+function canonicalLoosePath(target, root) {
+  return canonicalExistingOrFuturePath(path18.resolve(root, target));
+}
+function pathExistsWithoutFollowingSymlink(target, root) {
+  const resolved = path18.resolve(root, target);
+  try {
+    const stat = fs14.lstatSync(resolved);
+    return !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function normalizeEnvironment(value) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value))
+    throw canonicalizationError("Entorno de acción no evaluable.");
+  const output = value.map((item) => {
+    if (!isRecord5(item) || typeof item.key !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.key) || item.source !== "host-managed" && item.source !== "literal-nonsecret" || item.valueDigest !== undefined && (typeof item.valueDigest !== "string" || !/^[a-f0-9]{64}$/.test(item.valueDigest))) {
+      throw canonicalizationError("Variable de entorno no evaluable.");
+    }
+    return {
+      key: item.key,
+      source: item.source,
+      ...typeof item.valueDigest === "string" ? { valueDigest: item.valueDigest } : {}
+    };
+  });
+  const keys = output.map((item) => item.key);
+  if (new Set(keys).size !== keys.length)
+    throw canonicalizationError("Variables de entorno duplicadas.");
+  return output.sort((left, right) => compareText(left.key, right.key));
+}
+function normalizeConstraints(value) {
+  const record = value === undefined ? {} : value;
+  if (!isRecord5(record) || record.remote !== undefined && record.remote !== false || record.infrastructure !== undefined && record.infrastructure !== false || record.protectedOperation !== undefined && (typeof record.protectedOperation !== "string" || !record.protectedOperation.trim() || record.protectedOperation.length > 256)) {
+    throw canonicalizationError("Restricciones de acción no evaluables.");
+  }
+  return {
+    remote: false,
+    infrastructure: false,
+    ...typeof record.protectedOperation === "string" ? { protectedOperation: record.protectedOperation.trim() } : {}
+  };
+}
+function sealIntent(value) {
+  return { ...value, actionID: sha2562(canonical(value)) };
+}
+function validFilesystemResource(value) {
+  return isRecord5(value) && value.kind === "filesystem" && typeof value.canonicalPath === "string" && typeof value.relativePath === "string" && (value.access === "read" || value.access === "write") && (value.existence === "must-exist" || value.existence === "may-create") && (value.sandbox === undefined || typeof value.sandbox === "boolean") && hasOnlyKeys(value, value.sandbox === undefined ? ["kind", "canonicalPath", "relativePath", "access", "existence"] : ["kind", "canonicalPath", "relativePath", "access", "existence", "sandbox"]);
+}
+function validCommand(value) {
+  return isRecord5(value) && typeof value.executable === "string" && value.executable.length > 0 && Array.isArray(value.argv) && value.argv.every((item) => typeof item === "string") && typeof value.cwd === "string" && value.cwd.length > 0 && (value.composition === "single" || value.composition === "and-sequence") && hasOnlyKeys(value, ["executable", "argv", "cwd", "composition"]);
+}
+function validFilesystem(value) {
+  return isRecord5(value) && [value.readRoots, value.writePaths, value.createPaths, value.sandboxWriteRoots].every((item) => Array.isArray(item) && item.every((entry) => typeof entry === "string")) && hasOnlyKeys(value, ["readRoots", "writePaths", "createPaths", "sandboxWriteRoots"]);
+}
+function validEnvironment(value) {
+  return isRecord5(value) && typeof value.key === "string" && (value.source === "host-managed" || value.source === "literal-nonsecret") && (value.valueDigest === undefined || typeof value.valueDigest === "string" && /^[a-f0-9]{64}$/.test(value.valueDigest)) && hasOnlyKeys(value, value.valueDigest === undefined ? ["key", "source"] : ["key", "source", "valueDigest"]);
+}
+function validConstraints(value) {
+  return isRecord5(value) && value.remote === false && value.infrastructure === false && (value.protectedOperation === undefined || typeof value.protectedOperation === "string") && hasOnlyKeys(value, value.protectedOperation === undefined ? ["remote", "infrastructure"] : ["remote", "infrastructure", "protectedOperation"]);
+}
+function hasOnlyKeys(value, keys) {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+function portableRelative(root, target) {
+  const relative = path18.relative(root, target) || ".";
+  return relative.split(path18.sep).join("/");
+}
+function inside2(target, root) {
+  const relative = path18.relative(path18.resolve(root), path18.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
+}
+function requiredText(value, message, max) {
+  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000\r\n]/u.test(value)) {
+    throw canonicalizationError(message);
+  }
+  return value.trim();
+}
+function canonicalizationError(message) {
+  return new ActionIntentError("ACTION_NOT_CANONICALIZABLE", message);
+}
+function resourceScopeError(message) {
+  return new ActionIntentError("RESOURCE_OUTSIDE_SCOPE", message);
+}
+function sha2562(value) {
+  return createHash7("sha256").update(value).digest("hex");
+}
+function canonical(value) {
+  if (Array.isArray(value))
+    return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText(left, right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function isRecord5(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // src/cli/core/planning.ts
-import { createHash as createHash7, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash8, randomBytes as randomBytes4 } from "node:crypto";
 
 // src/cli/core/plan-presentation.ts
 var MAX_STEPS = 5;
@@ -7413,7 +8578,7 @@ var RISK_CATEGORIES = new Set([
   "destructive"
 ]);
 function normalizePlanPresentation(value, mode, level = 1) {
-  if (!isRecord5(value))
+  if (!isRecord6(value))
     throw new Error("El plan necesita una presentacion humana estructurada.");
   const objective = normalizedText(value.objective, "objetivo", 1000);
   const outcome = normalizedText(value.outcome, "resultado", 1000);
@@ -7442,7 +8607,7 @@ function normalizePlanPresentation(value, mode, level = 1) {
 }
 function validPlanPresentation(value, mode, level = 1) {
   try {
-    if (!isRecord5(value))
+    if (!isRecord6(value))
       return false;
     return samePresentation(value, normalizePlanPresentation(value, mode, level));
   } catch {
@@ -7520,8 +8685,14 @@ function technicalBody(state) {
   const lines = [
     "### Riesgo y control",
     `- Nivel de trabajo: ${planLevel(state)}`,
+    `- Contrato de autorización: V${state.version}`,
     `- Nivel: ${riskLevelLabel(presentation.risk.level)}`
   ];
+  if (state.version === 5) {
+    lines.push(`- Canonicalizador: ${state.canonicalizerVersion}`);
+  } else if (!["completed", "revoked", "superseded"].includes(state.phase)) {
+    lines.push("- Compatibilidad: este V4 activo no puede ejecutarse; requiere una revisión V5 visible.");
+  }
   if (presentation.risk.categories.length > 0) {
     lines.push(`- Categorías críticas: ${presentation.risk.categories.join(", ")}`);
   }
@@ -7541,6 +8712,9 @@ function technicalBody(state) {
   }
   if (state.plan.actions.length > 0) {
     lines.push("", "### Acciones exactas", ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${safeJson(resource)}`));
+  }
+  if (state.version === 5 && state.actionIntents.length > 0) {
+    lines.push("", "### Intents firmados", ...state.actionIntents.map((intent, index) => `- ${index + 1}. ${intent.kind}: ${intent.actionID}`));
   }
   lines.push("", "### Autorización", ...approvalLines(state), "", "### Identidad firmada", `- Plan: ${state.planID}`, `- Revisión: ${state.revision}`, `- Digest: ${state.digest}`, "", "### Vigencia", "- Sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.");
   return lines;
@@ -7575,6 +8749,9 @@ function approvalLines(state) {
   ];
 }
 function nextAction(state) {
+  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
+    return "No ejecutes esta revisión: usa un contrato V4 legado. Puedes consultarla o revocarla; para continuar presenta una revisión V5 equivalente y vuelve a aprobarla.";
+  }
   if (state.phase === "completed") {
     return "No tienes que hacer nada más: el trabajo de este plan terminó. Si necesitas otro cambio, solicítalo como una tarea nueva.";
   }
@@ -7611,6 +8788,9 @@ function planIdentity(state) {
   return `Plan Malahor (${state.mode} · nivel ${planLevel(state)}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
 }
 function phaseStatus(state) {
+  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
+    return "bloqueado: requiere revisión V5";
+  }
   if (state.phase === "presented") {
     return state.mode === "assistant" ? "esperando tu revisión" : state.mode === "executor" ? "esperando tu aprobación" : "presentado para consulta";
   }
@@ -7679,7 +8859,7 @@ function normalizedSteps(value) {
     throw new Error("Pasos de presentacion invalidos o demasiado extensos.");
   }
   return value.map((step) => {
-    if (!isRecord5(step))
+    if (!isRecord6(step))
       throw new Error("Paso de presentacion invalido.");
     return {
       title: normalizedText(step.title, "titulo de paso", 160),
@@ -7692,7 +8872,7 @@ function normalizedImpact(value) {
     throw new Error("Lista de impacto invalida o demasiado extensa.");
   }
   return value.map((item) => {
-    if (!isRecord5(item))
+    if (!isRecord6(item))
       throw new Error("Elemento de impacto invalido.");
     return {
       area: normalizedText(item.area, "area de impacto", 120),
@@ -7701,7 +8881,7 @@ function normalizedImpact(value) {
   });
 }
 function normalizedRisk(value) {
-  if (!isRecord5(value))
+  if (!isRecord6(value))
     throw new Error("Riesgo de presentacion invalido.");
   if (typeof value.level !== "string" || !RISK_LEVELS.has(value.level)) {
     throw new Error("Nivel de riesgo invalido.");
@@ -7753,7 +8933,7 @@ function samePresentation(value, normalized) {
 }
 function sameSteps(value, normalized) {
   return Array.isArray(value) && value.length === normalized.length && value.every((step, index) => {
-    if (!isRecord5(step) || !hasExactKeys(step, ["title", "description"]))
+    if (!isRecord6(step) || !hasExactKeys(step, ["title", "description"]))
       return false;
     const expected = normalized[index];
     return step.title === expected.title && step.description === expected.description;
@@ -7761,14 +8941,14 @@ function sameSteps(value, normalized) {
 }
 function sameImpact(value, normalized) {
   return Array.isArray(value) && value.length === normalized.length && value.every((item, index) => {
-    if (!isRecord5(item) || !hasExactKeys(item, ["area", "description"]))
+    if (!isRecord6(item) || !hasExactKeys(item, ["area", "description"]))
       return false;
     const expected = normalized[index];
     return item.area === expected.area && item.description === expected.description;
   });
 }
 function sameRisk(value, normalized) {
-  if (!isRecord5(value) || !hasExactKeys(value, ["level", "categories", "summary", "details"]))
+  if (!isRecord6(value) || !hasExactKeys(value, ["level", "categories", "summary", "details"]))
     return false;
   return value.level === normalized.level && sameStrings(value.categories, normalized.categories) && value.summary === normalized.summary && value.details === normalized.details;
 }
@@ -7779,7 +8959,7 @@ function hasExactKeys(value, expected) {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
-function isRecord5(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -7797,6 +8977,7 @@ var PHASES = new Set([
 ]);
 var TERMINAL = new Set(["completed", "revoked", "superseded"]);
 var CORE_INTERACTION_ID = "core:direct";
+var PLAN_CONTRACT_VERSION = 5;
 var DEFAULT_PLANNING_AUTHORITY = createEphemeralPlanningAuthority();
 var transitions = new Map;
 async function presentPlan(scope, input, presentationInteractionID, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
@@ -7828,7 +9009,10 @@ async function requestPlanExecution(scope, digest, executionInteractionID, adapt
     if (!validInteractionID(executionInteractionID))
       throw new Error("Turno de ejecucion no evaluable.");
     const stored = await adapter.loadActive(scope.sessionID);
-    if (!validState(stored, authority) || stored.digest !== digest || !samePlanScope(stored, scope) || stored.plan.actions.length === 0 || (stored.mode === "assistant" ? stored.phase !== "reviewed" : stored.phase !== "presented")) {
+    if (isActiveLegacyPlan(stored)) {
+      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan activo debe presentarse como una revisión V5.");
+    }
+    if (!validState(stored, authority) || stored.version !== 5 || stored.digest !== digest || !samePlanScope(stored, scope) || stored.plan.actions.length === 0 || (stored.mode === "assistant" ? stored.phase !== "reviewed" : stored.phase !== "presented")) {
       throw new Error("No hay un plan ejecutable vigente.");
     }
     if (stored.presentationInteractionID === executionInteractionID) {
@@ -7853,17 +9037,20 @@ async function controlPlan(scope, command, adapter, authority = DEFAULT_PLANNING
       throw new Error("No hay un plan vigente para esta sesion.");
     if (command === "status")
       return stored;
-    if (command === "pause") {
-      if (stored.phase !== "running")
-        throw new Error("Solo un plan en ejecucion puede pausarse.");
-      const next2 = seal({ ...stored, phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
-      await adapter.save(next2);
-      return next2;
-    }
     if (command === "revoke") {
       if (TERMINAL.has(stored.phase))
         throw new Error("El plan ya esta cerrado.");
       const next2 = seal({ ...stored, phase: "revoked", revokedAt: Date.now(), updatedAt: Date.now() }, authority);
+      await adapter.save(next2);
+      return next2;
+    }
+    if (stored.version !== 5) {
+      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan V4 solo puede consultarse o revocarse.");
+    }
+    if (command === "pause") {
+      if (stored.phase !== "running")
+        throw new Error("Solo un plan en ejecucion puede pausarse.");
+      const next2 = seal({ ...stored, phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
       await adapter.save(next2);
       return next2;
     }
@@ -7927,11 +9114,28 @@ function proposePlan(scope, input, now = Date.now(), presentationInteractionID =
     throw new Error("Turno de presentacion no evaluable.");
   if (!/^[a-f0-9]{32}$/.test(planID))
     throw new Error("Identidad de plan no evaluable.");
+  if (input.contractVersion !== undefined && input.contractVersion !== PLAN_CONTRACT_VERSION) {
+    throw new Error("Versión de contrato de planning no soportada.");
+  }
+  if (input.canonicalizerVersion !== undefined && input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER) {
+    throw new Error("Versión de canonicalizador no soportada.");
+  }
+  if (input.actionIntents !== undefined && (input.contractVersion !== PLAN_CONTRACT_VERSION || input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER)) {
+    throw new Error("Los intents V5 requieren contrato y canonicalizador explícitos.");
+  }
   const plan = normalizePlan(scope.mode, input);
+  const actionIntents = normalizeActionIntents(input.actionIntents, plan.actions, scope.project);
+  const actionIntentSource = input.actionIntents === undefined ? "compatibility" : "canonical";
+  const spec = normalizeSpecReference(input.specRef, input.specHash);
   const revision = randomID();
-  const digest = digestPlan(scope, plan, planID, revision, presentationInteractionID);
+  const digest = digestPlanV5(scope, plan, planID, revision, presentationInteractionID, actionIntents, actionIntentSource, spec);
   return seal({
-    version: 4,
+    version: 5,
+    contractVersion: PLAN_CONTRACT_VERSION,
+    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+    actionIntentSource,
+    actionIntents,
+    ...spec,
     planID,
     ...scope,
     presentationInteractionID,
@@ -7964,7 +9168,7 @@ function startPlan(state, now, authority) {
   return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
 }
 function planAllows(state, scope, operation, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
-  if (!validState(state, authority) || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor" || !samePlanScope(state, scope) || state.createdAt > now || state.updatedAt > now)
+  if (!validState(state, authority) || state.version !== 5 || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor" || !samePlanScope(state, scope) || state.createdAt > now || state.updatedAt > now)
     return false;
   return state.plan.actions.some(({ action, resource }) => action === operation.action && resource === operation.resource);
 }
@@ -7972,15 +9176,25 @@ function validState(state, authority = DEFAULT_PLANNING_AUTHORITY) {
   if (!state || typeof state !== "object" || Array.isArray(state))
     return false;
   const value = state;
-  if (value.version !== 4 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || !validPlan(value.plan, value.mode) || typeof value.proof !== "string")
+  if (value.version !== 4 && value.version !== 5 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || !validPlan(value.plan, value.mode) || typeof value.proof !== "string")
     return false;
   const plan = value.plan;
-  const expected = digestPlan({
+  const scope = {
     sessionID: value.sessionID,
     project: value.project,
     mode: value.mode,
     policyRevision: value.policyRevision
-  }, plan, value.planID, value.revision, value.presentationInteractionID);
+  };
+  let expected;
+  if (value.version === 5) {
+    if (value.contractVersion !== PLAN_CONTRACT_VERSION || value.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER || value.actionIntentSource !== "canonical" && value.actionIntentSource !== "compatibility" || !Array.isArray(value.actionIntents) || !value.actionIntents.every(validActionIntentV1) || value.actionIntents.some((intent) => intent.project !== value.project) || !validSpecReference(value.specRef, value.specHash))
+      return false;
+    if (plan.actions.length === 0 !== (value.actionIntents.length === 0))
+      return false;
+    expected = digestPlanV5(scope, plan, value.planID, value.revision, value.presentationInteractionID, value.actionIntents, value.actionIntentSource, specReferenceFromState(value));
+  } else {
+    expected = digestPlanV4(scope, plan, value.planID, value.revision, value.presentationInteractionID);
+  }
   if (expected !== value.digest || !validPhase(value))
     return false;
   return authority.verify(statePayload(value), value.proof);
@@ -8012,7 +9226,17 @@ function normalizePlan(mode, input) {
   if (dependencies.some((item) => !item || !/^[a-f0-9]{32}$/.test(item.planID) || !/^[a-f0-9]{32}$/.test(item.revision))) {
     throw new Error("Dependencia de plan invalida.");
   }
-  if (JSON.stringify(input).length > 12000)
+  const visibleInput = {
+    level: input.level,
+    summary: input.summary,
+    steps: input.steps,
+    presentation: input.presentation,
+    actions: input.actions,
+    dependencies,
+    specRef: input.specRef,
+    specHash: input.specHash
+  };
+  if (JSON.stringify(visibleInput).length > 12000)
     throw new Error("El plan es demasiado grande para una revision visible.");
   const presentation = normalizePlanPresentation(input.presentation, mode, level);
   const actions = uniqueSorted(input.actions, (item) => `${item.action}\x00${item.resource}`);
@@ -8026,6 +9250,28 @@ function normalizePlan(mode, input) {
     dependencies: normalizedDependencies
   };
   return input.level === undefined ? normalized : { level, ...normalized };
+}
+function normalizeActionIntents(value, actions, project) {
+  if (value === undefined)
+    return compatibilityActionIntents(actions, project);
+  if (!Array.isArray(value) || value.length > 240 || value.some((intent) => !validActionIntentV1(intent))) {
+    throw new Error("ActionIntentV1 inválido o demasiado extenso.");
+  }
+  if (actions.length === 0 !== (value.length === 0)) {
+    throw new Error("Las acciones visibles y los intents firmados deben declarar el mismo alcance vacío/no vacío.");
+  }
+  if (value.some((intent) => intent.project !== project)) {
+    throw new Error("Los intents pertenecen a otro proyecto.");
+  }
+  return structuredClone(value);
+}
+function normalizeSpecReference(specRef, specHash) {
+  if (specRef === undefined && specHash === undefined)
+    return {};
+  if (typeof specRef !== "string" || !specRef.trim() || specRef.length > 1024 || /[\u0000\r\n]/u.test(specRef) || typeof specHash !== "string" || !/^[a-f0-9]{64}$/.test(specHash)) {
+    throw new Error("Referencia de especificación no evaluable.");
+  }
+  return { specRef: specRef.trim(), specHash };
 }
 function normalizePlanLevel(value) {
   if (value === undefined)
@@ -8089,7 +9335,7 @@ function blockPlan(state, blockedBy, now, authority) {
   }, authority);
 }
 function assertCurrent(state, digest, now, authority) {
-  if (!validState(state, authority) || state.digest !== digest || !Number.isFinite(now) || state.createdAt > now) {
+  if (!validState(state, authority) || state.version !== 5 || state.digest !== digest || !Number.isFinite(now) || state.createdAt > now) {
     throw new Error("Plan cambiado o no evaluable: vuelve a presentarlo.");
   }
 }
@@ -8099,13 +9345,27 @@ function seal(state, authority) {
 }
 function statePayload(value) {
   const { proof: _proof, ...payload } = value;
-  return canonical(payload);
+  return canonical2(payload);
 }
-function digestPlan(scope, plan, planID, revision, presentationInteractionID) {
-  return createHash7("sha256").update(canonical({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
+function digestPlanV4(scope, plan, planID, revision, presentationInteractionID) {
+  return createHash8("sha256").update(canonical2({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
+}
+function digestPlanV5(scope, plan, planID, revision, presentationInteractionID, actionIntents, actionIntentSource, spec) {
+  return createHash8("sha256").update(canonical2({
+    contractVersion: PLAN_CONTRACT_VERSION,
+    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+    scope,
+    plan,
+    planID,
+    revision,
+    presentationInteractionID,
+    actionIntentSource,
+    actionIntents,
+    ...spec
+  })).digest("hex");
 }
 function sameRevision(value, expected, authority) {
-  return validState(value, authority) && value.planID === expected.planID && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
+  return validState(value, authority) && value.planID === expected.planID && value.version === expected.version && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
 }
 function samePlanScope(state, scope) {
   return state.sessionID === scope.sessionID && state.project === scope.project && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
@@ -8150,6 +9410,18 @@ function validPhase(value) {
 function validOptionalTimes(value) {
   return ["reviewedAt", "authorizedAt", "startedAt", "pausedAt", "blockedAt", "completedAt", "revokedAt", "supersededAt"].every((key) => value[key] === undefined || validTime(value[key]));
 }
+function validSpecReference(specRef, specHash) {
+  return specRef === undefined && specHash === undefined || typeof specRef === "string" && specRef.length > 0 && specRef.length <= 1024 && !/[\u0000\r\n]/u.test(specRef) && typeof specHash === "string" && /^[a-f0-9]{64}$/.test(specHash);
+}
+function specReferenceFromState(value) {
+  return typeof value.specRef === "string" && typeof value.specHash === "string" ? { specRef: value.specRef, specHash: value.specHash } : {};
+}
+function isActiveLegacyPlan(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const state = value;
+  return state.version === 4 && typeof state.phase === "string" && !TERMINAL.has(state.phase);
+}
 function validateScope(scope, now) {
   if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
     throw new Error("Sesion/proyecto/politica de plan no evaluable.");
@@ -8165,24 +9437,142 @@ function randomID() {
   return randomBytes4(16).toString("hex");
 }
 function uniqueSorted(items, key) {
-  return [...new Map(items.map((item) => [key(item), { ...item }])).values()].sort((left, right) => compareText(key(left), key(right)));
+  return [...new Map(items.map((item) => [key(item), { ...item }])).values()].sort((left, right) => compareText2(key(left), key(right)));
 }
-function canonical(value) {
+function canonical2(value) {
   if (Array.isArray(value))
-    return `[${value.map(canonical).join(",")}]`;
+    return `[${value.map(canonical2).join(",")}]`;
   if (value && typeof value === "object") {
-    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText(left, right));
-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText2(left, right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical2(item)}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 }
-function compareText(left, right) {
+function compareText2(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+// src/cli/core/authorization-decision.ts
+var AUTHORIZATION_DENIAL_CODES = [
+  "NO_ACTIVE_PLAN",
+  "PLAN_INVALID",
+  "PLAN_NOT_RUNNING",
+  "PLAN_SCHEMA_UPGRADE_REQUIRED",
+  "SESSION_MISMATCH",
+  "PROJECT_MISMATCH",
+  "MODE_MISMATCH",
+  "POLICY_CHANGED",
+  "ACTION_NOT_DECLARED",
+  "ACTION_NOT_CANONICALIZABLE",
+  "ACTION_SERIALIZATION_MISMATCH",
+  "RESOURCE_OUTSIDE_SCOPE",
+  "PROTECTED_APPROVAL_REQUIRED",
+  "HOST_ASK",
+  "HOST_DENY",
+  "CRITICAL_CONTROL_UNAVAILABLE"
+];
+
+class PlanningAuthorizationError extends Error {
+  code;
+  constructor(code, safeDetail) {
+    super(authorizationMessage(code, safeDetail));
+    this.name = "PlanningAuthorizationError";
+    this.code = code;
+  }
+}
+function decideAuthorization(raw) {
+  const input = raw;
+  const state = input.state;
+  if (state === undefined || state === null)
+    return deny("NO_ACTIVE_PLAN");
+  if (record(state)?.version === 4 && !isTerminalPhase(record(state)?.phase)) {
+    return deny("PLAN_SCHEMA_UPGRADE_REQUIRED");
+  }
+  const authority = input.authority ?? DEFAULT_PLANNING_AUTHORITY;
+  if (!validState(state, authority))
+    return deny("PLAN_INVALID");
+  if (state.version !== 5)
+    return deny("PLAN_NOT_RUNNING");
+  if (state.phase !== "running" || state.mode === "advisor")
+    return deny("PLAN_NOT_RUNNING");
+  const now = input.now ?? Date.now();
+  if (!Number.isFinite(now) || state.createdAt > now || state.updatedAt > now)
+    return deny("PLAN_INVALID");
+  const scope = input.scope;
+  if (!scope || state.sessionID !== scope.sessionID)
+    return deny("SESSION_MISMATCH");
+  if (state.project !== scope.project)
+    return deny("PROJECT_MISMATCH");
+  if (state.mode !== scope.mode)
+    return deny("MODE_MISMATCH");
+  if (state.policyRevision !== scope.policyRevision)
+    return deny("POLICY_CHANGED");
+  if (input.canonicalization?.status === "error") {
+    return deny(isDenialCode(input.canonicalization.code) ? input.canonicalization.code : "ACTION_NOT_CANONICALIZABLE");
+  }
+  if (input.serialization?.matches === false)
+    return deny("ACTION_SERIALIZATION_MISMATCH");
+  if (input.resourceScope?.inside === false)
+    return deny("RESOURCE_OUTSIDE_SCOPE");
+  if (input.protectedApproval?.required === true && input.protectedApproval.approved !== true) {
+    return deny("PROTECTED_APPROVAL_REQUIRED");
+  }
+  if (input.host?.effect === "deny")
+    return deny("HOST_DENY");
+  if (input.host?.effect === "ask")
+    return deny("HOST_ASK");
+  const controls = input.criticalControls;
+  if (controls && Object.values(controls).some((available) => available !== true)) {
+    return deny("CRITICAL_CONTROL_UNAVAILABLE");
+  }
+  if (input.deferToToolHook === true) {
+    return controls?.toolHook === true ? { effect: "defer", code: "DEFER_TO_TOOL_HOOK" } : deny("CRITICAL_CONTROL_UNAVAILABLE");
+  }
+  const actionID = input.action?.actionID;
+  if (typeof actionID !== "string" || !/^[a-f0-9]{64}$/.test(actionID))
+    return deny("ACTION_NOT_DECLARED");
+  const declared = input.declaredActionIDs ?? state.actionIntents.map((intent) => intent.actionID);
+  if (!declared.includes(actionID))
+    return deny("ACTION_NOT_DECLARED");
+  return { effect: "allow", code: "AUTHORIZED", actionID };
+}
+function authorizationMessage(code, detail) {
+  const base = {
+    NO_ACTIVE_PLAN: "Malahor: no hay un plan activo para esta sesión.",
+    PLAN_INVALID: "Malahor: el estado del plan no es verificable.",
+    PLAN_NOT_RUNNING: "Malahor: el plan no está aprobado y en ejecución.",
+    PLAN_SCHEMA_UPGRADE_REQUIRED: "Malahor: el plan activo usa un contrato anterior; presenta y revisa una revisión V5.",
+    SESSION_MISMATCH: "Malahor: el plan pertenece a otra sesión.",
+    PROJECT_MISMATCH: "Malahor: el plan pertenece a otro proyecto.",
+    MODE_MISMATCH: "Malahor: el modo efectivo cambió desde la revisión.",
+    POLICY_CHANGED: "Malahor: la política efectiva cambió desde la revisión.",
+    ACTION_NOT_DECLARED: "Malahor: la acción no está declarada en la revisión aprobada.",
+    ACTION_NOT_CANONICALIZABLE: "Malahor: la acción no puede representarse con el canonicalizador cerrado.",
+    ACTION_SERIALIZATION_MISMATCH: "Malahor: la representación técnica no coincide con los intents firmados.",
+    RESOURCE_OUTSIDE_SCOPE: "Malahor: un recurso queda fuera del alcance aprobado.",
+    PROTECTED_APPROVAL_REQUIRED: "Malahor: la operación protegida requiere su aprobación específica.",
+    HOST_ASK: "Malahor: el host requiere una aprobación humana específica.",
+    HOST_DENY: "Malahor: el host denegó la operación.",
+    CRITICAL_CONTROL_UNAVAILABLE: "Malahor: un control crítico de autorización no está disponible."
+  };
+  return detail ? `${base[code]} ${detail}` : base[code];
+}
+function deny(code) {
+  return { effect: "deny", code };
+}
+function isDenialCode(value) {
+  return typeof value === "string" && AUTHORIZATION_DENIAL_CODES.includes(value);
+}
+function isTerminalPhase(value) {
+  return value === "completed" || value === "revoked" || value === "superseded";
+}
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
 // src/cli/core/read-only-shell-policy.ts
-import fs13 from "node:fs";
-import path17 from "node:path";
+import fs15 from "node:fs";
+import path19 from "node:path";
 var SAFE_GIT_COMMANDS = new Set([
   "diff",
   "log",
@@ -8569,7 +9959,7 @@ function safeGitOptionValue(option, value) {
   return !value.includes("\x00");
 }
 function safeGitOperand(value) {
-  return value.length > 0 && !value.includes("\x00") && !path17.isAbsolute(value) && !/^[A-Za-z]:[\\/]/.test(value) && !value.startsWith("~") && !/(^|[\\/:])\.\.(?:[\\/:]|$)/.test(value);
+  return value.length > 0 && !value.includes("\x00") && !path19.isAbsolute(value) && !/^[A-Za-z]:[\\/]/.test(value) && !value.startsWith("~") && !/(^|[\\/:])\.\.(?:[\\/:]|$)/.test(value);
 }
 function hashIsReadOnly(args, projectRoot, workingDirectory) {
   const paths = [];
@@ -8647,41 +10037,41 @@ function safeProjectPath(value, projectRoot, workingDirectory, mustExist, allowG
   if (!allowGitPathspec && /[*?[\]{}]/.test(value))
     return false;
   try {
-    const root = fs13.realpathSync(path17.resolve(projectRoot));
-    const directory = fs13.realpathSync(path17.resolve(workingDirectory));
-    if (!inside2(directory, root))
+    const root = fs15.realpathSync(path19.resolve(projectRoot));
+    const directory = fs15.realpathSync(path19.resolve(workingDirectory));
+    if (!inside3(directory, root))
       return false;
-    const target = path17.resolve(directory, value);
-    if (!inside2(target, root))
+    const target = path19.resolve(directory, value);
+    if (!inside3(target, root))
       return false;
-    if (fs13.existsSync(target))
-      return inside2(fs13.realpathSync(target), root);
+    if (fs15.existsSync(target))
+      return inside3(fs15.realpathSync(target), root);
     if (mustExist)
       return false;
-    let parent = path17.dirname(target);
-    while (!fs13.existsSync(parent)) {
-      const next = path17.dirname(parent);
+    let parent = path19.dirname(target);
+    while (!fs15.existsSync(parent)) {
+      const next = path19.dirname(parent);
       if (next === parent)
         return false;
       parent = next;
     }
-    return inside2(fs13.realpathSync(parent), root);
+    return inside3(fs15.realpathSync(parent), root);
   } catch {
     return false;
   }
 }
 function safeProjectDirectory(value, projectRoot) {
   try {
-    const root = fs13.realpathSync(path17.resolve(projectRoot));
-    const directory = fs13.realpathSync(path17.resolve(value));
-    return fs13.statSync(directory).isDirectory() && inside2(directory, root);
+    const root = fs15.realpathSync(path19.resolve(projectRoot));
+    const directory = fs15.realpathSync(path19.resolve(value));
+    return fs15.statSync(directory).isDirectory() && inside3(directory, root);
   } catch {
     return false;
   }
 }
-function inside2(target, root) {
-  const relative = path17.relative(path17.resolve(root), path17.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path17.isAbsolute(relative);
+function inside3(target, root) {
+  const relative = path19.relative(path19.resolve(root), path19.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path19.isAbsolute(relative);
 }
 function splitReadOnlySegments(command) {
   const segments = [];
@@ -8786,12 +10176,13 @@ function denied(reason) {
 }
 
 // src/plugin/plan-retention.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 var ARCHIVE_SCHEMA = 1;
 var ARCHIVE_KIND = "malahor.plan.archive";
 var POINTER_KIND = "malahor.plan.archive-pointer";
-var LIVE_PREFIX = "planning/v4/";
+var LIVE_PREFIX = "planning/v5/";
+var LEGACY_LIVE_PREFIX = "planning/v4/";
 var ARCHIVE_PREFIX = "planning/archive/v1/plans";
 var MAX_ARCHIVE_BYTES = 64 * 1024;
 var DEFAULT_SCAN_LIMIT = 500;
@@ -8800,16 +10191,30 @@ var TERMINAL_PHASES = new Set(["completed", "revoked", "superseded"]);
 function planKey(sessionID) {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
     throw new Error("ID de sesion no evaluable.");
-  return `planning/v4/sessions/${sessionID}`;
+  return `planning/v5/sessions/${sessionID}`;
 }
 function planRecordKey(planID) {
   assertPlanID(planID);
-  return `planning/v4/plans/${planID}`;
+  return `planning/v5/plans/${planID}`;
 }
 function planRevisionKey(planID, revision) {
   assertPlanID(planID);
   assertRevision(revision);
   return `${planRecordKey(planID)}/revisions/${revision}`;
+}
+function legacyPlanKey(sessionID) {
+  if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
+    throw new Error("ID de sesion no evaluable.");
+  return `planning/v4/sessions/${sessionID}`;
+}
+function legacyPlanRecordKey(planID) {
+  assertPlanID(planID);
+  return `planning/v4/plans/${planID}`;
+}
+function legacyPlanRevisionKey(planID, revision) {
+  assertPlanID(planID);
+  assertRevision(revision);
+  return `${legacyPlanRecordKey(planID)}/revisions/${revision}`;
 }
 function planArchiveRecordKey(planID) {
   assertPlanID(planID);
@@ -8826,10 +10231,33 @@ async function persistPlanState(storage, state, authority) {
   const result = await archiveAndPrune(storage, state, authority);
   return result.ok && result.removed === 3 ? { status: "archived", removed: result.removed } : { status: "retained", removed: result.removed, reason: result.reason ?? "compactacion incompleta" };
 }
+async function loadActivePlanRaw(storage, sessionID) {
+  const currentRead = await strictGet(storage, planKey(sessionID));
+  if (!currentRead.ok)
+    return { kind: "malahor.plan.storage-unavailable" };
+  const current = currentRead.value;
+  if (current !== undefined)
+    return current;
+  const legacy = await strictGet(storage, legacyPlanKey(sessionID));
+  return legacy.ok ? legacy.value : { kind: "malahor.plan.storage-unavailable" };
+}
+async function loadActivePlan(storage, sessionID, authority) {
+  const raw = await loadActivePlanRaw(storage, sessionID);
+  return validState(raw, authority) ? raw : undefined;
+}
 async function loadPlanRecord(storage, planID, authority) {
-  const live = await safeGet(storage, planRecordKey(planID));
+  const currentRead = await strictGet(storage, planRecordKey(planID));
+  if (!currentRead.ok)
+    return;
+  const live = currentRead.value;
   if (live !== undefined)
     return validState(live, authority) ? live : undefined;
+  const legacyRead = await strictGet(storage, legacyPlanRecordKey(planID));
+  if (!legacyRead.ok)
+    return;
+  const legacy = legacyRead.value;
+  if (legacy !== undefined)
+    return validState(legacy, authority) ? legacy : undefined;
   const rawPointer = await safeGet(storage, planArchiveRecordKey(planID));
   const pointer = parsePointer(rawPointer, planID);
   if (!pointer)
@@ -8845,40 +10273,46 @@ async function compactTerminalPlans(storage, authority, options = {}) {
   const maxEntries = boundedLimit(options.maxEntries);
   const candidates = new Map;
   let scanned = 0;
-  let after;
   let truncated = false;
-  while (scanned < maxEntries) {
-    let page;
-    try {
-      page = await storage.scan({
-        prefix: LIVE_PREFIX,
-        ...after ? { after } : {},
-        limit: Math.min(SCAN_PAGE_SIZE, maxEntries - scanned)
-      });
-    } catch {
-      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
-    }
-    if (!page || !Array.isArray(page.entries) || page.next !== undefined && (typeof page.next !== "string" || page.next.length === 0) || page.entries.length === 0 && page.next !== undefined) {
-      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
-    }
-    for (const entry of page.entries) {
-      scanned++;
-      if (!validState(entry.value, authority) || !TERMINAL_PHASES.has(entry.value.phase))
-        continue;
-      candidates.set(planIdentity2(entry.value), entry.value);
-      if (scanned >= maxEntries)
+  for (const prefix of [LIVE_PREFIX, LEGACY_LIVE_PREFIX]) {
+    let after;
+    while (scanned < maxEntries) {
+      let page;
+      try {
+        page = await storage.scan({
+          prefix,
+          ...after ? { after } : {},
+          limit: Math.min(SCAN_PAGE_SIZE, maxEntries - scanned)
+        });
+      } catch {
+        return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+      }
+      if (!page || !Array.isArray(page.entries) || page.next !== undefined && (typeof page.next !== "string" || page.next.length === 0) || page.entries.length === 0 && page.next !== undefined) {
+        return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+      }
+      for (const entry of page.entries) {
+        scanned++;
+        if (!validState(entry.value, authority) || !TERMINAL_PHASES.has(entry.value.phase))
+          continue;
+        candidates.set(planIdentity2(entry.value), entry.value);
+        if (scanned >= maxEntries)
+          break;
+      }
+      if (!page.next)
         break;
+      if (scanned >= maxEntries) {
+        truncated = true;
+        break;
+      }
+      if (page.next === after) {
+        return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+      }
+      after = page.next;
     }
-    if (!page.next)
-      break;
     if (scanned >= maxEntries) {
       truncated = true;
       break;
     }
-    if (page.next === after) {
-      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
-    }
-    after = page.next;
   }
   let compacted = 0;
   let removed = 0;
@@ -8894,9 +10328,10 @@ async function compactTerminalPlans(storage, authority, options = {}) {
   return { supported: true, scanned, compacted, removed, failed, truncated };
 }
 async function writeLiveState(storage, state) {
-  await storage.set(planRevisionKey(state.planID, state.revision), state);
-  await storage.set(planRecordKey(state.planID), state);
-  await storage.set(planKey(state.sessionID), state);
+  const keys = liveStateKeys(state);
+  await storage.set(keys.revision, state);
+  await storage.set(keys.plan, state);
+  await storage.set(keys.session, state);
 }
 async function archiveAndPrune(storage, state, authority) {
   try {
@@ -8925,9 +10360,9 @@ async function removeMatchingLiveRecords(storage, state, authority) {
   if (!storage.remove)
     return { ok: false, removed: 0, reason: "remove no disponible" };
   const keys = [
-    planRevisionKey(state.planID, state.revision),
-    planRecordKey(state.planID),
-    planKey(state.sessionID)
+    liveStateKeys(state).revision,
+    liveStateKeys(state).plan,
+    liveStateKeys(state).session
   ];
   const candidates = [];
   for (const key of keys) {
@@ -8967,7 +10402,7 @@ async function restoreRemovedRecords(storage, removed) {
         continue;
       await storage.set(candidate.key, candidate.value);
       const verified = await storage.get(candidate.key);
-      if (isRecord6(verified) && verified.proof === candidate.value.proof)
+      if (isRecord7(verified) && verified.proof === candidate.value.proof)
         restored++;
     } catch {}
   }
@@ -8988,8 +10423,8 @@ function encodeArchive(state) {
     project: state.project,
     phase: state.phase,
     digest: state.digest,
-    sha256: createHash8("sha256").update(raw).digest("hex"),
-    compressedSha256: createHash8("sha256").update(compressed).digest("hex"),
+    sha256: createHash9("sha256").update(raw).digest("hex"),
+    compressedSha256: createHash9("sha256").update(compressed).digest("hex"),
     uncompressedBytes: raw.byteLength,
     payload: compressed.toString("base64")
   };
@@ -8999,10 +10434,10 @@ function decodeArchive(value, authority) {
     return;
   try {
     const compressed = Buffer.from(value.payload, "base64");
-    if (createHash8("sha256").update(compressed).digest("hex") !== value.compressedSha256)
+    if (createHash9("sha256").update(compressed).digest("hex") !== value.compressedSha256)
       return;
     const raw = gunzipSync(compressed, { maxOutputLength: MAX_ARCHIVE_BYTES });
-    if (raw.byteLength !== value.uncompressedBytes || createHash8("sha256").update(raw).digest("hex") !== value.sha256)
+    if (raw.byteLength !== value.uncompressedBytes || createHash9("sha256").update(raw).digest("hex") !== value.sha256)
       return;
     const state = JSON.parse(raw.toString("utf8"));
     if (!validState(state, authority) || !archiveMatchesState(value, state))
@@ -9025,12 +10460,12 @@ function archivePointer(state, archiveKey) {
   };
 }
 function parsePointer(value, planID) {
-  if (!isRecord6(value) || value.schema !== ARCHIVE_SCHEMA || value.kind !== POINTER_KIND || value.planID !== planID || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.project !== "string" || typeof value.phase !== "string" || !TERMINAL_PHASES.has(value.phase) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.archiveKey !== "string" || value.archiveKey !== planArchiveRevisionKey(planID, value.revision))
+  if (!isRecord7(value) || value.schema !== ARCHIVE_SCHEMA || value.kind !== POINTER_KIND || value.planID !== planID || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.project !== "string" || typeof value.phase !== "string" || !TERMINAL_PHASES.has(value.phase) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.archiveKey !== "string" || value.archiveKey !== planArchiveRevisionKey(planID, value.revision))
     return;
   return value;
 }
 function isArchiveEnvelope(value) {
-  return isRecord6(value) && value.schema === ARCHIVE_SCHEMA && value.kind === ARCHIVE_KIND && value.encoding === "gzip-base64" && typeof value.planID === "string" && /^[a-f0-9]{32}$/.test(value.planID) && typeof value.revision === "string" && /^[a-f0-9]{32}$/.test(value.revision) && typeof value.project === "string" && typeof value.phase === "string" && TERMINAL_PHASES.has(value.phase) && typeof value.digest === "string" && /^[a-f0-9]{64}$/.test(value.digest) && typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256) && typeof value.compressedSha256 === "string" && /^[a-f0-9]{64}$/.test(value.compressedSha256) && typeof value.uncompressedBytes === "number" && Number.isInteger(value.uncompressedBytes) && value.uncompressedBytes > 0 && value.uncompressedBytes <= MAX_ARCHIVE_BYTES && typeof value.payload === "string" && value.payload.length <= MAX_ARCHIVE_BYTES * 2;
+  return isRecord7(value) && value.schema === ARCHIVE_SCHEMA && value.kind === ARCHIVE_KIND && value.encoding === "gzip-base64" && typeof value.planID === "string" && /^[a-f0-9]{32}$/.test(value.planID) && typeof value.revision === "string" && /^[a-f0-9]{32}$/.test(value.revision) && typeof value.project === "string" && typeof value.phase === "string" && TERMINAL_PHASES.has(value.phase) && typeof value.digest === "string" && /^[a-f0-9]{64}$/.test(value.digest) && typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256) && typeof value.compressedSha256 === "string" && /^[a-f0-9]{64}$/.test(value.compressedSha256) && typeof value.uncompressedBytes === "number" && Number.isInteger(value.uncompressedBytes) && value.uncompressedBytes > 0 && value.uncompressedBytes <= MAX_ARCHIVE_BYTES && typeof value.payload === "string" && value.payload.length <= MAX_ARCHIVE_BYTES * 2;
 }
 function archiveMatchesState(archive, state) {
   return archive.planID === state.planID && archive.revision === state.revision && archive.project === state.project && archive.phase === state.phase && archive.digest === state.digest;
@@ -9043,6 +10478,17 @@ function sameRevision2(left, right) {
 }
 function planIdentity2(state) {
   return `${state.planID}\x00${state.revision}\x00${state.digest}\x00${state.phase}`;
+}
+function liveStateKeys(state) {
+  return state.version === 5 ? {
+    session: planKey(state.sessionID),
+    plan: planRecordKey(state.planID),
+    revision: planRevisionKey(state.planID, state.revision)
+  } : {
+    session: legacyPlanKey(state.sessionID),
+    plan: legacyPlanRecordKey(state.planID),
+    revision: legacyPlanRevisionKey(state.planID, state.revision)
+  };
 }
 function canonicalBase64(value) {
   if (!value || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value))
@@ -9060,6 +10506,13 @@ async function safeGet(storage, key) {
     return;
   }
 }
+async function strictGet(storage, key) {
+  try {
+    return { ok: true, value: await storage.get(key) };
+  } catch {
+    return { ok: false };
+  }
+}
 function boundedLimit(value) {
   if (value === undefined)
     return DEFAULT_SCAN_LIMIT;
@@ -9075,7 +10528,7 @@ function assertRevision(value) {
   if (!/^[a-f0-9]{32}$/.test(value))
     throw new Error("Revision de plan no evaluable.");
 }
-function isRecord6(value) {
+function isRecord7(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -9114,7 +10567,7 @@ async function evaluatePlanningPermission(input, options, storage, authority = f
   if (action === MODE_CHANGE_ACTION) {
     const resources2 = Array.isArray(input.resources) ? input.resources : [];
     if (!resolved || resources2.length !== 3 || resources2.some((item) => typeof item !== "string")) {
-      deny(input, "Cambio de modo sin sesion/proyecto o preview estructurado.");
+      deny2(input, "Cambio de modo sin sesion/proyecto o preview estructurado.");
       return;
     }
     try {
@@ -9122,58 +10575,59 @@ async function evaluatePlanningPermission(input, options, storage, authority = f
       const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
       const preview = previewModeChange(parseModeName(target), env, resolved.directory);
       if (preview.configFile !== configFile || preview.current !== current || preview.target !== target || preview.changes.length === 0) {
-        deny(input, "El preview de cambio de modo ya no coincide con la configuracion.");
+        deny2(input, "El preview de cambio de modo ya no coincide con la configuracion.");
         return;
       }
       input.effect = "ask";
       input.message = `Cambiar modo Malahor: ${preview.current} -> ${preview.target}. Se creara respaldo, se invalidaran planes anteriores y aplicara desde el siguiente turno de esta sesion.`;
     } catch {
-      deny(input, "Cambio de modo invalido o desactualizado.");
+      deny2(input, "Cambio de modo invalido o desactualizado.");
     }
     return;
   }
   if (action === REVIEW_ACTION || action === RUN_ACTION || action === RESUME_ACTION || action === COMPLETE_ACTION) {
-    const state2 = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
+    const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
     const digest = Array.isArray(input.resources) ? input.resources[0] : undefined;
-    if (!state2 || digest !== state2.digest || state2.project !== resolved?.scope.project || state2.mode !== resolved.scope.mode || state2.policyRevision !== resolved.scope.policyRevision || action === REVIEW_ACTION && (state2.mode !== "assistant" || state2.phase !== "presented") || action === RUN_ACTION && (state2.mode === "advisor" || state2.plan.actions.length === 0 || (state2.mode === "assistant" ? state2.phase !== "reviewed" : state2.phase !== "presented")) || action === RESUME_ACTION && !["paused", "blocked"].includes(state2.phase) || action === COMPLETE_ACTION && !["running", "paused"].includes(state2.phase)) {
-      deny(input, "Plan no vigente o confirmacion fuera de orden.");
+    if (!state || state.version !== 5 || digest !== state.digest || state.project !== resolved?.scope.project || state.mode !== resolved.scope.mode || state.policyRevision !== resolved.scope.policyRevision || action === REVIEW_ACTION && (state.mode !== "assistant" || state.phase !== "presented") || action === RUN_ACTION && (state.mode === "advisor" || state.plan.actions.length === 0 || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) || action === RESUME_ACTION && !["paused", "blocked"].includes(state.phase) || action === COMPLETE_ACTION && !["running", "paused"].includes(state.phase)) {
+      deny2(input, "Plan no vigente o confirmacion fuera de orden.");
       return;
     }
     input.effect = "ask";
     input.message = action === REVIEW_ACTION ? `Revisa el plan; esta primera confirmacion NO autoriza ejecutar:
-${renderPlan(state2)}` : action === RESUME_ACTION ? `Reanuda SOLO el plan y revision mostrados:
-${renderPlan(state2)}` : action === COMPLETE_ACTION ? `Confirma el cierre del plan; puede desbloquear dependencias, pero no inicia otros planes:
-${renderPlan(state2)}` : state2.mode === "executor" ? `Aprobacion previa del plan para ejecutar SOLO sus acciones:
-${renderPlan(state2)}` : `Segunda confirmacion: ejecuta SOLO las acciones del plan revisado:
-${renderPlan(state2)}`;
+${renderPlan(state)}` : action === RESUME_ACTION ? `Reanuda SOLO el plan y revision mostrados:
+${renderPlan(state)}` : action === COMPLETE_ACTION ? `Confirma el cierre del plan; puede desbloquear dependencias, pero no inicia otros planes:
+${renderPlan(state)}` : state.mode === "executor" ? `Aprobacion previa del plan para ejecutar SOLO sus acciones:
+${renderPlan(state)}` : `Segunda confirmacion: ejecuta SOLO las acciones del plan revisado:
+${renderPlan(state)}`;
     return;
   }
   if (CODE_READ_TOOLS.has(action) && resolved?.scope.mode === "advisor") {
-    deny(input, "Asesor: no consulta archivos de codigo ni verifica la implementacion.");
+    deny2(input, "Asesor: no consulta archivos de codigo ni verifica la implementacion.");
     return;
   }
   if (!PROTECTED.has(normalized)) {
     if (action && !READ_ONLY_TOOLS.has(action) && !routineTool(action) && action !== "*" && action !== "external_directory")
-      deny(input, `Tool no clasificada para planeacion: ${action}`);
+      deny2(input, `Tool no clasificada para planeacion: ${action}`);
     return;
   }
   const projectRoot = resolved ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env) : undefined;
   if (normalized === "shell" && resolved && resolved.scope.mode !== "advisor" && projectRoot && readOnlyShellResources(input.resources, projectRoot, resolved.directory))
     return;
   if (!resolved || !storage) {
-    deny(input, "No hay proyecto/sesion o almacenamiento de planeacion mediable.");
+    deny2(input, "No hay proyecto/sesion o almacenamiento de planeacion mediable.");
     return;
   }
   if (resolved.scope.mode === "advisor") {
-    deny(input, "El asesor no ejecuta acciones de programacion ni con una solicitud explicita.");
+    deny2(input, "El asesor no ejecuta acciones de programacion ni con una solicitud explicita.");
     return;
   }
   if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority))
     return;
-  const state = await readPlan(storage, resolved.scope.sessionID, authority);
   const resources = Array.isArray(input.resources) ? input.resources : [];
-  if (!permissionResourcesAllowed(state, resolved.scope, normalized, resources, resolved.directory, authority)) {
-    deny(input, "Accion no incluida en un plan vigente y confirmado.");
+  const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+  const decision = authorizeResources(rawState, resolved.scope, normalized, resources, resolved.directory, projectRoot ?? resolved.directory, undefined, authority);
+  if (decision.effect !== "allow") {
+    denyDecision(input, decision);
   }
 }
 async function evaluatePlanningTool(input, options, storage, authority = fallbackAuthority) {
@@ -9201,9 +10655,14 @@ async function evaluatePlanningTool(input, options, storage, authority = fallbac
   if (["edit", "write", "patch", "shell", "bash"].includes(tool) && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority))
     return;
   const actions = toolActions(tool, input.input, resolved.directory);
-  const state = await readPlan(storage, resolved.scope.sessionID, authority);
-  if (!actions || actions.length === 0 || actions.some((operation) => !planAllows(state, resolved.scope, operation, Date.now(), authority))) {
-    throw new Error(`Malahor: ${tool || "tool"} fuera de un plan vigente y confirmado.`);
+  const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+  const args = isRecord8(input.input) ? input.input : {};
+  const operationCwd = typeof args.workdir === "string" ? path20.resolve(resolved.directory, args.workdir) : typeof args.cwd === "string" ? path20.resolve(resolved.directory, args.cwd) : resolved.directory;
+  const decision = authorizeOperations(rawState, resolved.scope, actions, resolved.directory, projectRoot, operationCwd, authority);
+  if (decision.effect === "deny")
+    throw new PlanningAuthorizationError(decision.code, decision.safeDetail);
+  if (decision.effect === "defer") {
+    throw new PlanningAuthorizationError("CRITICAL_CONTROL_UNAVAILABLE", "La acción no alcanzó su frontera autoritativa.");
   }
 }
 async function registerPlanningTools(tools, approvals, storage, options, authority = fallbackAuthority) {
@@ -9292,10 +10751,23 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
         if (raw.level === 0)
           validateLevelZeroActions(actions ?? [], projectRoot);
-        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs14.existsSync(item.resource));
+        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs16.existsSync(item.resource));
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
-        const state = await presentPlan(resolved.scope, { ...raw, actions }, call.messageID, planningAdapter(storage, approvals, call, authority), authority);
+        const normalizedActions = sortedPlannedActions(actions ?? []);
+        const actionIntents = canonicalizePlannedActions(normalizedActions, {
+          project: resolved.scope.project,
+          root: projectRoot,
+          rootRef: "project",
+          cwd: resolved.directory
+        });
+        const state = await presentPlan(resolved.scope, {
+          ...raw,
+          actions: normalizedActions,
+          contractVersion: PLAN_CONTRACT_VERSION,
+          canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+          actionIntents
+        }, call.messageID, planningAdapter(storage, approvals, call, authority), authority);
         return { content: foregroundPlanResult(state), metadata: {
           kind: "malahor.plan.presentation",
           version: 1,
@@ -9359,7 +10831,7 @@ function foregroundPlanResult(state) {
 }
 function planningAdapter(storage, port, call, authority) {
   return {
-    loadActive: (sessionID) => storage.get(planKey(sessionID)),
+    loadActive: (sessionID) => loadActivePlanRaw(storage, sessionID),
     loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
     save: (state) => persistPlanState(storage, state, authority).then(() => {
       return;
@@ -9402,6 +10874,9 @@ async function injectPlanningInstructions(input, options, storage, authority = f
     "malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible y debe coincidir exactamente.",
     "Un go previo a la presentacion no aprueba un plan todavia no visto.",
     "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
+    "Los retries tecnicos con el mismo ActionIntentV1 reutilizan la revision V5; ASK, DENY, cambios materiales o loop guard bloquean sin auto-planificar.",
+    "Si un guardrail incluye remediacion estructurada y saneada, explicala para una persona no desarrolladora como bloques completos de referencia y reemplazo: archivo y linea, busca, reemplaza, guarda y revalida.",
+    "Sin remediacion verificable no inventes lineas ni codigo ni pidas interpretar variables. ASK requiere aprobacion, hard DENY no tiene atajo y secretos reales o ambiguos se retiran o rotan; una edicion manual solo permite continuar despues de revalidar.",
     "La autorizacion no caduca por tiempo. Pausa, reanuda, revoca o consulta estado con malahor_plan_control o /malahor-plan.",
     "Las dependencias bloquean sin heredar permisos ni arrancar automaticamente.",
     "Las aprobaciones de plan no autorizan commit, push, stage, instalacion local ni evitan guardrails.",
@@ -9409,14 +10884,15 @@ async function injectPlanningInstructions(input, options, storage, authority = f
   ].join(`
 `);
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v4 -->";
+  const marker = "<!-- malahor-planning:v5 -->";
   const previousMarkers = [
+    "<!-- malahor-planning:v4 -->",
     "<!-- malahor-planning:v3 -->",
     "<!-- malahor-planning:v2 -->",
     "<!-- malahor-planning:v1 -->"
   ];
   for (const part of system) {
-    if (!isRecord7(part) || part.type !== "text" || typeof part.text !== "string")
+    if (!isRecord8(part) || part.type !== "text" || typeof part.text !== "string")
       continue;
     const text = part.text;
     if (text.includes(marker)) {
@@ -9434,7 +10910,7 @@ ${instructions}`;
     }
   }
   const last = system.at(-1);
-  if (isRecord7(last) && last.type === "text" && typeof last.text === "string") {
+  if (isRecord8(last) && last.type === "text" && typeof last.text === "string") {
     last.text += `
 
 ${marker}
@@ -9449,14 +10925,13 @@ async function readPlan(storage, sessionID, authority = fallbackAuthority) {
   if (!storage)
     return;
   try {
-    const record = await storage.get(planKey(sessionID));
-    return validState(record, authority) ? record : undefined;
+    return await loadActivePlan(storage, sessionID, authority);
   } catch {
     return;
   }
 }
 async function resolveRunDigest(value, storage, scope, authority) {
-  if (!isRecord7(value))
+  if (!isRecord8(value))
     throw new Error("Entrada de malahor_run no evaluable.");
   const provided = value.digest;
   if (provided !== undefined)
@@ -9490,7 +10965,7 @@ async function resolvePlanningScope(value, options) {
       const project = await options.resolveSessionProject(value);
       if (!project)
         return;
-      const directory2 = path18.resolve(project.root);
+      const directory2 = path20.resolve(project.root);
       const env2 = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
       const config2 = loadConfig(env2, directory2);
       return { scope: {
@@ -9507,7 +10982,7 @@ async function resolvePlanningScope(value, options) {
       return;
     const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
     const paths = resolvePaths(env, directory);
-    const root = registeredProjectRoots(paths.projectsFile).sort((a, b) => b.root.length - a.root.length).find((entry) => inside3(directory, entry.root));
+    const root = registeredProjectRoots(paths.projectsFile).sort((a, b) => b.root.length - a.root.length).find((entry) => inside4(directory, entry.root));
     if (!root)
       return;
     const config = loadConfig(env, directory);
@@ -9522,9 +10997,11 @@ async function resolvePlanningScope(value, options) {
   }
 }
 function toolActions(tool, value, directory) {
-  const args = isRecord7(value) ? value : {};
+  const args = isRecord8(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
-    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && (typeof cwd !== "string" || path18.resolve(directory, cwd) !== path18.resolve(directory))))
+    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && typeof cwd !== "string"))
+      return;
+    if (typeof args.cwd === "string" && typeof args.workdir === "string" && path20.resolve(directory, args.cwd) !== path20.resolve(directory, args.workdir))
       return;
     return typeof args.command === "string" && args.command.trim() ? [{ action: "shell", resource: args.command }] : undefined;
   }
@@ -9544,166 +11021,203 @@ function toolActions(tool, value, directory) {
   return;
 }
 function normalizeAction(action, resource, directory) {
-  return { action, resource: action === "edit" ? path18.resolve(directory, resource) : resource };
+  return { action, resource: action === "edit" ? path20.resolve(directory, resource) : resource };
 }
-function permissionResourcesAllowed(state, scope, action, resources, directory, authority) {
-  if (resources.length === 0 || resources.some((item) => typeof item !== "string"))
-    return false;
-  const now = Date.now();
-  if (resources.every((item) => planAllows(state, scope, normalizeAction(action, item, directory), now, authority)))
-    return true;
-  if (action !== "shell" || resources.length < 2)
-    return false;
-  const compound = resources.join(" && ");
-  if (planAllows(state, scope, { action: "shell", resource: compound }, now, authority))
-    return true;
-  if (!validState(state, authority))
-    return false;
-  const scannerResources = resources;
-  return state.plan.actions.some((candidate) => candidate.action === "shell" && planAllows(state, scope, candidate, now, authority) && sameResources(shellScannerProjection(candidate.resource), scannerResources));
-}
-function shellScannerProjection(command) {
-  const segments = splitShellAnd(command);
-  if (!segments || segments.length < 2)
-    return null;
-  const projected = [];
-  for (const segment of segments) {
-    const resource = scannerResource(segment);
-    if (!resource)
-      return null;
-    projected.push(resource);
+var DUMMY_ACTION_ID = "0".repeat(64);
+function authorizeResources(state, scope, action, resources, directory, projectRoot, operationCwd, authority) {
+  if (resources.length === 0 || resources.some((item) => typeof item !== "string")) {
+    return decisionForCanonicalizationFailure(state, scope, "ACTION_NOT_CANONICALIZABLE", authority);
   }
-  return projected;
+  return authorizeOperations(state, scope, resources.map((resource) => normalizeAction(action, resource, directory)), directory, projectRoot, operationCwd ?? directory, authority);
 }
-function splitShellAnd(command) {
-  const segments = [];
-  let start = 0;
-  let quote = null;
-  let escaped = false;
-  let substitutionDepth = 0;
-  for (let index = 0;index < command.length; index += 1) {
-    const character = command[index];
-    const next = command[index + 1];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote)
-        quote = null;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === "$" && next === "(") {
-      substitutionDepth += 1;
-      index += 1;
-      continue;
-    }
-    if (substitutionDepth > 0) {
-      if (character === "(")
-        substitutionDepth += 1;
-      else if (character === ")")
-        substitutionDepth -= 1;
-      continue;
-    }
-    if (character === "&" && next === "&") {
-      const segment = command.slice(start, index).trim();
-      if (!segment)
-        return null;
-      segments.push(segment);
-      start = index + 2;
-      index += 1;
-      continue;
-    }
-    if (character === "&" || character === "|" || character === ";" || character === `
-` || character === "\r") {
-      return null;
-    }
+function authorizeOperations(state, scope, operations, directory, projectRoot, operationCwd, authority) {
+  const preflight = decideAuthorization({
+    state,
+    scope,
+    action: { actionID: DUMMY_ACTION_ID },
+    declaredActionIDs: [DUMMY_ACTION_ID],
+    host: { effect: "allow" },
+    criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+    now: Date.now(),
+    authority
+  });
+  if (preflight.effect !== "allow")
+    return preflight;
+  if (!validState(state, authority) || state.version !== 5) {
+    return { effect: "deny", code: "PLAN_INVALID" };
   }
-  if (escaped || quote || substitutionDepth !== 0)
-    return null;
-  const finalSegment = command.slice(start).trim();
-  if (!finalSegment)
-    return null;
-  segments.push(finalSegment);
-  return segments;
+  if (!operations || operations.length === 0) {
+    return decisionForCanonicalizationFailure(state, scope, "ACTION_NOT_CANONICALIZABLE", authority);
+  }
+  const kinds = new Set(operations.map((operation) => operation.action));
+  if (kinds.size !== 1 || !["edit", "shell", "subagent"].includes(operations[0].action)) {
+    return decisionForCanonicalizationFailure(state, scope, "ACTION_NOT_CANONICALIZABLE", authority);
+  }
+  let planned;
+  try {
+    planned = plannedIntentGroups(state, directory, projectRoot);
+  } catch (error) {
+    return decisionForIntentError(state, scope, error, authority, "ACTION_SERIALIZATION_MISMATCH");
+  }
+  const declaredActionIDs = planned.flatMap((group) => group.intents.map((intent) => intent.actionID));
+  const kind = operations[0].action;
+  try {
+    if (kind === "shell") {
+      const actual2 = operations.flatMap((operation) => canonicalizePlannedAction(operation, {
+        project: scope.project,
+        root: projectRoot,
+        rootRef: "project",
+        cwd: operationCwd
+      }));
+      const match = planned.find((group) => group.action.action === "shell" && sameActionIntentSequence(group.intents, actual2));
+      if (!match)
+        return actionNotDeclaredDecision(state, scope, actual2[0], declaredActionIDs, authority);
+      return authorizeIntentSequence(state, scope, actual2, declaredActionIDs, authority);
+    }
+    if (kind === "subagent") {
+      const actual2 = operations.flatMap((operation) => canonicalizePlannedAction(operation, {
+        project: scope.project,
+        root: projectRoot,
+        rootRef: "project",
+        cwd: directory
+      }));
+      for (const intent of actual2) {
+        const match = planned.some((group) => group.action.action === "subagent" && group.intents.length === 1 && group.intents[0]?.actionID === intent.actionID);
+        if (!match)
+          return actionNotDeclaredDecision(state, scope, intent, declaredActionIDs, authority);
+      }
+      return authorizeIntentSequence(state, scope, actual2, declaredActionIDs, authority);
+    }
+    const actual = [];
+    for (const operation of operations) {
+      const normalized = canonicalizeActionIntent({
+        kind: "edit",
+        project: scope.project,
+        root: projectRoot,
+        rootRef: "project",
+        path: operation.resource,
+        existence: "may-create",
+        constraints: { remote: false, infrastructure: false }
+      })[0];
+      const canonicalPath = normalized.resources[0]?.canonicalPath;
+      const match = planned.find((group) => group.action.action === "edit" && group.intents.length === 1 && group.intents[0]?.resources[0]?.canonicalPath === canonicalPath);
+      if (!match)
+        return actionNotDeclaredDecision(state, scope, normalized, declaredActionIDs, authority);
+      actual.push(match.intents[0]);
+    }
+    return authorizeIntentSequence(state, scope, actual, declaredActionIDs, authority);
+  } catch (error) {
+    return decisionForIntentError(state, scope, error, authority, "ACTION_NOT_CANONICALIZABLE");
+  }
 }
-function scannerResource(segment) {
-  const assignmentSubstitution = segment.match(/^[A-Za-z_][A-Za-z0-9_]*=\$\(([\s\S]+)\)$/);
-  if (assignmentSubstitution) {
-    const inner = assignmentSubstitution[1].trim();
-    const nested = splitShellAnd(inner);
-    return inner && nested?.length === 1 ? inner : null;
+function plannedIntentGroups(state, directory, projectRoot) {
+  const actions = state.plan.actions;
+  if (state.actionIntentSource === "compatibility") {
+    return actions.map((action) => ({
+      action,
+      intents: canonicalizePlannedAction(action, {
+        project: state.project,
+        root: projectRoot,
+        rootRef: "project",
+        cwd: directory
+      })
+    }));
   }
-  let offset = 0;
-  let assignments = 0;
-  while (offset < segment.length) {
-    while (/\s/.test(segment[offset] ?? ""))
-      offset += 1;
-    const start = offset;
-    const end = shellWordEnd(segment, start);
-    if (end === null)
-      return null;
-    const token = segment.slice(start, end);
-    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
-      const resource = segment.slice(start).trim();
-      return resource || null;
+  const groups = [];
+  let cursor = 0;
+  for (const action of actions) {
+    if (action.action === "edit") {
+      const stored2 = state.actionIntents[cursor];
+      if (!stored2 || stored2.kind !== "edit" || stored2.resources.length !== 1) {
+        throw new Error("Intent de edición desalineado.");
+      }
+      const normalized = canonicalizeActionIntent({
+        kind: "edit",
+        project: state.project,
+        root: projectRoot,
+        rootRef: "project",
+        path: action.resource,
+        existence: "may-create",
+        constraints: { remote: false, infrastructure: false }
+      })[0];
+      if (stored2.resources[0]?.canonicalPath !== normalized.resources[0]?.canonicalPath) {
+        throw new Error("Path firmado y acción visible no coinciden.");
+      }
+      groups.push({ action, intents: [stored2] });
+      cursor += 1;
+      continue;
     }
-    assignments += 1;
-    offset = end;
+    const regenerated = canonicalizePlannedAction(action, {
+      project: state.project,
+      root: projectRoot,
+      rootRef: "project",
+      cwd: directory
+    });
+    const stored = state.actionIntents.slice(cursor, cursor + regenerated.length);
+    if (!sameActionIntentSequence(stored, regenerated)) {
+      throw new Error("Intents firmados y acción visible no coinciden.");
+    }
+    groups.push({ action, intents: stored });
+    cursor += regenerated.length;
   }
-  return assignments === 0 ? segment.trim() || null : null;
+  if (cursor !== state.actionIntents.length)
+    throw new Error("Sobran intents sin acción visible.");
+  return groups;
 }
-function shellWordEnd(value, start) {
-  let quote = null;
-  let escaped = false;
-  let substitutionDepth = 0;
-  for (let index = start;index < value.length; index += 1) {
-    const character = value[index];
-    const next = value[index + 1];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote)
-        quote = null;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === "$" && next === "(") {
-      substitutionDepth += 1;
-      index += 1;
-      continue;
-    }
-    if (substitutionDepth > 0) {
-      if (character === "(")
-        substitutionDepth += 1;
-      else if (character === ")")
-        substitutionDepth -= 1;
-      continue;
-    }
-    if (/\s/.test(character))
-      return index;
+function authorizeIntentSequence(state, scope, intents, declaredActionIDs, authority) {
+  let last;
+  for (const intent of intents) {
+    last = decideAuthorization({
+      state,
+      scope,
+      action: intent,
+      declaredActionIDs,
+      canonicalization: { status: "ok" },
+      serialization: { matches: true },
+      resourceScope: { inside: true },
+      protectedApproval: { required: false, approved: false },
+      host: { effect: "allow" },
+      criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+      now: Date.now(),
+      authority
+    });
+    if (last.effect !== "allow")
+      return last;
   }
-  return escaped || quote || substitutionDepth !== 0 ? null : value.length;
+  return last ?? { effect: "deny", code: "ACTION_NOT_CANONICALIZABLE" };
 }
-function sameResources(left, right) {
-  return left !== null && left.length === right.length && left.every((resource, index) => resource === right[index]);
+function actionNotDeclaredDecision(state, scope, intent, declaredActionIDs, authority) {
+  const undeclared = ["f".repeat(64), "e".repeat(64), "d".repeat(64)].find((candidate) => !declaredActionIDs.includes(candidate));
+  return decideAuthorization({
+    state,
+    scope,
+    action: { ...intent ?? {}, actionID: undeclared },
+    declaredActionIDs,
+    host: { effect: "allow" },
+    criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+    now: Date.now(),
+    authority
+  });
+}
+function decisionForIntentError(state, scope, error, authority, fallback) {
+  const code = error instanceof ActionIntentError ? error.code : fallback;
+  return decisionForCanonicalizationFailure(state, scope, code, authority);
+}
+function decisionForCanonicalizationFailure(state, scope, code, authority) {
+  return decideAuthorization({
+    state,
+    scope,
+    action: { actionID: DUMMY_ACTION_ID },
+    declaredActionIDs: [DUMMY_ACTION_ID],
+    canonicalization: { status: "error", code },
+    host: { effect: "allow" },
+    criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+    now: Date.now(),
+    authority
+  });
+}
+function sortedPlannedActions(actions) {
+  return [...new Map(actions.map((action) => [`${action.action}\x00${action.resource}`, { ...action }])).values()].sort((left, right) => compareText3(`${left.action}\x00${left.resource}`, `${right.action}\x00${right.resource}`));
 }
 function readOnlyShellResources(value, projectRoot, workingDirectory) {
   if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string"))
@@ -9715,11 +11229,11 @@ function readOnlyShellResources(value, projectRoot, workingDirectory) {
 function readOnlyShellTool(tool, value, projectRoot, sessionDirectory) {
   if (tool !== "shell" && tool !== "bash")
     return false;
-  const args = isRecord7(value) ? value : {};
+  const args = isRecord8(value) ? value : {};
   if ([args.cwd, args.workdir].some((cwd2) => cwd2 !== undefined && typeof cwd2 !== "string"))
     return false;
-  const cwd = typeof args.cwd === "string" ? path18.resolve(sessionDirectory, args.cwd) : undefined;
-  const workdir = typeof args.workdir === "string" ? path18.resolve(sessionDirectory, args.workdir) : undefined;
+  const cwd = typeof args.cwd === "string" ? path20.resolve(sessionDirectory, args.cwd) : undefined;
+  const workdir = typeof args.workdir === "string" ? path20.resolve(sessionDirectory, args.workdir) : undefined;
   if (cwd && workdir && cwd !== workdir)
     return false;
   const workingDirectory = workdir ?? cwd ?? sessionDirectory;
@@ -9738,13 +11252,15 @@ function routineTool(tool) {
   const normalized = tool.trim().toLowerCase();
   if (/^(?:mcp[_:.-])?mnemo(?:[_:.-])/.test(normalized))
     return true;
+  if (/^(?:mcp[_:.-])?horiel[_:.-](?:memory_(?:get|search|context|brief|tree|list_projects|inspect_project|move_preview|promote_preview|delete_project_preview|restore_preview))$/.test(normalized))
+    return true;
   if (/^(?:mcp[_:.-])?docs(?:[_:.-])(?:resolve|list|read|search|write|append|move|open)$/.test(normalized))
     return true;
   return /^(?:mcp[_:.-])?codegraph[_:.-](?!.*(?:index|write|delete))/.test(normalized);
 }
 function planningProjectRoot(project, directory, env) {
   const paths = resolvePaths({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
-  return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside3(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
+  return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside4(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
 }
 function validateLevelZeroActions(actions, projectRoot) {
   const aliases = loadGitAliases(projectRoot);
@@ -9755,7 +11271,7 @@ function validateLevelZeroActions(actions, projectRoot) {
       }
       let stat;
       try {
-        stat = fs14.lstatSync(action.resource);
+        stat = fs16.lstatSync(action.resource);
       } catch {
         throw new Error("Nivel 0 solo modifica un archivo existente.");
       }
@@ -9786,25 +11302,38 @@ function destructiveCommand(command) {
   return /\b(?:rm|rmdir|unlink|shred|truncate|mkfs(?:\.[a-z0-9]+)?|wipefs)\b/i.test(command) || /\bdd\s+[^;&|]*\bof=/i.test(command);
 }
 function insideExistingPath(target, root) {
-  if (!inside3(target, root))
+  if (!inside4(target, root))
     return false;
   try {
-    return inside3(fs14.realpathSync(target), fs14.realpathSync(root));
+    return inside4(fs16.realpathSync(target), fs16.realpathSync(root));
   } catch {
     return false;
   }
 }
-function inside3(target, root) {
-  const relative = path18.relative(path18.resolve(root), path18.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
+function inside4(target, root) {
+  const relative = path20.relative(path20.resolve(root), path20.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path20.isAbsolute(relative);
 }
 function text(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function deny(input, message) {
+function compareText3(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function denyDecision(input, decision) {
+  if (decision.effect === "allow")
+    return;
+  if (decision.effect === "defer") {
+    deny2(input, "DEFER_TO_TOOL_HOOK: la acción requiere la segunda frontera autoritativa.");
+    return;
+  }
+  input.effect = "deny";
+  input.message = `[malahor.plan:${decision.code}] ${authorizationMessage(decision.code, decision.safeDetail)}`;
+}
+function deny2(input, message) {
   input.effect = "deny";
   input.message = `[malahor.plan] ${message}`;
 }
@@ -9908,7 +11437,7 @@ async function registerPlanCommand(host, storage, authority, options) {
       if (!resolved)
         throw new Error("Sesion sin afinidad a un proyecto registrado; plan no disponible.");
       const adapter = {
-        loadActive: (id) => storage.get(planKey(id)),
+        loadActive: (id) => loadActivePlanRaw(storage, id),
         loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
         save: (state2) => persistPlanState(storage, state2, authority).then(() => {
           return;
@@ -9930,7 +11459,7 @@ async function registerPlanCommand(host, storage, authority, options) {
 }
 
 // src/plugin/project-affinity.ts
-import path19 from "node:path";
+import path21 from "node:path";
 import { fileURLToPath } from "node:url";
 var PROJECT_AFFINITY_MARKER = "<!-- malahor-project-affinity:v1 -->";
 function createProjectAffinityResolver(options) {
@@ -9940,9 +11469,9 @@ function createProjectAffinityResolver(options) {
     const registry = loadRegistry(options);
     if (registry.projects.length === 0)
       return;
-    const record = await readRecord2(options.storage, sessionID);
-    const current = record?.canonicalKey ? findProject(registry.projects, record.canonicalKey) : undefined;
-    if (current && !record?.pending) {
+    const record2 = await readRecord2(options.storage, sessionID);
+    const current = record2?.canonicalKey ? findProject(registry.projects, record2.canonicalKey) : undefined;
+    if (current && !record2?.pending) {
       const conflicting = strongestCandidate(hints, registry.projects, registry.aliases, options.cwd);
       if (conflicting && conflicting.canonicalKey !== current.canonicalKey) {
         await writePending(options, sessionID, current.canonicalKey, "conflict", [current.canonicalKey, conflicting.canonicalKey], conflicting.canonicalKey);
@@ -9967,7 +11496,7 @@ function createProjectAffinityResolver(options) {
       return bind(options, sessionID, host);
     if (!current && registry.projects.length === 1)
       return bind(options, sessionID, registry.projects[0]);
-    if (!record?.pending) {
+    if (!record2?.pending) {
       await writePending(options, sessionID, current?.canonicalKey, current ? "conflict" : "ambiguous", current ? [current.canonicalKey] : registry.projects.map((item) => item.canonicalKey));
     }
     return;
@@ -9979,20 +11508,20 @@ function createProjectAffinityResolver(options) {
     const registry = loadRegistry(options);
     if (registry.projects.length === 0)
       return;
-    const record = await readRecord2(options.storage, sessionID);
+    const record2 = await readRecord2(options.storage, sessionID);
     const text2 = promptText(input);
     const promptCandidate = candidateFromText(text2, registry.projects);
     const selected = promptCandidate ?? candidateFromPaths(promptPaths(input), registry.projects, options.cwd);
-    if (record?.pending?.kind === "conflict" && record.pending.target && affirmative(text2)) {
-      const target = findProject(registry.projects, record.pending.target);
+    if (record2?.pending?.kind === "conflict" && record2.pending.target && affirmative(text2)) {
+      const target = findProject(registry.projects, record2.pending.target);
       if (target)
         return bind(options, sessionID, target);
     }
     if (selected) {
-      if (!record?.canonicalKey || record.canonicalKey === selected.canonicalKey || record.pending?.kind === "ambiguous" || explicitSwitch(text2)) {
+      if (!record2?.canonicalKey || record2.canonicalKey === selected.canonicalKey || record2.pending?.kind === "ambiguous" || explicitSwitch(text2)) {
         return bind(options, sessionID, selected);
       }
-      await writePending(options, sessionID, record.canonicalKey, "conflict", [record.canonicalKey, selected.canonicalKey], selected.canonicalKey);
+      await writePending(options, sessionID, record2.canonicalKey, "conflict", [record2.canonicalKey, selected.canonicalKey], selected.canonicalKey);
       return;
     }
     return resolveSessionProject(sessionID);
@@ -10008,17 +11537,17 @@ function createProjectAffinityResolver(options) {
     try {
       project = await resolveSessionProject(sessionID);
     } catch {}
-    const record = await readRecord2(options.storage, sessionID).catch(() => {
+    const record2 = await readRecord2(options.storage, sessionID).catch(() => {
       return;
     });
     const instruction = project ? `${PROJECT_AFFINITY_MARKER}
-Proyecto activo: ${project.canonicalKey}. Raiz autorizada: ${project.root}. Usa la clave canonica para memoria, docs y contexto; no infieras otro proyecto desde cwd.` : clarificationInstruction(record);
+Proyecto activo: ${project.canonicalKey}. Raiz autorizada: ${project.root}. Usa la clave canonica para memoria, docs y contexto; no infieras otro proyecto desde cwd.` : clarificationInstruction(record2);
     appendSystemText(system, instruction);
     input.system = system;
-    if (!project && record?.pending && !record.pending.clarificationAsked) {
+    if (!project && record2?.pending && !record2.pending.clarificationAsked) {
       await options.storage.set(projectAffinityKey(sessionID), {
-        ...record,
-        pending: { ...record.pending, clarificationAsked: true },
+        ...record2,
+        pending: { ...record2.pending, clarificationAsked: true },
         updatedAt: timestamp2(options)
       });
     }
@@ -10040,7 +11569,7 @@ function loadRegistry(options) {
     for (const root of roots) {
       const info = resolveProject(root, config.projects.aliases);
       names.add(info.name);
-      names.add(path19.basename(root));
+      names.add(path21.basename(root));
       for (const alias of info.aliases)
         names.add(alias);
     }
@@ -10078,7 +11607,7 @@ function candidateFromPaths(values, projects, base) {
     if (!filePath)
       continue;
     for (const project of projects) {
-      if (project.roots.some((root) => inside4(filePath, root)))
+      if (project.roots.some((root) => inside5(filePath, root)))
         matches.add(project.canonicalKey);
     }
   }
@@ -10111,10 +11640,10 @@ async function writePending(options, sessionID, canonicalKey, kind, candidates, 
 }
 async function readRecord2(storage, sessionID) {
   const value = await storage.get(projectAffinityKey(sessionID));
-  if (!isRecord8(value) || value.schema !== 1 || value.sessionID !== sessionID)
+  if (!isRecord9(value) || value.schema !== 1 || value.sessionID !== sessionID)
     return;
   const canonicalKey = stringValue5(value.canonicalKey);
-  const pendingValue = isRecord8(value.pending) ? value.pending : undefined;
+  const pendingValue = isRecord9(value.pending) ? value.pending : undefined;
   const kind = pendingValue?.kind === "ambiguous" || pendingValue?.kind === "conflict" ? pendingValue.kind : undefined;
   const candidates = Array.isArray(pendingValue?.candidates) ? pendingValue.candidates.filter((item) => typeof item === "string") : [];
   return {
@@ -10130,8 +11659,8 @@ async function readRecord2(storage, sessionID) {
     updatedAt: stringValue5(value.updatedAt) ?? new Date(0).toISOString()
   };
 }
-function clarificationInstruction(record) {
-  const pending = record?.pending;
+function clarificationInstruction(record2) {
+  const pending = record2?.pending;
   const candidates = pending?.candidates.join(", ") || "ninguno registrado";
   if (pending?.clarificationAsked) {
     return `${PROJECT_AFFINITY_MARKER}
@@ -10139,13 +11668,13 @@ Proyecto aun no resuelto. Ya se solicito una aclaracion; no repitas la pregunta.
   }
   if (pending?.kind === "conflict") {
     return `${PROJECT_AFFINITY_MARKER}
-Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${record?.canonicalKey} o cambiar explicitamente a ${pending.target}. No ejecutes operaciones protegidas hasta resolverlo.`;
+Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${record2?.canonicalKey} o cambiar explicitamente a ${pending.target}. No ejecutes operaciones protegidas hasta resolverlo.`;
   }
   return `${PROJECT_AFFINITY_MARKER}
 Proyecto ambiguo. Pregunta UNA sola vez cual proyecto usar entre: ${candidates}. La respuesta fijara la afinidad de esta sesion. No pidas claves tecnicas ni ejecutes operaciones protegidas antes de resolverlo.`;
 }
 function promptText(input) {
-  const prompt = isRecord8(input.prompt) ? input.prompt : undefined;
+  const prompt = isRecord9(input.prompt) ? input.prompt : undefined;
   return [stringValue5(prompt?.text), stringValue5(input.text), stringValue5(input.message)].filter(Boolean).join(`
 `);
 }
@@ -10163,7 +11692,7 @@ function collectPaths(value, output, depth) {
     value.forEach((item) => collectPaths(item, output, depth + 1));
     return;
   }
-  if (!isRecord8(value))
+  if (!isRecord9(value))
     return;
   for (const [key, item] of Object.entries(value)) {
     if (["path", "filePath", "file_path", "directory", "cwd", "workdir", "uri"].includes(key) && typeof item === "string") {
@@ -10184,9 +11713,9 @@ function normalizedPath(value, base) {
       return;
     }
   }
-  if (!path19.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
+  if (!path21.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
     return;
-  return path19.resolve(base, plain);
+  return path21.resolve(base, plain);
 }
 function resolved(project) {
   return { canonicalKey: project.canonicalKey, root: project.roots[0] };
@@ -10209,9 +11738,9 @@ ${text2}`;
   else
     system.push({ type: "text", text: text2 });
 }
-function inside4(value, root) {
-  const relative = path19.relative(path19.resolve(root), path19.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path19.isAbsolute(relative);
+function inside5(value, root) {
+  const relative = path21.relative(path21.resolve(root), path21.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path21.isAbsolute(relative);
 }
 function timestamp2(options) {
   return new Date((options.now ?? Date.now)()).toISOString();
@@ -10223,15 +11752,15 @@ function stringValue5(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 function isTextPart4(value) {
-  return isRecord8(value) && value.type === "text" && typeof value.text === "string";
+  return isRecord9(value) && value.type === "text" && typeof value.text === "string";
 }
-function isRecord8(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/plugin/index.ts
 var PLUGIN_ID = "malahor";
-var PLUGIN_VERSION = "0.5.0";
+var PLUGIN_VERSION = "0.6.0";
 var STATE_SCHEMA = 1;
 var SESSION_HOOKS = [
   "session.prompt.before",
@@ -10244,12 +11773,12 @@ var SESSION_HOOKS = [
   "session.http-response.after"
 ];
 function detectHost(value) {
-  if (!isRecord9(value))
+  if (!isRecord10(value))
     return "unknown";
-  const isV2 = isRecord9(value.session) && typeof value.session.hook === "function" || isRecord9(value.mcp) && typeof value.mcp.transform === "function" || isRecord9(value.agent) && typeof value.agent.transform === "function";
+  const isV2 = isRecord10(value.session) && typeof value.session.hook === "function" || isRecord10(value.mcp) && typeof value.mcp.transform === "function" || isRecord10(value.agent) && typeof value.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord9(value.client) && isRecord9(value.project) && typeof value.directory === "string";
+  const isV1 = isRecord10(value.client) && isRecord10(value.project) && typeof value.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -10268,7 +11797,7 @@ async function setupV2(context) {
   const criticalGaps = [];
   const domain = (name) => {
     const value = context[name];
-    if (!isRecord9(value) || typeof value.hook !== "function")
+    if (!isRecord10(value) || typeof value.hook !== "function")
       return;
     return value;
   };
@@ -10322,8 +11851,8 @@ async function setupV2(context) {
     };
     options.resolveParentSession = async (sessionID) => {
       const raw = await session.get?.({ sessionID });
-      const value = isRecord9(raw) && isRecord9(raw.data) ? raw.data : raw;
-      return isRecord9(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
+      const value = isRecord10(raw) && isRecord10(raw.data) ? raw.data : raw;
+      return isRecord10(value) && typeof value.parentID === "string" && typeof value.agent === "string" ? { parentID: value.parentID, agent: value.agent } : undefined;
     };
   }
   const affinityStorage = storage && typeof storage.get === "function" ? storage : undefined;
@@ -10369,7 +11898,7 @@ async function setupV2(context) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord9(input.env)) {
+      if (isRecord10(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -10412,27 +11941,28 @@ async function setupV2(context) {
     if (!freshnessRegistered)
       degraded.push("memory.freshness");
     const planningTools = typeof tool.transform === "function" ? tool : undefined;
-    const approvalPort = isRecord9(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
+    const approvalPort = isRecord10(context.permission) && typeof context.permission.assert === "function" ? context.permission : undefined;
     if (planningTools && approvalPort && planStorage && planningAuthority && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function")
           cleanups.push(() => registration.dispose?.());
+        capabilities["planning.v5"] = true;
         capabilities["planning.v4"] = true;
       } catch (error) {
         warn(`herramientas de planeacion no registradas: ${error.message}`);
       }
     }
-    if (!capabilities["planning.v4"])
-      criticalGaps.push("planning.v4");
+    if (!capabilities["planning.v5"])
+      criticalGaps.push("planning.v5");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
-    criticalGaps.push("planning.v4");
+    criticalGaps.push("planning.v5");
   }
-  const modeHost = isRecord9(context.command) && typeof context.command.transform === "function" && isRecord9(context.session) && typeof context.session.synthetic === "function" && isRecord9(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const modeHost = isRecord10(context.command) && typeof context.command.transform === "function" && isRecord10(context.session) && typeof context.session.synthetic === "function" && isRecord10(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (modeHost) {
     try {
       const registration = await registerModeCommand(modeHost, options);
@@ -10445,7 +11975,7 @@ async function setupV2(context) {
   }
   if (!capabilities["mode.command"])
     degraded.push("mode.command");
-  const planCommandHost = isRecord9(context.command) && typeof context.command.transform === "function" && isRecord9(context.session) && typeof context.session.synthetic === "function" && isRecord9(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
+  const planCommandHost = isRecord10(context.command) && typeof context.command.transform === "function" && isRecord10(context.session) && typeof context.session.synthetic === "function" && isRecord10(context.permission) && typeof context.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context : undefined;
   if (planCommandHost && planStorage && planningAuthority) {
     try {
       const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
@@ -10552,7 +12082,7 @@ async function setupV2(context) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord9(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
+    const available = name === "storage" ? context.storage !== undefined && context.storage !== null : isRecord10(context[name]) && (typeof context[name].transform === "function" || typeof context[name].hook === "function" || typeof context[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -10583,12 +12113,12 @@ async function setupV2(context) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord9(input.client),
-    project: isRecord9(input.project),
+    client: isRecord10(input.client),
+    project: isRecord10(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord9(input.experimental_workspace)
+    workspace: isRecord10(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -10637,7 +12167,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback, cleanups) {
   try {
     const registration = await domain.hook(name, callback);
-    if (isRecord9(registration) && typeof registration.dispose === "function") {
+    if (isRecord10(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -10666,28 +12196,28 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context) {
-  const location = isRecord9(context.location) ? context.location : undefined;
+  const location = isRecord10(context.location) ? context.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function locationCanonical(context) {
-  const location = isRecord9(context.location) ? context.location : undefined;
-  const project = location && isRecord9(location.project) ? location.project : undefined;
+  const location = isRecord10(context.location) ? context.location : undefined;
+  const project = location && isRecord10(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function transformDomain(value) {
-  if (!isRecord9(value) || typeof value.transform !== "function")
+  if (!isRecord10(value) || typeof value.transform !== "function")
     return;
   return value;
 }
 function storageDomain(value) {
-  if (!isRecord9(value) || typeof value.set !== "function")
+  if (!isRecord10(value) || typeof value.set !== "function")
     return;
   return value;
 }
 function eventDomain(value) {
-  if (!isRecord9(value) || typeof value.subscribe !== "function")
+  if (!isRecord10(value) || typeof value.subscribe !== "function")
     return;
   return value;
 }
@@ -10701,29 +12231,32 @@ function captureSubagentsOptIn(cwd, env, canonicalKey) {
     return false;
   }
 }
-async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
+async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
-  const memoryProject = memoryProjectForLocation(paths, cwd, canonical2);
-  if (!fs15.existsSync(paths.mnemoIndex)) {
+  const memoryProject = memoryProjectForLocation(paths, cwd, canonical3);
+  const horielIndex = paths.horielIndex ?? path22.join(paths.malahorHome, "horiel", "index.js");
+  const horielDatabase = paths.horielDb ?? path22.join(paths.malahorHome, "horiel", "horiel.sqlite");
+  const horielSnapshots = paths.horielSnapshots ?? path22.join(paths.malahorHome, "horiel", "snapshots");
+  if (!fs17.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   } else if (!memoryProject) {
     warnings.push("mcp.mnemo-project-unresolved");
   }
-  if (!fs15.existsSync(paths.docsIndex)) {
+  if (!fs17.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs15.existsSync(paths.mnemoIndex)) {
+      if (fs17.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
             type: "local",
             command: ["node", paths.mnemoIndex],
             environment: memoryProject ? {
-              ...isRecord9(existingMnemo?.environment) ? existingMnemo.environment : {},
+              ...isRecord10(existingMnemo?.environment) ? existingMnemo.environment : {},
               MALAHOR_MEMORY_BOUND: "1",
               MALAHOR_MEMORY_PROJECT: memoryProject
             } : {
@@ -10737,7 +12270,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
         }
       }
       const existingDocs = editor.get("docs");
-      if (fs15.existsSync(paths.docsIndex)) {
+      if (fs17.existsSync(paths.docsIndex)) {
         if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
           editor.set("docs", {
             ...existingDocs ?? {},
@@ -10750,10 +12283,33 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
           warnings.push("mcp.docs-foreign-definition");
         }
       }
+      const existingHoriel = editor.get("horiel");
+      if (fs17.existsSync(horielIndex)) {
+        if (!memoryProject) {
+          warnings.push("mcp.horiel-project-unresolved");
+        } else if (!existingHoriel || isMalahorHoriel(existingHoriel, paths)) {
+          editor.set("horiel", {
+            ...existingHoriel ?? {},
+            type: "local",
+            command: ["node", horielIndex],
+            environment: {
+              ...withoutHorielEnablement(existingHoriel?.environment),
+              MALAHOR_HORIEL_BOUND: "1",
+              MALAHOR_HORIEL_PROJECT: memoryProject,
+              MALAHOR_HORIEL_DATABASE: horielDatabase,
+              MALAHOR_HORIEL_SNAPSHOT_DIRECTORY: horielSnapshots
+            },
+            disabled: true,
+            codemode: false
+          });
+        } else {
+          warnings.push("mcp.horiel-foreign-definition");
+        }
+      }
       let target;
       try {
-        const registered = canonical2 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs15.realpathSync(entry.root) === fs15.realpathSync(canonical2)) : undefined;
-        if (!canonical2 || registered)
+        const registered = canonical3 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs17.realpathSync(entry.root) === fs17.realpathSync(canonical3)) : undefined;
+        if (!canonical3 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
       const level = target ? levelForProject(paths.projectsFile, target.project) : undefined;
@@ -10784,7 +12340,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
         });
       }
     });
-    if (isRecord9(registration) && typeof registration.dispose === "function") {
+    if (isRecord10(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -10794,14 +12350,14 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical2) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path20.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path22.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
-function memoryProjectForLocation(paths, cwd, canonical2) {
+function memoryProjectForLocation(paths, cwd, canonical3) {
   const roots = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
-  const canonicalValue = canonical2?.trim();
+  const canonicalValue = canonical3?.trim();
   const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
   const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
-  const byCanonicalPath = canonicalValue && path20.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
+  const byCanonicalPath = canonicalValue && path22.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
   const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey].filter((value) => Boolean(value)));
   if (candidates.size > 1)
     return;
@@ -10821,45 +12377,57 @@ function validMemoryProject(value) {
 }
 function canonicalLocation(value) {
   try {
-    return fs15.realpathSync(value);
+    return fs17.realpathSync(value);
   } catch {
-    return path20.resolve(value);
+    return path22.resolve(value);
   }
 }
 function pathInside(value, root) {
-  const relative = path20.relative(canonicalLocation(root), canonicalLocation(value));
-  return relative === "" || !relative.startsWith("..") && !path20.isAbsolute(relative);
+  const relative = path22.relative(canonicalLocation(root), canonicalLocation(value));
+  return relative === "" || !relative.startsWith("..") && !path22.isAbsolute(relative);
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path20.resolve(paths.opencodeDir, item) === path20.resolve(paths.mnemoIndex));
+  return command.some((item) => path22.resolve(paths.opencodeDir, item) === path22.resolve(paths.mnemoIndex));
 }
 function isMalahorDocs(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path20.resolve(paths.opencodeDir, item) === path20.resolve(paths.docsIndex));
+  return command.some((item) => path22.resolve(paths.opencodeDir, item) === path22.resolve(paths.docsIndex));
+}
+function isMalahorHoriel(config, paths) {
+  if (config.type !== "local" || !Array.isArray(config.command))
+    return false;
+  const index = paths.horielIndex ?? path22.join(paths.malahorHome, "horiel", "index.js");
+  const command = config.command.filter((item) => typeof item === "string");
+  return command.some((item) => path22.resolve(paths.opencodeDir, item) === path22.resolve(index));
+}
+function withoutHorielEnablement(value) {
+  if (!isRecord10(value))
+    return {};
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !/HORIEL.*ENABLED/i.test(key)));
 }
 function sessionLocationDirectory(value) {
-  const response = isRecord9(value) && isRecord9(value.data) ? value.data : value;
-  if (!isRecord9(response))
+  const response = isRecord10(value) && isRecord10(value.data) ? value.data : value;
+  if (!isRecord10(response))
     return;
-  const location = isRecord9(response.location) ? response.location : undefined;
+  const location = isRecord10(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function sessionLocationProject(value) {
-  const response = isRecord9(value) && isRecord9(value.data) ? value.data : value;
-  if (!isRecord9(response))
+  const response = isRecord10(value) && isRecord10(value.data) ? value.data : value;
+  if (!isRecord10(response))
     return;
-  const location = isRecord9(response.location) ? response.location : undefined;
-  const project = location && isRecord9(location.project) ? location.project : undefined;
+  const location = isRecord10(response.location) ? response.location : undefined;
+  const project = location && isRecord10(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : typeof project?.name === "string" ? project.name : typeof project?.id === "string" ? project.id : undefined;
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path20.join(directory, "plugin-state.json");
+  const file = path22.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -10871,15 +12439,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs15.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path20.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs15.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs17.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path22.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs17.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs15.chmodSync(temporary, 384);
-    fs15.renameSync(temporary, file);
+    fs17.chmodSync(temporary, 384);
+    fs17.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -10889,8 +12457,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path20.resolve(override);
-  return path20.join(os2.homedir(), ".malahor");
+    return path22.resolve(override);
+  return path22.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))
@@ -10906,7 +12474,7 @@ function warn(message) {
 function unique2(values) {
   return [...new Set(values)];
 }
-function isRecord9(value) {
+function isRecord10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export {

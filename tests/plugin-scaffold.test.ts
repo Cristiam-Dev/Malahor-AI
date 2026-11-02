@@ -115,6 +115,7 @@ describe("scaffold del plugin", () => {
       storage: true,
       "permission.evaluate": true,
       "tool.execute.before": true,
+      "planning.v5": true,
       "planning.v4": true,
       "planning.authority": true,
       "planning.retention": true,
@@ -170,10 +171,12 @@ describe("scaffold del plugin", () => {
 
       const state = readState();
       const capabilities = state.capabilities as Record<string, unknown>;
+      expect(capabilities["planning.v5"]).toBe(true);
       expect(capabilities["planning.v4"]).toBe(true);
       expect(capabilities["planning.v1"]).toBeUndefined();
       const text = (input.system as Array<{ text: string }>).map((item) => item.text).join("\n");
-      expect(text.match(/malahor-planning:v4/g) ?? []).toHaveLength(1);
+      expect(text.match(/malahor-planning:v5/g) ?? []).toHaveLength(1);
+      expect(text).not.toContain("malahor-planning:v4");
       expect(text).not.toContain("malahor-planning:v3");
       expect(text).not.toContain("malahor-planning:v1");
       expect(text).toMatch(/presentaci[oó]n foreground[\s\S]*exactamente una vez[\s\S]*mensaje normal/i);
@@ -184,6 +187,9 @@ describe("scaffold del plugin", () => {
       expect(text).toMatch(/\bimplementa\b/i);
       expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
       expect(text).toMatch(/malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i);
+      expect(text).toMatch(/remediaci[oó]n estructurada[\s\S]*persona no desarrolladora[\s\S]*bloques completos/i);
+      expect(text).toMatch(/sin remediaci[oó]n verificable[\s\S]*no inventes l[ií]neas ni c[oó]digo/i);
+      expect(text).toMatch(/edici[oó]n manual[\s\S]*revalidar/i);
       expectProgressiveDisclosureContract(text);
       expectLevelZeroContract(text);
       expect(text).toMatch(/documentaci[oó]n mediante docs_\*/i);
@@ -209,7 +215,7 @@ describe("scaffold del plugin", () => {
     });
 
     const state = readState();
-    expect(state.criticalGaps).toContain("planning.v4");
+    expect(state.criticalGaps).toContain("planning.v5");
     expect(state.degraded).toContain("mcp");
     expect(state.degraded).toContain("storage");
   });

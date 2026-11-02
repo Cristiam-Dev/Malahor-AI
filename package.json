@@ -31,7 +31,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "bun run build:plugin && bun build src/cli/index.ts --outdir dist --target=node && bun build src/mnemo/index.ts --outdir dist/mnemo --target=node && bun build src/docs/index.ts --outdir dist/docs --target=node",
+    "build": "bun run build:plugin && bun build src/cli/index.ts --outdir dist --target=node && bun build src/mnemo/index.ts --outdir dist/mnemo --target=node && bun build src/docs/index.ts --outdir dist/docs --target=node && bun build src/horiel/mcp/index.ts --outdir dist/horiel --target=node --external node:sqlite",
     "build:plugin": "bun run scripts/build-plugin.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.assets.json",
     "test": "bun test",
