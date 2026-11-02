@@ -10,6 +10,11 @@ export interface MalahorPaths {
   mnemoDir: string;
   mnemoDb: string;
   mnemoIndex: string;
+  /** P4 seam dormido; siempre presente al resolver paths nuevos. */
+  horielDir?: string;
+  horielDb?: string;
+  horielSnapshots?: string;
+  horielIndex?: string;
   docsDir: string;
   docsIndex: string;
   assetsDir: string;
@@ -43,6 +48,10 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env, cwd = process
     mnemoDir: pathApi.join(malahorHome, "mnemo"),
     mnemoDb: pathApi.join(malahorHome, "mnemo", "db.json"),
     mnemoIndex: pathApi.join(malahorHome, "mnemo", "index.js"),
+    horielDir: pathApi.join(malahorHome, "horiel"),
+    horielDb: pathApi.join(malahorHome, "horiel", "horiel.sqlite"),
+    horielSnapshots: pathApi.join(malahorHome, "horiel", "snapshots"),
+    horielIndex: pathApi.join(malahorHome, "horiel", "index.js"),
     docsDir: pathApi.join(malahorHome, "docs"),
     docsIndex: pathApi.join(malahorHome, "docs", "index.js"),
     assetsDir: pathApi.join(malahorHome, "assets"),

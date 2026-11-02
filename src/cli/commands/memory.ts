@@ -8,6 +8,7 @@ import { applyMemoryMigration, previewMemoryMigration } from "../../mnemo/migrat
 import { sanitizeMemoryContent } from "../../mnemo/sanitizer";
 import { memoryLocation } from "../../mnemo/storage";
 import { memoryTree } from "../../mnemo/v2-tools";
+import type { HorielMemoryCli, HorielMemoryCliResult } from "../../horiel/cli/memory";
 
 export interface MemoryOptions {
   action: string;
@@ -24,7 +25,15 @@ export interface MemoryOptions {
   limit?: string;
 }
 
-export function runMemory(options: MemoryOptions): void {
+export interface MemoryCommandDependencies {
+  horiel?: HorielMemoryCli;
+}
+
+export function runMemory(
+  options: MemoryOptions,
+  dependencies: MemoryCommandDependencies = {},
+): void | Promise<void> {
+  if (dependencies.horiel) return printInjectedHoriel(options, dependencies.horiel);
   const config = loadConfig();
   const paths = config.paths;
   const action = options.action || "help";
@@ -74,6 +83,19 @@ export function runMemory(options: MemoryOptions): void {
     default:
       throw new Error(`Comando memory invalido: ${action}. Usa list, tree, search, inspect, backup, migrate, reset o restore.`);
   }
+}
+
+async function printInjectedHoriel(options: MemoryOptions, seam: HorielMemoryCli): Promise<void> {
+  const result = await seam(options);
+  const output = horielCliText(result);
+  if (output) process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
+}
+
+function horielCliText(value: HorielMemoryCliResult): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.join("\n");
+  if ("lines" in value) return value.lines.join("\n");
+  return value.output;
 }
 
 function printMigration(options: MemoryOptions, source: string,

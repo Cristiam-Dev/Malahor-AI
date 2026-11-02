@@ -46,7 +46,7 @@ import {
 } from "./project-affinity";
 
 const PLUGIN_ID = "malahor";
-const PLUGIN_VERSION = "0.5.0";
+const PLUGIN_VERSION = "0.6.0";
 const STATE_SCHEMA = 1;
 
 type HostKind = "v1" | "v2" | "unknown";
@@ -288,18 +288,19 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       try {
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
-        capabilities["planning.v4"] = true;
+        capabilities["planning.v5"] = true;
+        capabilities["planning.v4"] = true; // lectura/revocación de estados terminales o activos legados
       } catch (error) {
         warn(`herramientas de planeacion no registradas: ${(error as Error).message}`);
       }
     }
-    if (!capabilities["planning.v4"]) criticalGaps.push("planning.v4");
+    if (!capabilities["planning.v5"]) criticalGaps.push("planning.v5");
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     criticalGaps.push("tool.hook");
-    criticalGaps.push("planning.v4");
+    criticalGaps.push("planning.v5");
   }
 
   const modeHost = isRecord(context.command) && typeof context.command.transform === "function"
@@ -599,6 +600,9 @@ async function registerMcpTransform(
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings: string[] = [];
   const memoryProject = memoryProjectForLocation(paths, cwd, canonical);
+  const horielIndex = paths.horielIndex ?? path.join(paths.malahorHome, "horiel", "index.js");
+  const horielDatabase = paths.horielDb ?? path.join(paths.malahorHome, "horiel", "horiel.sqlite");
+  const horielSnapshots = paths.horielSnapshots ?? path.join(paths.malahorHome, "horiel", "snapshots");
   if (!fs.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   } else if (!memoryProject) {
@@ -644,6 +648,30 @@ async function registerMcpTransform(
           });
         } else {
           warnings.push("mcp.docs-foreign-definition");
+        }
+      }
+
+      const existingHoriel = editor.get("horiel");
+      if (fs.existsSync(horielIndex)) {
+        if (!memoryProject) {
+          warnings.push("mcp.horiel-project-unresolved");
+        } else if (!existingHoriel || isMalahorHoriel(existingHoriel, paths)) {
+          editor.set("horiel", {
+            ...(existingHoriel ?? {}),
+            type: "local",
+            command: ["node", horielIndex],
+            environment: {
+              ...withoutHorielEnablement(existingHoriel?.environment),
+              MALAHOR_HORIEL_BOUND: "1",
+              MALAHOR_HORIEL_PROJECT: memoryProject,
+              MALAHOR_HORIEL_DATABASE: horielDatabase,
+              MALAHOR_HORIEL_SNAPSHOT_DIRECTORY: horielSnapshots,
+            },
+            disabled: true,
+            codemode: false,
+          });
+        } else {
+          warnings.push("mcp.horiel-foreign-definition");
         }
       }
 
@@ -745,6 +773,18 @@ function isMalahorDocs(config: McpServerConfig, paths: MalahorPaths): boolean {
   if (config.type !== "local" || !Array.isArray(config.command)) return false;
   const command = config.command.filter((item): item is string => typeof item === "string");
   return command.some((item) => path.resolve(paths.opencodeDir, item) === path.resolve(paths.docsIndex));
+}
+
+function isMalahorHoriel(config: McpServerConfig, paths: MalahorPaths): boolean {
+  if (config.type !== "local" || !Array.isArray(config.command)) return false;
+  const index = paths.horielIndex ?? path.join(paths.malahorHome, "horiel", "index.js");
+  const command = config.command.filter((item): item is string => typeof item === "string");
+  return command.some((item) => path.resolve(paths.opencodeDir, item) === path.resolve(index));
+}
+
+function withoutHorielEnablement(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !/HORIEL.*ENABLED/i.test(key)));
 }
 
 function sessionLocationDirectory(value: unknown): string | undefined {
