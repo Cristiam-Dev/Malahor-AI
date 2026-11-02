@@ -6,8 +6,25 @@ import { registeredProjectRoots } from "../cli/core/context";
 import { MODE_CHANGE_ACTION, parseModeName, previewModeChange } from "../cli/core/mode";
 import { resolvePaths } from "../cli/core/paths";
 import {
+  ACTION_INTENT_CANONICALIZER,
+  ActionIntentError,
+  canonicalizeActionIntent,
+  canonicalizePlannedAction,
+  canonicalizePlannedActions,
+  sameActionIntentSequence,
+  type ActionIntentV1,
+} from "../cli/core/action-intent";
+import {
+  PlanningAuthorizationError,
+  authorizationMessage,
+  decideAuthorization,
+  type AuthorizationDecision,
+  type AuthorizationDenialCode,
+} from "../cli/core/authorization-decision";
+import {
   controlPlan, DEFAULT_PLANNING_AUTHORITY, planAllows, presentPlan, renderPlan, requestPlanExecution, validState,
-  type PlanControl, type PlanInput, type PlannedAction, type PlanScope, type PlanState, type PlanningAdapter,
+  PLAN_CONTRACT_VERSION,
+  type PlanControl, type PlanInput, type PlannedAction, type PlanScope, type PlanState, type PlanStateV5, type PlanningAdapter,
 } from "../cli/core/planning";
 import type { PlanningAuthority } from "../cli/core/planning-authority";
 import { detectSecretKinds, type PluginAdapterOptions } from "../cli/core/hooks/plugin-adapter";
@@ -16,9 +33,10 @@ import { classifyInfrastructureCommand, classifyInfrastructurePath } from "../cl
 import { classifyGitCommand, loadGitAliases } from "../cli/core/git-command-policy";
 import { classifyReadOnlyShellCommand } from "../cli/core/read-only-shell-policy";
 import {
+  loadActivePlan,
+  loadActivePlanRaw,
   loadPlanRecord,
   persistPlanState,
-  planKey,
   type PlanningRetentionStorage,
 } from "./plan-retention";
 
@@ -101,7 +119,7 @@ export async function evaluatePlanningPermission(
   if (action === REVIEW_ACTION || action === RUN_ACTION || action === RESUME_ACTION || action === COMPLETE_ACTION) {
     const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
     const digest = Array.isArray(input.resources) ? input.resources[0] : undefined;
-    if (!state || digest !== state.digest || state.project !== resolved?.scope.project
+    if (!state || state.version !== 5 || digest !== state.digest || state.project !== resolved?.scope.project
       || state.mode !== resolved.scope.mode || state.policyRevision !== resolved.scope.policyRevision
       || (action === REVIEW_ACTION && (state.mode !== "assistant" || state.phase !== "presented"))
       || (action === RUN_ACTION && (state.mode === "advisor" || state.plan.actions.length === 0
@@ -145,12 +163,20 @@ export async function evaluatePlanningPermission(
     return;
   }
   if (normalized !== "subagent" && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority)) return;
-  const state = await readPlan(storage, resolved.scope.sessionID, authority);
   const resources = Array.isArray(input.resources) ? input.resources : [];
-  if (!permissionResourcesAllowed(
-    state, resolved.scope, normalized, resources, resolved.directory, authority,
-  )) {
-    deny(input, "Accion no incluida en un plan vigente y confirmado.");
+  const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+  const decision = authorizeResources(
+    rawState,
+    resolved.scope,
+    normalized,
+    resources,
+    resolved.directory,
+    projectRoot ?? resolved.directory,
+    undefined,
+    authority,
+  );
+  if (decision.effect !== "allow") {
+    denyDecision(input, decision);
   }
 }
 
@@ -177,9 +203,23 @@ export async function evaluatePlanningTool(
   if (["edit", "write", "patch", "shell", "bash"].includes(tool)
     && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority)) return;
   const actions = toolActions(tool, input.input, resolved.directory);
-  const state = await readPlan(storage, resolved.scope.sessionID, authority);
-  if (!actions || actions.length === 0 || actions.some((operation) => !planAllows(state, resolved.scope, operation, Date.now(), authority))) {
-    throw new Error(`Malahor: ${tool || "tool"} fuera de un plan vigente y confirmado.`);
+  const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+  const args = isRecord(input.input) ? input.input : {};
+  const operationCwd = typeof args.workdir === "string" ? path.resolve(resolved.directory, args.workdir)
+    : typeof args.cwd === "string" ? path.resolve(resolved.directory, args.cwd)
+      : resolved.directory;
+  const decision = authorizeOperations(
+    rawState,
+    resolved.scope,
+    actions,
+    resolved.directory,
+    projectRoot,
+    operationCwd,
+    authority,
+  );
+  if (decision.effect === "deny") throw new PlanningAuthorizationError(decision.code, decision.safeDetail);
+  if (decision.effect === "defer") {
+    throw new PlanningAuthorizationError("CRITICAL_CONTROL_UNAVAILABLE", "La acción no alcanzó su frontera autoritativa.");
   }
 }
 
@@ -247,17 +287,30 @@ export async function registerPlanningTools(
         if (raw.level !== 0 && raw.level !== 1 && raw.level !== 2) {
           throw new Error("malahor_plan requiere level 0, 1 o 2.");
         }
-        if (detectSecretKinds(raw).length > 0) throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
-        const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
-        const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
-        if (raw.level === 0) validateLevelZeroActions(actions ?? [], projectRoot);
+         if (detectSecretKinds(raw).length > 0) throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
+         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
+         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+         if (raw.level === 0) validateLevelZeroActions(actions ?? [], projectRoot);
         const newRepoDoc = actions?.find((item) => item.action === "edit"
           && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));
-        if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
-        const state = await presentPlan(
-          resolved.scope, { ...raw, actions }, call.messageID,
+         if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
+        const normalizedActions = sortedPlannedActions(actions ?? []);
+        const actionIntents = canonicalizePlannedActions(normalizedActions, {
+          project: resolved.scope.project,
+          root: projectRoot,
+          rootRef: "project",
+          cwd: resolved.directory,
+        });
+         const state = await presentPlan(
+          resolved.scope, {
+            ...raw,
+            actions: normalizedActions,
+            contractVersion: PLAN_CONTRACT_VERSION,
+            canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+            actionIntents,
+          }, call.messageID,
           planningAdapter(storage, approvals, call, authority), authority,
-        );
+         );
         return { content: foregroundPlanResult(state), metadata: {
           kind: "malahor.plan.presentation", version: 1,
           planID: state.planID, revision: state.revision, digest: state.digest, phase: state.phase,
@@ -322,7 +375,7 @@ function planningAdapter(
   authority: PlanningAuthority,
 ): PlanningAdapter {
   return {
-    loadActive: (sessionID) => storage.get(planKey(sessionID)),
+    loadActive: (sessionID) => loadActivePlanRaw(storage, sessionID),
     loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
     save: (state) => persistPlanState(storage, state, authority).then(() => undefined),
     confirm: (kind, state) => ask(port, call,
@@ -375,6 +428,9 @@ export async function injectPlanningInstructions(
         "malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible y debe coincidir exactamente.",
         "Un go previo a la presentacion no aprueba un plan todavia no visto.",
         "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
+        "Los retries tecnicos con el mismo ActionIntentV1 reutilizan la revision V5; ASK, DENY, cambios materiales o loop guard bloquean sin auto-planificar.",
+        "Si un guardrail incluye remediacion estructurada y saneada, explicala para una persona no desarrolladora como bloques completos de referencia y reemplazo: archivo y linea, busca, reemplaza, guarda y revalida.",
+        "Sin remediacion verificable no inventes lineas ni codigo ni pidas interpretar variables. ASK requiere aprobacion, hard DENY no tiene atajo y secretos reales o ambiguos se retiran o rotan; una edicion manual solo permite continuar despues de revalidar.",
         "La autorizacion no caduca por tiempo. Pausa, reanuda, revoca o consulta estado con malahor_plan_control o /malahor-plan.",
         "Las dependencias bloquean sin heredar permisos ni arrancar automaticamente.",
         "Las aprobaciones de plan no autorizan commit, push, stage, instalacion local ni evitan guardrails.",
@@ -382,8 +438,9 @@ export async function injectPlanningInstructions(
           : "Estado: sin plan vigente.",
       ].join("\n");
   const system = Array.isArray(input.system) ? input.system : [];
-  const marker = "<!-- malahor-planning:v4 -->";
+  const marker = "<!-- malahor-planning:v5 -->";
   const previousMarkers = [
+    "<!-- malahor-planning:v4 -->",
     "<!-- malahor-planning:v3 -->",
     "<!-- malahor-planning:v2 -->",
     "<!-- malahor-planning:v1 -->",
@@ -416,8 +473,7 @@ export async function readPlan(
 ): Promise<PlanState | undefined> {
   if (!storage) return undefined;
   try {
-    const record = await storage.get(planKey(sessionID));
-    return validState(record, authority) ? record : undefined;
+    return await loadActivePlan(storage, sessionID, authority);
   } catch { return undefined; }
 }
 
@@ -482,8 +538,9 @@ export async function resolvePlanningScope(value: unknown, options: PluginAdapte
 function toolActions(tool: string, value: unknown, directory: string): PlannedAction[] | undefined {
   const args = isRecord(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
-    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined
-      && (typeof cwd !== "string" || path.resolve(directory, cwd) !== path.resolve(directory)))) return undefined;
+    if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && typeof cwd !== "string")) return undefined;
+    if (typeof args.cwd === "string" && typeof args.workdir === "string"
+      && path.resolve(directory, args.cwd) !== path.resolve(directory, args.workdir)) return undefined;
     return typeof args.command === "string" && args.command.trim()
       ? [{ action: "shell", resource: args.command }] : undefined;
   }
@@ -506,169 +563,274 @@ function normalizeAction(action: string, resource: string, directory: string): P
   return { action, resource: action === "edit" ? path.resolve(directory, resource) : resource };
 }
 
-function permissionResourcesAllowed(
+interface PlannedIntentGroup {
+  action: PlannedAction;
+  intents: ActionIntentV1[];
+}
+
+const DUMMY_ACTION_ID = "0".repeat(64);
+
+function authorizeResources(
   state: unknown,
   scope: PlanScope,
   action: string,
   resources: unknown[],
   directory: string,
+  projectRoot: string,
+  operationCwd: string | undefined,
   authority: PlanningAuthority,
-): boolean {
-  if (resources.length === 0 || resources.some((item) => typeof item !== "string")) return false;
-  const now = Date.now();
-  if (resources.every((item) => planAllows(
-    state, scope, normalizeAction(action, item as string, directory), now, authority,
-  ))) return true;
-
-  // OpenCode V2 escanea un comando compuesto y emite un recurso por cada
-  // subcomando. La segunda frontera (tool.execute.before) conserva la
-  // coincidencia exacta del comando original; aqui solo reconstruimos `&&`
-  // para no rechazar antes un comando compuesto que si figura en el plan.
-  if (action !== "shell" || resources.length < 2) return false;
-  const compound = (resources as string[]).join(" && ");
-  if (planAllows(state, scope, { action: "shell", resource: compound }, now, authority)) return true;
-  if (!validState(state, authority)) return false;
-
-  const scannerResources = resources as string[];
-  return state.plan.actions.some((candidate) => candidate.action === "shell"
-    && planAllows(state, scope, candidate, now, authority)
-    && sameResources(shellScannerProjection(candidate.resource), scannerResources));
+): AuthorizationDecision {
+  if (resources.length === 0 || resources.some((item) => typeof item !== "string")) {
+    return decisionForCanonicalizationFailure(state, scope, "ACTION_NOT_CANONICALIZABLE", authority);
+  }
+  return authorizeOperations(
+    state,
+    scope,
+    (resources as string[]).map((resource) => normalizeAction(action, resource, directory)),
+    directory,
+    projectRoot,
+    operationCwd ?? directory,
+    authority,
+  );
 }
 
-function shellScannerProjection(command: string): string[] | null {
-  const segments = splitShellAnd(command);
-  if (!segments || segments.length < 2) return null;
-  const projected: string[] = [];
-  for (const segment of segments) {
-    const resource = scannerResource(segment);
-    if (!resource) return null;
-    projected.push(resource);
+function authorizeOperations(
+  state: unknown,
+  scope: PlanScope,
+  operations: PlannedAction[] | undefined,
+  directory: string,
+  projectRoot: string,
+  operationCwd: string,
+  authority: PlanningAuthority,
+): AuthorizationDecision {
+  const preflight = decideAuthorization({
+    state,
+    scope,
+    action: { actionID: DUMMY_ACTION_ID },
+    declaredActionIDs: [DUMMY_ACTION_ID],
+    host: { effect: "allow" },
+    criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+    now: Date.now(),
+    authority,
+  });
+  if (preflight.effect !== "allow") return preflight;
+  if (!validState(state, authority) || state.version !== 5) {
+    return { effect: "deny", code: "PLAN_INVALID" };
   }
-  return projected;
+  if (!operations || operations.length === 0) {
+    return decisionForCanonicalizationFailure(state, scope, "ACTION_NOT_CANONICALIZABLE", authority);
+  }
+  const kinds = new Set(operations.map((operation) => operation.action));
+  if (kinds.size !== 1 || !["edit", "shell", "subagent"].includes(operations[0]!.action)) {
+    return decisionForCanonicalizationFailure(state, scope, "ACTION_NOT_CANONICALIZABLE", authority);
+  }
+
+  let planned: PlannedIntentGroup[];
+  try {
+    planned = plannedIntentGroups(state, directory, projectRoot);
+  } catch (error) {
+    return decisionForIntentError(state, scope, error, authority, "ACTION_SERIALIZATION_MISMATCH");
+  }
+  const declaredActionIDs = planned.flatMap((group) => group.intents.map((intent) => intent.actionID));
+  const kind = operations[0]!.action;
+
+  try {
+    if (kind === "shell") {
+      const actual = operations.flatMap((operation) => canonicalizePlannedAction(operation, {
+        project: scope.project,
+        root: projectRoot,
+        rootRef: "project",
+        cwd: operationCwd,
+      }));
+      const match = planned.find((group) => group.action.action === "shell"
+        && sameActionIntentSequence(group.intents, actual));
+      if (!match) return actionNotDeclaredDecision(state, scope, actual[0], declaredActionIDs, authority);
+      return authorizeIntentSequence(state, scope, actual, declaredActionIDs, authority);
+    }
+
+    if (kind === "subagent") {
+      const actual = operations.flatMap((operation) => canonicalizePlannedAction(operation, {
+        project: scope.project,
+        root: projectRoot,
+        rootRef: "project",
+        cwd: directory,
+      }));
+      for (const intent of actual) {
+        const match = planned.some((group) => group.action.action === "subagent"
+          && group.intents.length === 1 && group.intents[0]?.actionID === intent.actionID);
+        if (!match) return actionNotDeclaredDecision(state, scope, intent, declaredActionIDs, authority);
+      }
+      return authorizeIntentSequence(state, scope, actual, declaredActionIDs, authority);
+    }
+
+    const actual: ActionIntentV1[] = [];
+    for (const operation of operations) {
+      const normalized = canonicalizeActionIntent({
+        kind: "edit",
+        project: scope.project,
+        root: projectRoot,
+        rootRef: "project",
+        path: operation.resource,
+        existence: "may-create",
+        constraints: { remote: false, infrastructure: false },
+      })[0]!;
+      const canonicalPath = normalized.resources[0]?.canonicalPath;
+      const match = planned.find((group) => group.action.action === "edit"
+        && group.intents.length === 1
+        && group.intents[0]?.resources[0]?.canonicalPath === canonicalPath);
+      if (!match) return actionNotDeclaredDecision(state, scope, normalized, declaredActionIDs, authority);
+      actual.push(match.intents[0]!);
+    }
+    return authorizeIntentSequence(state, scope, actual, declaredActionIDs, authority);
+  } catch (error) {
+    return decisionForIntentError(state, scope, error, authority, "ACTION_NOT_CANONICALIZABLE");
+  }
 }
 
-function splitShellAnd(command: string): string[] | null {
-  const segments: string[] = [];
-  let start = 0;
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-  let substitutionDepth = 0;
-
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    const next = command[index + 1];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === "$" && next === "(") {
-      substitutionDepth += 1;
-      index += 1;
-      continue;
-    }
-    if (substitutionDepth > 0) {
-      if (character === "(") substitutionDepth += 1;
-      else if (character === ")") substitutionDepth -= 1;
-      continue;
-    }
-    if (character === "&" && next === "&") {
-      const segment = command.slice(start, index).trim();
-      if (!segment) return null;
-      segments.push(segment);
-      start = index + 2;
-      index += 1;
-      continue;
-    }
-    if (character === "&" || character === "|" || character === ";" || character === "\n" || character === "\r") {
-      return null;
-    }
+function plannedIntentGroups(
+  state: PlanStateV5,
+  directory: string,
+  projectRoot: string,
+): PlannedIntentGroup[] {
+  const actions = state.plan.actions;
+  if (state.actionIntentSource === "compatibility") {
+    return actions.map((action) => ({
+      action,
+      intents: canonicalizePlannedAction(action, {
+        project: state.project,
+        root: projectRoot,
+        rootRef: "project",
+        cwd: directory,
+      }),
+    }));
   }
 
-  if (escaped || quote || substitutionDepth !== 0) return null;
-  const finalSegment = command.slice(start).trim();
-  if (!finalSegment) return null;
-  segments.push(finalSegment);
-  return segments;
+  const groups: PlannedIntentGroup[] = [];
+  let cursor = 0;
+  for (const action of actions) {
+    if (action.action === "edit") {
+      const stored = state.actionIntents[cursor];
+      if (!stored || stored.kind !== "edit" || stored.resources.length !== 1) {
+        throw new Error("Intent de edición desalineado.");
+      }
+      const normalized = canonicalizeActionIntent({
+        kind: "edit",
+        project: state.project,
+        root: projectRoot,
+        rootRef: "project",
+        path: action.resource,
+        existence: "may-create",
+        constraints: { remote: false, infrastructure: false },
+      })[0]!;
+      if (stored.resources[0]?.canonicalPath !== normalized.resources[0]?.canonicalPath) {
+        throw new Error("Path firmado y acción visible no coinciden.");
+      }
+      groups.push({ action, intents: [stored] });
+      cursor += 1;
+      continue;
+    }
+    const regenerated = canonicalizePlannedAction(action, {
+      project: state.project,
+      root: projectRoot,
+      rootRef: "project",
+      cwd: directory,
+    });
+    const stored = state.actionIntents.slice(cursor, cursor + regenerated.length);
+    if (!sameActionIntentSequence(stored, regenerated)) {
+      throw new Error("Intents firmados y acción visible no coinciden.");
+    }
+    groups.push({ action, intents: stored });
+    cursor += regenerated.length;
+  }
+  if (cursor !== state.actionIntents.length) throw new Error("Sobran intents sin acción visible.");
+  return groups;
 }
 
-function scannerResource(segment: string): string | null {
-  const assignmentSubstitution = segment.match(/^[A-Za-z_][A-Za-z0-9_]*=\$\(([\s\S]+)\)$/);
-  if (assignmentSubstitution) {
-    const inner = assignmentSubstitution[1]!.trim();
-    const nested = splitShellAnd(inner);
-    return inner && nested?.length === 1 ? inner : null;
+function authorizeIntentSequence(
+  state: PlanStateV5,
+  scope: PlanScope,
+  intents: ActionIntentV1[],
+  declaredActionIDs: string[],
+  authority: PlanningAuthority,
+): AuthorizationDecision {
+  let last: AuthorizationDecision | undefined;
+  for (const intent of intents) {
+    last = decideAuthorization({
+      state,
+      scope,
+      action: intent,
+      declaredActionIDs,
+      canonicalization: { status: "ok" },
+      serialization: { matches: true },
+      resourceScope: { inside: true },
+      protectedApproval: { required: false, approved: false },
+      host: { effect: "allow" },
+      criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+      now: Date.now(),
+      authority,
+    });
+    if (last.effect !== "allow") return last;
   }
-
-  let offset = 0;
-  let assignments = 0;
-  while (offset < segment.length) {
-    while (/\s/.test(segment[offset] ?? "")) offset += 1;
-    const start = offset;
-    const end = shellWordEnd(segment, start);
-    if (end === null) return null;
-    const token = segment.slice(start, end);
-    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
-      const resource = segment.slice(start).trim();
-      return resource || null;
-    }
-    assignments += 1;
-    offset = end;
-  }
-  return assignments === 0 ? segment.trim() || null : null;
+  return last ?? { effect: "deny", code: "ACTION_NOT_CANONICALIZABLE" };
 }
 
-function shellWordEnd(value: string, start: number): number | null {
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-  let substitutionDepth = 0;
-  for (let index = start; index < value.length; index += 1) {
-    const character = value[index]!;
-    const next = value[index + 1];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === "$" && next === "(") {
-      substitutionDepth += 1;
-      index += 1;
-      continue;
-    }
-    if (substitutionDepth > 0) {
-      if (character === "(") substitutionDepth += 1;
-      else if (character === ")") substitutionDepth -= 1;
-      continue;
-    }
-    if (/\s/.test(character)) return index;
-  }
-  return escaped || quote || substitutionDepth !== 0 ? null : value.length;
+function actionNotDeclaredDecision(
+  state: PlanStateV5,
+  scope: PlanScope,
+  intent: ActionIntentV1 | undefined,
+  declaredActionIDs: string[],
+  authority: PlanningAuthority,
+): AuthorizationDecision {
+  const undeclared = ["f".repeat(64), "e".repeat(64), "d".repeat(64)]
+    .find((candidate) => !declaredActionIDs.includes(candidate))!;
+  return decideAuthorization({
+    state,
+    scope,
+    action: { ...(intent ?? {}), actionID: undeclared },
+    declaredActionIDs,
+    host: { effect: "allow" },
+    criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+    now: Date.now(),
+    authority,
+  });
 }
 
-function sameResources(left: string[] | null, right: string[]): boolean {
-  return left !== null && left.length === right.length && left.every((resource, index) => resource === right[index]);
+function decisionForIntentError(
+  state: unknown,
+  scope: PlanScope,
+  error: unknown,
+  authority: PlanningAuthority,
+  fallback: AuthorizationDenialCode,
+): AuthorizationDecision {
+  const code = error instanceof ActionIntentError ? error.code : fallback;
+  return decisionForCanonicalizationFailure(state, scope, code, authority);
+}
+
+function decisionForCanonicalizationFailure(
+  state: unknown,
+  scope: PlanScope,
+  code: AuthorizationDenialCode,
+  authority: PlanningAuthority,
+): AuthorizationDecision {
+  return decideAuthorization({
+    state,
+    scope,
+    action: { actionID: DUMMY_ACTION_ID },
+    declaredActionIDs: [DUMMY_ACTION_ID],
+    canonicalization: { status: "error", code },
+    host: { effect: "allow" },
+    criticalControls: { authority: true, policy: true, toolHook: true, audit: true },
+    now: Date.now(),
+    authority,
+  });
+}
+
+function sortedPlannedActions(actions: PlannedAction[]): PlannedAction[] {
+  return [...new Map(actions.map((action) => [`${action.action}\0${action.resource}`, { ...action }])).values()]
+    .sort((left, right) => compareText(
+      `${left.action}\0${left.resource}`,
+      `${right.action}\0${right.resource}`,
+    ));
 }
 
 function readOnlyShellResources(value: unknown, projectRoot: string, workingDirectory: string): boolean {
@@ -705,6 +867,7 @@ function permissionAction(action: string): string {
 function routineTool(tool: string): boolean {
   const normalized = tool.trim().toLowerCase();
   if (/^(?:mcp[_:.-])?mnemo(?:[_:.-])/.test(normalized)) return true;
+  if (/^(?:mcp[_:.-])?horiel[_:.-](?:memory_(?:get|search|context|brief|tree|list_projects|inspect_project|move_preview|promote_preview|delete_project_preview|restore_preview))$/.test(normalized)) return true;
   if (/^(?:mcp[_:.-])?docs(?:[_:.-])(?:resolve|list|read|search|write|append|move|open)$/.test(normalized)) return true;
   return /^(?:mcp[_:.-])?codegraph[_:.-](?!.*(?:index|write|delete))/.test(normalized);
 }
@@ -778,6 +941,20 @@ function text(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function denyDecision(input: Record<string, unknown>, decision: AuthorizationDecision): void {
+  if (decision.effect === "allow") return;
+  if (decision.effect === "defer") {
+    deny(input, "DEFER_TO_TOOL_HOOK: la acción requiere la segunda frontera autoritativa.");
+    return;
+  }
+  input.effect = "deny";
+  input.message = `[malahor.plan:${decision.code}] ${authorizationMessage(decision.code, decision.safeDetail)}`;
 }
 
 function deny(input: Record<string, unknown>, message: string): void {

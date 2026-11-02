@@ -1,5 +1,6 @@
-export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v4 -->";
+export const MALAHOR_PROTOCOL_MARKER = "<!-- malahor-runtime-protocol:v5 -->";
 const LEGACY_PROTOCOL_MARKERS = [
+  "<!-- malahor-runtime-protocol:v4 -->",
   "<!-- malahor-runtime-protocol:v3 -->",
   "<!-- malahor-runtime-protocol:v2 -->",
   "<!-- malahor-runtime-protocol:v1 -->",
@@ -31,6 +32,7 @@ Intervención y reparación
 - Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentación ceremonial. Tras go ejecuta el alcance aprobado en una sola pasada y usa validación enfocada; un commit conserva excepcionalmente diagnóstico, tests, build y hooks completos.
 - Una inspección puramente read-only reconocida por la política cerrada se ejecuta sin plan y sin go; no extiendas esta excepción a comandos ambiguos, mutantes, remotos, indirectos o fuera de la raíz autorizada.
 - Sustituir una lectura por otra equivalente no exige una revisión del plan cuando no cambian efectos, recursos ni riesgo. Solo un cambio material de efectos, recursos o riesgo exige una nueva revisión proporcional.
+- Los intentos técnicos equivalentes reutilizan la misma revisión V5 y crean otro attempt; solo un cambio material exige otro plan. ASK, DENY y controles críticos nunca se reintentan automáticamente.
 - Un commit explícito usa un único plan nivel 0 y un único go; después ejecuta diagnóstico, tests, build, stage exacto y commit ordinario local en una sola pasada, sin planes o confirmaciones redundantes.
 - Usa divulgación progresiva: el resumen debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto, riesgo y “Qué debes hacer ahora” narrado en lenguaje técnico comprensible.
 - La vista normal no incrusta IDs, comandos ni el anexo técnico; tampoco muestra rutas exactas. Ante un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran únicamente mediante /malahor-plan detalles.
@@ -38,6 +40,9 @@ Intervención y reparación
 - malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible, pero debe coincidir exactamente y no sustituye las validaciones de scope, fase, turno o revision.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
 - Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
+- Si un guardrail bloquea una lectura o edición, detente y no pruebes rutas indirectas. Cuando el hook entregue una remediación estructurada y saneada, explícasela a una persona no desarrolladora con este formato: abre el archivo y la línea indicados, identifica la referencia saneada, reemplaza el bloque completo por el bloque propuesto, guarda y pide revalidar.
+- No pidas a la persona interpretar variables, payloads o sintaxis si existe un bloque de reemplazo verificable. Si el hook no aporta esa evidencia, no inventes números de línea, contenido ni código: un ASK requiere aprobación; un hard DENY no admite instrucciones de ejecución; y un secreto real o ambiguo exige retirada, rotación o gestor de secretos, nunca ofuscación.
+- Una modificación manual reportada por la persona no demuestra éxito ni amplía autorización. Relee o revalida el recurso mediante el guardrail antes de reanudar el plan o afirmar que quedó corregido.
 - Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
 - Los estados de planning viven en ctx.storage de OpenCode y son independientes de Mnemo. Una revisión terminal deja de actuar como plan activo: primero se archiva completa, firmada y comprimida; solo después se retiran copias vivas que aún coincidan exactamente. Sin verificación o sin capacidades de scan/remove se conservan las copias originales.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni las escrituras documentales autorizadas mediante docs_*.

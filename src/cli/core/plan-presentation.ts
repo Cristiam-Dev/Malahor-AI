@@ -180,8 +180,14 @@ function technicalBody(state: PlanState): string[] {
   const lines = [
     "### Riesgo y control",
     `- Nivel de trabajo: ${planLevel(state)}`,
+    `- Contrato de autorización: V${state.version}`,
     `- Nivel: ${riskLevelLabel(presentation.risk.level)}`,
   ];
+  if (state.version === 5) {
+    lines.push(`- Canonicalizador: ${state.canonicalizerVersion}`);
+  } else if (!["completed", "revoked", "superseded"].includes(state.phase)) {
+    lines.push("- Compatibilidad: este V4 activo no puede ejecutarse; requiere una revisión V5 visible.");
+  }
   if (presentation.risk.categories.length > 0) {
     lines.push(`- Categorías críticas: ${presentation.risk.categories.join(", ")}`);
   }
@@ -222,6 +228,13 @@ function technicalBody(state: PlanState): string[] {
       "",
       "### Acciones exactas",
       ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${safeJson(resource)}`),
+    );
+  }
+  if (state.version === 5 && state.actionIntents.length > 0) {
+    lines.push(
+      "",
+      "### Intents firmados",
+      ...state.actionIntents.map((intent, index) => `- ${index + 1}. ${intent.kind}: ${intent.actionID}`),
     );
   }
   lines.push(
@@ -271,6 +284,9 @@ function approvalLines(state: PlanState): string[] {
 }
 
 function nextAction(state: PlanState): string {
+  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
+    return "No ejecutes esta revisión: usa un contrato V4 legado. Puedes consultarla o revocarla; para continuar presenta una revisión V5 equivalente y vuelve a aprobarla.";
+  }
   if (state.phase === "completed") {
     return "No tienes que hacer nada más: el trabajo de este plan terminó. Si necesitas otro cambio, solicítalo como una tarea nueva.";
   }
@@ -310,6 +326,9 @@ function planIdentity(state: PlanState): string {
 }
 
 function phaseStatus(state: PlanState): string {
+  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
+    return "bloqueado: requiere revisión V5";
+  }
   if (state.phase === "presented") {
     return state.mode === "assistant" ? "esperando tu revisión" : state.mode === "executor"
       ? "esperando tu aprobación" : "presentado para consulta";

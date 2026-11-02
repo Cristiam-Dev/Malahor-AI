@@ -7,7 +7,8 @@ import type { PlanningAuthority } from "../cli/core/planning-authority";
 const ARCHIVE_SCHEMA = 1;
 const ARCHIVE_KIND = "malahor.plan.archive";
 const POINTER_KIND = "malahor.plan.archive-pointer";
-const LIVE_PREFIX = "planning/v4/";
+const LIVE_PREFIX = "planning/v5/";
+const LEGACY_LIVE_PREFIX = "planning/v4/";
 const ARCHIVE_PREFIX = "planning/archive/v1/plans";
 const MAX_ARCHIVE_BYTES = 64 * 1024;
 const DEFAULT_SCAN_LIMIT = 500;
@@ -75,18 +76,34 @@ interface PlanArchivePointer {
 
 export function planKey(sessionID: string): string {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID)) throw new Error("ID de sesion no evaluable.");
-  return `planning/v4/sessions/${sessionID}`;
+  return `planning/v5/sessions/${sessionID}`;
 }
 
 export function planRecordKey(planID: string): string {
   assertPlanID(planID);
-  return `planning/v4/plans/${planID}`;
+  return `planning/v5/plans/${planID}`;
 }
 
 export function planRevisionKey(planID: string, revision: string): string {
   assertPlanID(planID);
   assertRevision(revision);
   return `${planRecordKey(planID)}/revisions/${revision}`;
+}
+
+export function legacyPlanKey(sessionID: string): string {
+  if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID)) throw new Error("ID de sesion no evaluable.");
+  return `planning/v4/sessions/${sessionID}`;
+}
+
+export function legacyPlanRecordKey(planID: string): string {
+  assertPlanID(planID);
+  return `planning/v4/plans/${planID}`;
+}
+
+export function legacyPlanRevisionKey(planID: string, revision: string): string {
+  assertPlanID(planID);
+  assertRevision(revision);
+  return `${legacyPlanRecordKey(planID)}/revisions/${revision}`;
 }
 
 export function planArchiveRecordKey(planID: string): string {
@@ -113,13 +130,41 @@ export async function persistPlanState(
     : { status: "retained", removed: result.removed, reason: result.reason ?? "compactacion incompleta" };
 }
 
+/** V5 prevalece. Un registro V5 presente pero inválido nunca cae a V4. */
+export async function loadActivePlanRaw(
+  storage: PlanningRetentionStorage,
+  sessionID: string,
+): Promise<unknown> {
+  const currentRead = await strictGet(storage, planKey(sessionID));
+  if (!currentRead.ok) return { kind: "malahor.plan.storage-unavailable" };
+  const current = currentRead.value;
+  if (current !== undefined) return current;
+  const legacy = await strictGet(storage, legacyPlanKey(sessionID));
+  return legacy.ok ? legacy.value : { kind: "malahor.plan.storage-unavailable" };
+}
+
+export async function loadActivePlan(
+  storage: PlanningRetentionStorage,
+  sessionID: string,
+  authority: PlanningAuthority,
+): Promise<PlanState | undefined> {
+  const raw = await loadActivePlanRaw(storage, sessionID);
+  return validState(raw, authority) ? raw : undefined;
+}
+
 export async function loadPlanRecord(
   storage: PlanningRetentionStorage,
   planID: string,
   authority: PlanningAuthority,
 ): Promise<PlanState | undefined> {
-  const live = await safeGet(storage, planRecordKey(planID));
+  const currentRead = await strictGet(storage, planRecordKey(planID));
+  if (!currentRead.ok) return undefined;
+  const live = currentRead.value;
   if (live !== undefined) return validState(live, authority) ? live : undefined;
+  const legacyRead = await strictGet(storage, legacyPlanRecordKey(planID));
+  if (!legacyRead.ok) return undefined;
+  const legacy = legacyRead.value;
+  if (legacy !== undefined) return validState(legacy, authority) ? legacy : undefined;
 
   const rawPointer = await safeGet(storage, planArchiveRecordKey(planID));
   const pointer = parsePointer(rawPointer, planID);
@@ -141,40 +186,46 @@ export async function compactTerminalPlans(
   const maxEntries = boundedLimit(options.maxEntries);
   const candidates = new Map<string, PlanState>();
   let scanned = 0;
-  let after: string | undefined;
   let truncated = false;
 
-  while (scanned < maxEntries) {
-    let page: PlanningStorageScanResult;
-    try {
-      page = await storage.scan({
-        prefix: LIVE_PREFIX,
-        ...(after ? { after } : {}),
-        limit: Math.min(SCAN_PAGE_SIZE, maxEntries - scanned),
-      });
-    } catch {
-      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+  for (const prefix of [LIVE_PREFIX, LEGACY_LIVE_PREFIX]) {
+    let after: string | undefined;
+    while (scanned < maxEntries) {
+      let page: PlanningStorageScanResult;
+      try {
+        page = await storage.scan({
+          prefix,
+          ...(after ? { after } : {}),
+          limit: Math.min(SCAN_PAGE_SIZE, maxEntries - scanned),
+        });
+      } catch {
+        return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+      }
+      if (!page || !Array.isArray(page.entries)
+        || (page.next !== undefined && (typeof page.next !== "string" || page.next.length === 0))
+        || (page.entries.length === 0 && page.next !== undefined)) {
+        return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+      }
+      for (const entry of page.entries) {
+        scanned++;
+        if (!validState(entry.value, authority) || !TERMINAL_PHASES.has(entry.value.phase)) continue;
+        candidates.set(planIdentity(entry.value), entry.value);
+        if (scanned >= maxEntries) break;
+      }
+      if (!page.next) break;
+      if (scanned >= maxEntries) {
+        truncated = true;
+        break;
+      }
+      if (page.next === after) {
+        return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
+      }
+      after = page.next;
     }
-    if (!page || !Array.isArray(page.entries)
-      || (page.next !== undefined && (typeof page.next !== "string" || page.next.length === 0))
-      || (page.entries.length === 0 && page.next !== undefined)) {
-      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
-    }
-    for (const entry of page.entries) {
-      scanned++;
-      if (!validState(entry.value, authority) || !TERMINAL_PHASES.has(entry.value.phase)) continue;
-      candidates.set(planIdentity(entry.value), entry.value);
-      if (scanned >= maxEntries) break;
-    }
-    if (!page.next) break;
     if (scanned >= maxEntries) {
       truncated = true;
       break;
     }
-    if (page.next === after) {
-      return { supported: true, scanned, compacted: 0, removed: 0, failed: 1, truncated };
-    }
-    after = page.next;
   }
 
   let compacted = 0;
@@ -190,9 +241,10 @@ export async function compactTerminalPlans(
 }
 
 async function writeLiveState(storage: PlanningRetentionStorage, state: PlanState): Promise<void> {
-  await storage.set(planRevisionKey(state.planID, state.revision), state);
-  await storage.set(planRecordKey(state.planID), state);
-  await storage.set(planKey(state.sessionID), state);
+  const keys = liveStateKeys(state);
+  await storage.set(keys.revision, state);
+  await storage.set(keys.plan, state);
+  await storage.set(keys.session, state);
 }
 
 async function archiveAndPrune(
@@ -232,9 +284,9 @@ async function removeMatchingLiveRecords(
 ): Promise<{ ok: boolean; removed: number; reason?: string }> {
   if (!storage.remove) return { ok: false, removed: 0, reason: "remove no disponible" };
   const keys = [
-    planRevisionKey(state.planID, state.revision),
-    planRecordKey(state.planID),
-    planKey(state.sessionID),
+    liveStateKeys(state).revision,
+    liveStateKeys(state).plan,
+    liveStateKeys(state).session,
   ];
   const candidates: Array<{ key: string; value: PlanState }> = [];
   for (const key of keys) {
@@ -378,6 +430,20 @@ function planIdentity(state: PlanState): string {
   return `${state.planID}\0${state.revision}\0${state.digest}\0${state.phase}`;
 }
 
+function liveStateKeys(state: PlanState): { session: string; plan: string; revision: string } {
+  return state.version === 5
+    ? {
+        session: planKey(state.sessionID),
+        plan: planRecordKey(state.planID),
+        revision: planRevisionKey(state.planID, state.revision),
+      }
+    : {
+        session: legacyPlanKey(state.sessionID),
+        plan: legacyPlanRecordKey(state.planID),
+        revision: legacyPlanRevisionKey(state.planID, state.revision),
+      };
+}
+
 function canonicalBase64(value: string): boolean {
   if (!value || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
   try { return Buffer.from(value, "base64").toString("base64") === value; }
@@ -387,6 +453,14 @@ function canonicalBase64(value: string): boolean {
 async function safeGet(storage: PlanningRetentionStorage, key: string): Promise<unknown> {
   try { return await storage.get(key); }
   catch { return undefined; }
+}
+
+async function strictGet(
+  storage: PlanningRetentionStorage,
+  key: string,
+): Promise<{ ok: true; value: unknown } | { ok: false }> {
+  try { return { ok: true, value: await storage.get(key) }; }
+  catch { return { ok: false }; }
 }
 
 function boundedLimit(value: number | undefined): number {

@@ -469,17 +469,17 @@ describe("nucleo: transiciones y binding del plan", () => {
   });
 });
 
-describe("persistencia planning v4 fail-closed", () => {
-  test("usa exclusivamente keys v4 para sesion, plan y revision", () => {
-    expect(planKey(SESSION)).toBe(`planning/v4/sessions/${SESSION}`);
-    expect(planRecordKey("a".repeat(32))).toBe(`planning/v4/plans/${"a".repeat(32)}`);
+describe("persistencia planning v5 fail-closed", () => {
+  test("usa exclusivamente keys v5 para sesion, plan y revision", () => {
+    expect(planKey(SESSION)).toBe(`planning/v5/sessions/${SESSION}`);
+    expect(planRecordKey("a".repeat(32))).toBe(`planning/v5/plans/${"a".repeat(32)}`);
     expect(planRevisionKey("a".repeat(32), "b".repeat(32)))
-      .toBe(`planning/v4/plans/${"a".repeat(32)}/revisions/${"b".repeat(32)}`);
+      .toBe(`planning/v5/plans/${"a".repeat(32)}/revisions/${"b".repeat(32)}`);
   });
 
-  test("un estado v3 nunca se acepta como estado v4 aunque conserve firma y payload", () => {
+  test("un estado v3 nunca se acepta como estado v5 aunque conserve firma y payload", () => {
     const current = proposePlan(scope(), input(), NOW);
-    expect(current.version).toBe(4);
+    expect(current.version).toBe(5);
     expect(validState({ ...current, version: 3 })).toBe(false);
   });
 
@@ -842,11 +842,11 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     for (const attempted of [first, `${first} && parte C`]) {
       await expect(evaluatePlanningTool({
         sessionID: SESSION, tool: "shell", input: { command: attempted },
-      }, options, storage)).rejects.toThrow(/plan/);
+      }, options, storage)).rejects.toMatchObject({ code: "ACTION_NOT_DECLARED" });
     }
   });
 
-  test("permission admite la proyeccion scanner ordenada sin ampliar la frontera exacta de tool", async () => {
+  test("el canonicalizador cerrado rechaza sustituciones y entorno inline en ambas fronteras", async () => {
     const mktemp = "mktemp -d /tmp/opencode/.sandbox/malahor-runtime-update-XXXXXX";
     const update = "node dist/index.js update --dry-run --yes";
     const command = `sandbox=$(${mktemp}) && MALAHOR_HOME="$sandbox/.malahor" MALAHOR_OPENCODE_DIR="$sandbox/opencode" MALAHOR_OPENCODE_DETECT=0 ${update}`;
@@ -863,7 +863,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       return request.effect;
     };
 
-    expect(await permissionEffect([command])).toBe("allow");
+    expect(await permissionEffect([command])).toBe("deny");
     for (const resources of [
       [mktemp],
       [update, mktemp],
@@ -874,9 +874,9 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       expect(await permissionEffect(resources)).toBe("deny");
     }
 
-    await evaluatePlanningTool({
+    await expect(evaluatePlanningTool({
       sessionID: SESSION, tool: "shell", input: { command },
-    }, options, storage);
+    }, options, storage)).rejects.toMatchObject({ code: "ACTION_NOT_CANONICALIZABLE" });
     for (const attempted of [
       mktemp,
       update,
@@ -885,10 +885,10 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     ]) {
       await expect(evaluatePlanningTool({
         sessionID: SESSION, tool: "shell", input: { command: attempted },
-      }, options, storage)).rejects.toThrow(/plan/);
+      }, options, storage)).rejects.toMatchObject({ code: "ACTION_NOT_CANONICALIZABLE" });
     }
 
-    expect(await permissionEffect([mktemp, update])).toBe("allow");
+    expect(await permissionEffect([mktemp, update])).toBe("deny");
   });
 
   test("permission normaliza bash, write, patch y task sin ampliar los recursos del plan", async () => {
@@ -936,7 +936,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       expect(permission.effect).toBe("deny");
       await expect(evaluatePlanningTool({
         sessionID: SESSION, tool: action, input: {},
-      }, options, storage)).rejects.toThrow(/fuera de un plan/i);
+      }, options, storage)).rejects.toThrow(/Malahor:/i);
     }
 
     const obsidianPermission = {
@@ -951,7 +951,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       sessionID: SESSION,
       tool: "obsidian_vault_write",
       input: { path: "Product/plan.md" },
-    }, options, storage)).rejects.toThrow(/fuera de un plan/i);
+    }, options, storage)).rejects.toMatchObject({ code: "NO_ACTIVE_PLAN" });
   });
 
   test("asesor no usa read, glob ni grep en ninguna frontera", async () => {
@@ -972,7 +972,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     for (const tool of ["shell", "bash"] as const) {
       await evaluatePlanningTool({ sessionID: SESSION, tool, input: { command: "echo fixture", workdir: repo } }, options, storage);
       for (const workdir of [otherRepo, path.join(repo, "src")]) {
-        await expect(evaluatePlanningTool({ sessionID: SESSION, tool, input: { command: "echo fixture", workdir } }, options, storage)).rejects.toThrow(/plan/);
+        await expect(evaluatePlanningTool({ sessionID: SESSION, tool, input: { command: "echo fixture", workdir } }, options, storage)).rejects.toThrow(/Malahor:/);
       }
     }
   });
@@ -982,7 +982,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     records.set(planKey(SESSION), authorizePlan(reviewPlan(planned, planned.digest), planned.digest));
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "shell", input: {
       command: "echo fixture", cwd: repo, workdir: otherRepo,
-    } }, options, storage)).rejects.toThrow(/plan/);
+    } }, options, storage)).rejects.toThrow(/Malahor:/);
   });
 
   test("planning usa afinidad canonica aunque la sesion y la instancia esten fuera del repo", async () => {
@@ -1185,16 +1185,16 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await expect(harness.execute("plan", withoutLevel)).rejects.toThrow(/level 0, 1 o 2/i);
   });
 
-  test("malahor_plan guarda estado v4 ligado al turno y rechaza estados v3", async () => {
+  test("malahor_plan guarda estado v5 ligado al turno y rechaza estados v3", async () => {
     configure("ejecutar");
     const harness = await registeredTools();
     const planCall = call(SESSION, "malahor", "msg_executor_presentation");
     const planResult = await harness.execute("plan", input(), planCall);
 
-    expect(planKey(SESSION)).toBe(`planning/v4/sessions/${SESSION}`);
+    expect(planKey(SESSION)).toBe(`planning/v5/sessions/${SESSION}`);
     expect(records.has(planKey(SESSION))).toBe(true);
     const state = records.get(planKey(SESSION)) as PlanState;
-    expect(state.version).toBe(4);
+    expect(state.version).toBe(5);
     expect(state.plan.presentation).toEqual(input().presentation);
     expect(planResult.metadata).toMatchObject({
       planID: state.planID, revision: state.revision, digest: state.digest, phase: state.phase,
@@ -1623,7 +1623,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     await injectPlanningInstructions(instructions, options, storage);
     await injectPlanningInstructions(instructions, options, storage);
     const text = (instructions.system as Array<{ text: string }>)[0]?.text ?? "";
-    expect(text.match(/malahor-planning:v4/g) ?? []).toHaveLength(1);
+    expect(text.match(/malahor-planning:v5/g) ?? []).toHaveLength(1);
     expect(text).not.toContain("malahor-planning:v3");
     expect(text).not.toContain("malahor-planning:v1");
     expect(text).toMatch(/presentaci[oó]n foreground[\s\S]*exactamente una vez[\s\S]*mensaje normal/i);
@@ -1634,6 +1634,9 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(text).toMatch(/\bimplementa\b/i);
     expect(text).toMatch(/go previo.*no aprueba.*plan.*no visto/is);
     expect(text).toMatch(/malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i);
+    expect(text).toMatch(/remediacion estructurada[\s\S]*persona no desarrolladora[\s\S]*bloques completos/i);
+    expect(text).toMatch(/sin remediacion verificable[\s\S]*no inventes lineas ni codigo/i);
+    expect(text).toMatch(/edicion manual[\s\S]*revalidar/i);
     expectProgressiveDisclosureContract(text);
     expectLevelZeroContract(text);
     const absent: Record<string, unknown> = { sessionID: SESSION, agent: "malahor", system: [] };
@@ -1648,7 +1651,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(specialist.system).toEqual([]);
   });
 
-  test("actualiza el marker v3 a v4 en vez de conservar instrucciones antiguas", async () => {
+  test("actualiza el marker v3 a v5 en vez de conservar instrucciones antiguas", async () => {
     const legacy: Record<string, unknown> = {
       sessionID: SESSION,
       agent: "malahor",
@@ -1656,7 +1659,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     };
     await injectPlanningInstructions(legacy, options, storage);
     const text = (legacy.system as Array<{ text: string }>)[0]?.text ?? "";
-    expect(text.match(/malahor-planning:v4/g) ?? []).toHaveLength(1);
+    expect(text.match(/malahor-planning:v5/g) ?? []).toHaveLength(1);
     expect(text).not.toContain("malahor-planning:v3");
     expect(text).not.toContain("instrucciones antiguas");
   });
@@ -1674,6 +1677,11 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(
       /malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i,
     );
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(
+      /remediaci[oó]n estructurada y saneada[\s\S]*persona no desarrolladora[\s\S]*reemplaza el bloque completo/i,
+    );
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/no inventes n[uú]meros de l[ií]nea, contenido ni c[oó]digo/i);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/modificaci[oó]n manual[\s\S]*revalida/i);
     expectProgressiveDisclosureContract(MALAHOR_RUNTIME_PROTOCOL);
     expectLevelZeroContract(MALAHOR_RUNTIME_PROTOCOL);
   });

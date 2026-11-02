@@ -8,6 +8,7 @@ import {
   evaluateSessionHook,
   evaluateShellHook,
   evaluateToolHook,
+  formatPluginBlock,
 } from "../src/cli/core/hooks/plugin-adapter";
 import {
   MALAHOR_COMPACTION_MARKER,
@@ -22,6 +23,8 @@ import {
 import { startEventCapture } from "../src/plugin/events";
 import { MALAHOR_PROTOCOL_MARKER, injectMalahorProtocol } from "../src/plugin/protocol";
 import { createGitIntentRegistry } from "../src/cli/core/git-intent";
+import { isMcpToolName } from "../src/cli/core/hooks/types";
+import { evaluatePlanningTool } from "../src/plugin/planning";
 
 let root: string;
 let repo: string;
@@ -63,6 +66,28 @@ function writeProjectPolicy(controls: Record<string, unknown>): void {
     issuedAt: "2026-10-21T00:00:00.000Z",
     controls,
   }, null, 2)}\n`, "utf8");
+}
+
+function detectedAssignment(): string {
+  const identifier = ["api", "key"].join("_");
+  const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+  return `export const ${identifier} = '${syntheticValue}';`;
+}
+
+function writeSourceFixture(relativePath: string, content: string): void {
+  const target = path.join(repo, relativePath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${content}\n`, "utf8");
+}
+
+function toolHookOptions() {
+  return {
+    cwd: repo,
+    permissionRegistered: true,
+    shellRegistered: true,
+    toolRegistered: true,
+    env,
+  };
 }
 
 describe("adaptador de plugin V2", () => {
@@ -491,6 +516,69 @@ describe("adaptador de plugin V2", () => {
     expect(allowed.effect).toBe("allow");
   });
 
+  test("reconoce el namespace horiel como MCP exacto en permission y hooks", async () => {
+    expect(isMcpToolName("horiel_memory_get")).toBe(true);
+    expect(isMcpToolName("horiel.memory_search")).toBe(true);
+    expect(isMcpToolName("mcp_horiel_memory_context")).toBe(true);
+    expect(isMcpToolName("myhoriel_memory_get")).toBe(false);
+
+    writeProjectPolicy({
+      integrations: {
+        enforceMcpToolAllowlist: true,
+        allowedMcpTools: ["horiel_memory_*", "mcp_horiel_memory_*"],
+      },
+    });
+    for (const action of ["horiel_memory_get", "mcp_horiel_memory_search"]) {
+      const result = await evaluatePermission({
+        action,
+        resources: [],
+        effect: "allow",
+      }, { cwd: repo, permissionRegistered: true, env });
+      expect(result.effect).toBe("allow");
+      expect(result.result.violations).toEqual([]);
+    }
+  });
+
+  test("planning trata solo lecturas y previews Horiel como rutina", async () => {
+    const readOnly = [
+      "memory_get",
+      "memory_search",
+      "memory_context",
+      "memory_brief",
+      "memory_tree",
+      "memory_list_projects",
+      "memory_inspect_project",
+      "memory_move_preview",
+      "memory_promote_preview",
+      "memory_delete_project_preview",
+      "memory_restore_preview",
+    ];
+    const mutating = [
+      "memory_save",
+      "memory_update",
+      "memory_session_summary",
+      "memory_pin",
+      "memory_unpin",
+      "memory_link",
+      "memory_unlink",
+      "memory_move",
+      "memory_promote",
+      "memory_backup",
+      "memory_delete_project",
+      "memory_restore",
+    ];
+    const options = { cwd: repo, permissionRegistered: true, shellRegistered: true, env };
+
+    for (const tool of readOnly) {
+      await expect(evaluatePlanningTool({ tool: `horiel_${tool}`, input: {} }, options)).resolves.toBeUndefined();
+      await expect(evaluatePlanningTool({ tool: `mcp_horiel_${tool}`, input: {} }, options)).resolves.toBeUndefined();
+    }
+    for (const tool of mutating) {
+      await expect(evaluatePlanningTool({ tool: `horiel_${tool}`, input: {} }, options)).rejects.toThrow();
+      await expect(evaluatePlanningTool({ tool: `mcp_horiel_${tool}`, input: {} }, options)).rejects.toThrow();
+    }
+  });
+
   test("permission.evaluate no pregunta por tools conocidas sin efecto propio", async () => {
     const input: Record<string, unknown> = {
       action: "todowrite",
@@ -666,6 +754,190 @@ describe("adaptador de plugin V2", () => {
     }, options);
     expect(update.decision).toBe("deny");
     expect(update.violations.some((violation) => violation.id === "MAL-HOOK-DOCS-EXTERNAL")).toBe(true);
+  });
+
+  test("tool patch permite eliminar el unico hallazgo y agregar contenido neutral", async () => {
+    const relativePath = "src/remediate-secret.ts";
+    const assignment = detectedAssignment();
+    writeSourceFixture(relativePath, assignment);
+
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          `*** Update File: ${relativePath}`,
+          "@@",
+          `-${assignment}`,
+          "+export const ready = true;",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("allow");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+  });
+
+  test("el adaptador entrega la receta saneada al mensaje visible de OpenCode", async () => {
+    const relativePath = "tests/fixtures/redaction.test.ts";
+    const identifier = ["api", "key"].join("_");
+    const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+    writeSourceFixture(relativePath, `const redactionProbe = "${identifier}='${syntheticValue}'";`);
+
+    const result = await evaluateToolHook({
+      tool: "read",
+      input: { filePath: path.join(repo, relativePath) },
+    }, toolHookOptions());
+    const output = formatPluginBlock(result);
+
+    expect(result.decision).toBe("deny");
+    expect(output).toMatch(/abre tests\/fixtures\/redaction\.test\.ts:1/i);
+    expect(output).toMatch(/referencia saneada/i);
+    expect(output).toMatch(/reemplaza esa linea o bloque completo/i);
+    expect(output).toContain('["api", "key"].join("_")');
+    expect(output).not.toContain(syntheticValue);
+  });
+
+  test("el adaptador conserva una receta segura para sintaxis de fixture compleja", async () => {
+    const relativePath = "tests/fixtures/complex-redaction.test.ts";
+    const identifier = ["secret", "key"].join("_");
+    const syntheticValue = ["synthetic", "fedcba9876543210"].join("-");
+    writeSourceFixture(
+      relativePath,
+      `const request = { header: "prefix ${identifier}='${syntheticValue}' suffix" };`,
+    );
+
+    const result = await evaluateToolHook({
+      tool: "read",
+      input: { filePath: path.join(repo, relativePath) },
+    }, toolHookOptions());
+    const output = formatPluginBlock(result);
+
+    expect(result.decision).toBe("deny");
+    expect(output).toMatch(/abre tests\/fixtures\/complex-redaction\.test\.ts:1/i);
+    expect(output).toContain('["secret", "key"].join("_")');
+    expect(output).toContain('"prefix "');
+    expect(output).toContain("\"' suffix\"");
+    expect(output).not.toContain(syntheticValue);
+  });
+
+  test("tool patch deniega un cambio no relacionado que conserva el hallazgo", async () => {
+    const relativePath = "src/unchanged-secret.ts";
+    const assignment = detectedAssignment();
+    writeSourceFixture(relativePath, [assignment, "export const previous = true;"].join("\n"));
+
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          `*** Update File: ${relativePath}`,
+          "@@",
+          "-export const previous = true;",
+          "+export const current = true;",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
+  });
+
+  test("tool patch deniega eliminar solo una de dos ocurrencias del mismo tipo", async () => {
+    const relativePath = "src/partially-remediated-secret.ts";
+    const firstAssignment = detectedAssignment();
+    const secondIdentifier = ["access", "token"].join("_");
+    const secondSyntheticValue = ["synthetic", "fedcba9876543210"].join("-");
+    const secondAssignment = `export const ${secondIdentifier} = '${secondSyntheticValue}';`;
+    writeSourceFixture(relativePath, [firstAssignment, secondAssignment].join("\n"));
+
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          `*** Update File: ${relativePath}`,
+          "@@",
+          `-${firstAssignment}`,
+          "+export const firstOccurrenceRemoved = true;",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
+  });
+
+  test("tool patch deniega introducir un hallazgo en un archivo limpio", async () => {
+    const relativePath = "src/introduced-secret.ts";
+    const assignment = detectedAssignment();
+    writeSourceFixture(relativePath, "export const ready = false;");
+
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          `*** Update File: ${relativePath}`,
+          "@@",
+          "-export const ready = false;",
+          "+export const ready = true;",
+          `+${assignment}`,
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
+  });
+
+  test("tool patch no bloquea por secretos un Delete File exacto", async () => {
+    const relativePath = "src/deleted-secret.ts";
+    writeSourceFixture(relativePath, detectedAssignment());
+
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          `*** Delete File: ${relativePath}`,
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, toolHookOptions());
+
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+  });
+
+  test("tool generica no puede falsificar metadata de remediacion", async () => {
+    const relativePath = "src/forged-remediation.ts";
+    writeSourceFixture(relativePath, detectedAssignment());
+
+    const result = await evaluateToolHook({
+      tool: "mnemo_malahor_hook_check",
+      input: {
+        event: "file.write.before",
+        resourceKind: "filesystem",
+        paths: [relativePath],
+        metadata: {
+          fileOperations: [{ kind: "update", path: relativePath }],
+          secretPatchSummary: {
+            evaluable: true,
+            before: { "credential-assignment": 1 },
+            after: {},
+          },
+        },
+      },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
+    expect(result.violations.flatMap((violation) => violation.remediations ?? [])
+      .some((remediation) => remediation.kind === "replace-block")).toBe(false);
   });
 
   test("shell hook bloquea ejecucion indirecta y minimiza entorno", async () => {

@@ -1,6 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { MalahorMode } from "./config";
 import {
+  ACTION_INTENT_CANONICALIZER,
+  compatibilityActionIntents,
+  validActionIntentV1,
+  type ActionIntentV1,
+} from "./action-intent";
+import {
   createEphemeralPlanningAuthority,
   type PlanningAuthority,
 } from "./planning-authority";
@@ -33,6 +39,12 @@ export interface PlanInput {
   presentation: PlanPresentationInput;
   actions: PlannedAction[];
   dependencies?: PlanDependency[];
+  /** Campos internos V5; la tool visible los deriva en el host. */
+  contractVersion?: 5;
+  canonicalizerVersion?: typeof ACTION_INTENT_CANONICALIZER;
+  actionIntents?: ActionIntentV1[];
+  specRef?: string;
+  specHash?: string;
 }
 
 export interface NormalizedPlanInput {
@@ -48,8 +60,7 @@ export type PlanPhase = "presented" | "reviewed" | "running" | "paused" | "block
   | "completed" | "revoked" | "superseded";
 export type PlanControl = "status" | "pause" | "resume" | "revoke" | "complete";
 
-export interface PlanState {
-  version: 4;
+interface PlanStateBase {
   planID: string;
   sessionID: string;
   project: string;
@@ -74,6 +85,22 @@ export interface PlanState {
   proof: string;
 }
 
+export interface LegacyPlanState extends PlanStateBase {
+  version: 4;
+}
+
+export interface PlanStateV5 extends PlanStateBase {
+  version: 5;
+  contractVersion: 5;
+  canonicalizerVersion: typeof ACTION_INTENT_CANONICALIZER;
+  actionIntentSource: "canonical" | "compatibility";
+  actionIntents: ActionIntentV1[];
+  specRef?: string;
+  specHash?: string;
+}
+
+export type PlanState = LegacyPlanState | PlanStateV5;
+
 export interface PlanScope {
   sessionID: string;
   project: string;
@@ -94,6 +121,7 @@ const PHASES = new Set<PlanPhase>([
 ]);
 const TERMINAL = new Set<PlanPhase>(["completed", "revoked", "superseded"]);
 const CORE_INTERACTION_ID = "core:direct";
+export const PLAN_CONTRACT_VERSION = 5 as const;
 export const DEFAULT_PLANNING_AUTHORITY = createEphemeralPlanningAuthority();
 const transitions = new Map<string, Promise<void>>();
 
@@ -103,7 +131,7 @@ export async function presentPlan(
   presentationInteractionID: string,
   adapter: PlanningAdapter,
   authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
-): Promise<PlanState> {
+): Promise<PlanStateV5> {
   return serialize(scope.sessionID, async () => {
     const now = Date.now();
     const stored = await adapter.loadActive(scope.sessionID);
@@ -132,11 +160,14 @@ export async function requestPlanExecution(
   executionInteractionID: string,
   adapter: PlanningAdapter,
   authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
-): Promise<PlanState> {
+): Promise<PlanStateV5> {
   return serialize(scope.sessionID, async () => {
     if (!validInteractionID(executionInteractionID)) throw new Error("Turno de ejecucion no evaluable.");
     const stored = await adapter.loadActive(scope.sessionID);
-    if (!validState(stored, authority) || stored.digest !== digest || !samePlanScope(stored, scope)
+    if (isActiveLegacyPlan(stored)) {
+      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan activo debe presentarse como una revisión V5.");
+    }
+    if (!validState(stored, authority) || stored.version !== 5 || stored.digest !== digest || !samePlanScope(stored, scope)
       || stored.plan.actions.length === 0 || (stored.mode === "assistant" ? stored.phase !== "reviewed" : stored.phase !== "presented")) {
       throw new Error("No hay un plan ejecutable vigente.");
     }
@@ -166,15 +197,18 @@ export async function controlPlan(
     const stored = await adapter.loadActive(scope.sessionID);
     if (!validState(stored, authority) || !samePlanScope(stored, scope)) throw new Error("No hay un plan vigente para esta sesion.");
     if (command === "status") return stored;
-    if (command === "pause") {
-      if (stored.phase !== "running") throw new Error("Solo un plan en ejecucion puede pausarse.");
-      const next = seal({ ...stored, phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
-      await adapter.save(next);
-      return next;
-    }
     if (command === "revoke") {
       if (TERMINAL.has(stored.phase)) throw new Error("El plan ya esta cerrado.");
       const next = seal({ ...stored, phase: "revoked", revokedAt: Date.now(), updatedAt: Date.now() }, authority);
+      await adapter.save(next);
+      return next;
+    }
+    if (stored.version !== 5) {
+      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan V4 solo puede consultarse o revocarse.");
+    }
+    if (command === "pause") {
+      if (stored.phase !== "running") throw new Error("Solo un plan en ejecucion puede pausarse.");
+      const next = seal({ ...stored, phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
       await adapter.save(next);
       return next;
     }
@@ -227,15 +261,37 @@ export function proposePlan(
   presentationInteractionID = CORE_INTERACTION_ID,
   planID = randomID(),
   authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
-): PlanState {
+): PlanStateV5 {
   validateScope(scope, now);
   if (!validInteractionID(presentationInteractionID)) throw new Error("Turno de presentacion no evaluable.");
   if (!/^[a-f0-9]{32}$/.test(planID)) throw new Error("Identidad de plan no evaluable.");
+  if (input.contractVersion !== undefined && input.contractVersion !== PLAN_CONTRACT_VERSION) {
+    throw new Error("Versión de contrato de planning no soportada.");
+  }
+  if (input.canonicalizerVersion !== undefined && input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER) {
+    throw new Error("Versión de canonicalizador no soportada.");
+  }
+  if (input.actionIntents !== undefined
+    && (input.contractVersion !== PLAN_CONTRACT_VERSION || input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER)) {
+    throw new Error("Los intents V5 requieren contrato y canonicalizador explícitos.");
+  }
   const plan = normalizePlan(scope.mode, input);
+  const actionIntents = normalizeActionIntents(input.actionIntents, plan.actions, scope.project);
+  const actionIntentSource = input.actionIntents === undefined ? "compatibility" : "canonical";
+  const spec = normalizeSpecReference(input.specRef, input.specHash);
   const revision = randomID();
-  const digest = digestPlan(scope, plan, planID, revision, presentationInteractionID);
+  const digest = digestPlanV5(
+    scope, plan, planID, revision, presentationInteractionID,
+    actionIntents, actionIntentSource, spec,
+  );
   return seal({
-    version: 4, planID, ...scope, presentationInteractionID, plan, digest, revision,
+    version: 5,
+    contractVersion: PLAN_CONTRACT_VERSION,
+    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+    actionIntentSource,
+    actionIntents,
+    ...spec,
+    planID, ...scope, presentationInteractionID, plan, digest, revision,
     phase: "presented", createdAt: now, updatedAt: now, proof: "",
   }, authority);
 }
@@ -245,7 +301,7 @@ export function reviewPlan(
   digest: string,
   now = Date.now(),
   authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
-): PlanState {
+): PlanStateV5 {
   assertCurrent(state, digest, now, authority);
   if (state.mode !== "assistant" || state.phase !== "presented") throw new Error("Revision de plan no aplicable.");
   return seal({ ...state, phase: "reviewed", reviewedAt: now, updatedAt: now }, authority);
@@ -256,7 +312,7 @@ export function authorizePlan(
   digest: string,
   now = Date.now(),
   authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
-): PlanState {
+): PlanStateV5 {
   assertCurrent(state, digest, now, authority);
   assertReadyForAuthorization(state);
   if (state.plan.dependencies.length > 0) throw new Error("Las dependencias deben validarse mediante el adaptador antes de ejecutar.");
@@ -264,23 +320,23 @@ export function authorizePlan(
 }
 
 function authorizePlanAfterDependencyValidation(
-  state: PlanState,
+  state: PlanStateV5,
   digest: string,
   now: number,
   authority: PlanningAuthority,
-): PlanState {
+): PlanStateV5 {
   assertCurrent(state, digest, now, authority);
   assertReadyForAuthorization(state);
   return startPlan(state, now, authority);
 }
 
-function assertReadyForAuthorization(state: PlanState): void {
+function assertReadyForAuthorization(state: PlanStateV5): void {
   if (state.mode === "advisor" || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) {
     throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
   }
 }
 
-function startPlan(state: PlanState, now: number, authority: PlanningAuthority): PlanState {
+function startPlan(state: PlanStateV5, now: number, authority: PlanningAuthority): PlanStateV5 {
   return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
 }
 
@@ -291,7 +347,7 @@ export function planAllows(
   now = Date.now(),
   authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY,
 ): boolean {
-  if (!validState(state, authority) || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor"
+  if (!validState(state, authority) || state.version !== 5 || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor"
     || !samePlanScope(state, scope) || state.createdAt > now || state.updatedAt > now) return false;
   return state.plan.actions.some(({ action, resource }) => action === operation.action && resource === operation.resource);
 }
@@ -299,7 +355,8 @@ export function planAllows(
 export function validState(state: unknown, authority: PlanningAuthority = DEFAULT_PLANNING_AUTHORITY): state is PlanState {
   if (!state || typeof state !== "object" || Array.isArray(state)) return false;
   const value = state as Record<string, unknown>;
-  if (value.version !== 4 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID)
+  if ((value.version !== 4 && value.version !== 5)
+    || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID)
     || typeof value.sessionID !== "string" || typeof value.project !== "string"
     || !["advisor", "assistant", "executor"].includes(String(value.mode))
     || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision)
@@ -312,10 +369,33 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
     || !validPlan(value.plan, value.mode as MalahorMode)
     || typeof value.proof !== "string") return false;
   const plan = value.plan as NormalizedPlanInput;
-  const expected = digestPlan({
+  const scope = {
     sessionID: value.sessionID as string, project: value.project as string,
     mode: value.mode as MalahorMode, policyRevision: value.policyRevision as string,
-  }, plan, value.planID, value.revision, value.presentationInteractionID as string);
+  };
+  let expected: string;
+  if (value.version === 5) {
+    if (value.contractVersion !== PLAN_CONTRACT_VERSION
+      || value.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER
+      || (value.actionIntentSource !== "canonical" && value.actionIntentSource !== "compatibility")
+      || !Array.isArray(value.actionIntents)
+      || !value.actionIntents.every(validActionIntentV1)
+      || value.actionIntents.some((intent) => intent.project !== value.project)
+      || !validSpecReference(value.specRef, value.specHash)) return false;
+    if ((plan.actions.length === 0) !== (value.actionIntents.length === 0)) return false;
+    expected = digestPlanV5(
+      scope,
+      plan,
+      value.planID,
+      value.revision,
+      value.presentationInteractionID as string,
+      value.actionIntents as ActionIntentV1[],
+      value.actionIntentSource,
+      specReferenceFromState(value),
+    );
+  } else {
+    expected = digestPlanV4(scope, plan, value.planID, value.revision, value.presentationInteractionID as string);
+  }
   if (expected !== value.digest || !validPhase(value)) return false;
   return authority.verify(statePayload(value), value.proof);
 }
@@ -350,7 +430,17 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput
   if (dependencies.some((item) => !item || !/^[a-f0-9]{32}$/.test(item.planID) || !/^[a-f0-9]{32}$/.test(item.revision))) {
     throw new Error("Dependencia de plan invalida.");
   }
-  if (JSON.stringify(input).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
+  const visibleInput = {
+    level: input.level,
+    summary: input.summary,
+    steps: input.steps,
+    presentation: input.presentation,
+    actions: input.actions,
+    dependencies,
+    specRef: input.specRef,
+    specHash: input.specHash,
+  };
+  if (JSON.stringify(visibleInput).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
   const presentation = normalizePlanPresentation(input.presentation, mode, level);
   const actions = uniqueSorted(input.actions, (item) => `${item.action}\0${item.resource}`);
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\0${item.revision}`);
@@ -359,6 +449,34 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput
     summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies,
   };
   return input.level === undefined ? normalized : { level, ...normalized };
+}
+
+function normalizeActionIntents(
+  value: ActionIntentV1[] | undefined,
+  actions: PlannedAction[],
+  project: string,
+): ActionIntentV1[] {
+  if (value === undefined) return compatibilityActionIntents(actions, project);
+  if (!Array.isArray(value) || value.length > 240 || value.some((intent) => !validActionIntentV1(intent))) {
+    throw new Error("ActionIntentV1 inválido o demasiado extenso.");
+  }
+  if ((actions.length === 0) !== (value.length === 0)) {
+    throw new Error("Las acciones visibles y los intents firmados deben declarar el mismo alcance vacío/no vacío.");
+  }
+  if (value.some((intent) => intent.project !== project)) {
+    throw new Error("Los intents pertenecen a otro proyecto.");
+  }
+  return structuredClone(value);
+}
+
+function normalizeSpecReference(specRef: unknown, specHash: unknown): Pick<PlanStateV5, "specRef" | "specHash"> {
+  if (specRef === undefined && specHash === undefined) return {};
+  if (typeof specRef !== "string" || !specRef.trim() || specRef.length > 1_024
+    || /[\u0000\r\n]/u.test(specRef)
+    || typeof specHash !== "string" || !/^[a-f0-9]{64}$/.test(specHash)) {
+    throw new Error("Referencia de especificación no evaluable.");
+  }
+  return { specRef: specRef.trim(), specHash };
 }
 
 function normalizePlanLevel(value: unknown): PlanLevel {
@@ -418,20 +536,26 @@ async function pendingDependencies(
   return pending;
 }
 
-function blockPlan(state: PlanState, blockedBy: PlanDependency[], now: number, authority: PlanningAuthority): PlanState {
+function blockPlan(state: PlanStateV5, blockedBy: PlanDependency[], now: number, authority: PlanningAuthority): PlanStateV5 {
   return seal({ ...state, phase: "blocked", authorizedAt: state.authorizedAt ?? now, blockedAt: now,
     blockedBy, updatedAt: now }, authority);
 }
 
-function assertCurrent(state: PlanState, digest: string, now: number, authority: PlanningAuthority): void {
-  if (!validState(state, authority) || state.digest !== digest || !Number.isFinite(now) || state.createdAt > now) {
+function assertCurrent(
+  state: PlanState,
+  digest: string,
+  now: number,
+  authority: PlanningAuthority,
+): asserts state is PlanStateV5 {
+  if (!validState(state, authority) || state.version !== 5 || state.digest !== digest
+    || !Number.isFinite(now) || state.createdAt > now) {
     throw new Error("Plan cambiado o no evaluable: vuelve a presentarlo.");
   }
 }
 
-function seal(state: PlanState, authority: PlanningAuthority): PlanState {
+function seal<T extends PlanState>(state: T, authority: PlanningAuthority): T {
   const next = { ...state, proof: "" };
-  return { ...next, proof: authority.sign(statePayload(next as unknown as Record<string, unknown>)) };
+  return { ...next, proof: authority.sign(statePayload(next as unknown as Record<string, unknown>)) } as T;
 }
 
 function statePayload(value: Record<string, unknown>): string {
@@ -439,14 +563,39 @@ function statePayload(value: Record<string, unknown>): string {
   return canonical(payload);
 }
 
-function digestPlan(
+function digestPlanV4(
   scope: PlanScope, plan: NormalizedPlanInput, planID: unknown, revision: unknown, presentationInteractionID: string,
 ): string {
   return createHash("sha256").update(canonical({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
 }
 
-function sameRevision(value: unknown, expected: PlanState, authority: PlanningAuthority): value is PlanState {
+function digestPlanV5(
+  scope: PlanScope,
+  plan: NormalizedPlanInput,
+  planID: unknown,
+  revision: unknown,
+  presentationInteractionID: string,
+  actionIntents: ActionIntentV1[],
+  actionIntentSource: PlanStateV5["actionIntentSource"],
+  spec: Pick<PlanStateV5, "specRef" | "specHash">,
+): string {
+  return createHash("sha256").update(canonical({
+    contractVersion: PLAN_CONTRACT_VERSION,
+    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+    scope,
+    plan,
+    planID,
+    revision,
+    presentationInteractionID,
+    actionIntentSource,
+    actionIntents,
+    ...spec,
+  })).digest("hex");
+}
+
+function sameRevision<T extends PlanState>(value: unknown, expected: T, authority: PlanningAuthority): value is T {
   return validState(value, authority) && value.planID === expected.planID
+    && value.version === expected.version
     && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
 }
 
@@ -502,6 +651,25 @@ function validPhase(value: Record<string, unknown>): boolean {
 function validOptionalTimes(value: Record<string, unknown>): boolean {
   return ["reviewedAt", "authorizedAt", "startedAt", "pausedAt", "blockedAt", "completedAt", "revokedAt", "supersededAt"]
     .every((key) => value[key] === undefined || validTime(value[key]));
+}
+
+function validSpecReference(specRef: unknown, specHash: unknown): boolean {
+  return (specRef === undefined && specHash === undefined)
+    || (typeof specRef === "string" && specRef.length > 0 && specRef.length <= 1_024
+      && !/[\u0000\r\n]/u.test(specRef)
+      && typeof specHash === "string" && /^[a-f0-9]{64}$/.test(specHash));
+}
+
+function specReferenceFromState(value: Record<string, unknown>): Pick<PlanStateV5, "specRef" | "specHash"> {
+  return typeof value.specRef === "string" && typeof value.specHash === "string"
+    ? { specRef: value.specRef, specHash: value.specHash }
+    : {};
+}
+
+function isActiveLegacyPlan(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  return state.version === 4 && typeof state.phase === "string" && !TERMINAL.has(state.phase as PlanPhase);
 }
 
 function validateScope(scope: PlanScope, now: number): void {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { createPlanningAuthority, type PlanningAuthority } from "../src/cli/core/planning-authority";
 import {
@@ -12,6 +13,10 @@ import {
 } from "../src/cli/core/planning";
 import {
   compactTerminalPlans,
+  legacyPlanKey,
+  legacyPlanRecordKey,
+  legacyPlanRevisionKey,
+  loadActivePlan,
   loadPlanRecord,
   persistPlanState,
   planArchiveRecordKey,
@@ -114,6 +119,51 @@ async function completedState(targetAuthority: PlanningAuthority = authority): P
   const presented = await presentPlan(targetScope, input(), "msg-retention-plan", adapter, targetAuthority);
   await requestPlanExecution(targetScope, presented.digest, "msg-retention-run", adapter, targetAuthority);
   return controlPlan(targetScope, "complete", adapter, targetAuthority);
+}
+
+function legacyCompletedState(source: PlanState): PlanState {
+  const scope = {
+    sessionID: source.sessionID,
+    project: source.project,
+    mode: source.mode,
+    policyRevision: source.policyRevision,
+  };
+  const digest = createHash("sha256").update(canonical({
+    scope,
+    plan: source.plan,
+    planID: source.planID,
+    revision: source.revision,
+    presentationInteractionID: source.presentationInteractionID,
+  })).digest("hex");
+  const unsigned = {
+    version: 4 as const,
+    planID: source.planID,
+    ...scope,
+    presentationInteractionID: source.presentationInteractionID,
+    plan: source.plan,
+    digest,
+    revision: source.revision,
+    phase: "completed" as const,
+    createdAt: source.createdAt,
+    updatedAt: source.updatedAt,
+    authorizedAt: source.authorizedAt,
+    startedAt: source.startedAt,
+    completedAt: source.completedAt,
+    proof: "",
+  };
+  const { proof: _proof, ...payload } = unsigned;
+  return { ...unsigned, proof: authority.sign(canonical(payload)) };
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 describe("retención de planes terminales", () => {
@@ -221,7 +271,19 @@ describe("retención de planes terminales", () => {
     expect(fixture.records.has(planRecordKey(parent.planID))).toBe(false);
   });
 
-  test("compacta registros V4 terminales existentes de forma idempotente y acotada", async () => {
+  test("un terminal V4 permanece legible desde su namespace legado sin migración silenciosa", async () => {
+    const state = legacyCompletedState(await completedState());
+    const fixture = fixtureStorage();
+    fixture.records.set(legacyPlanKey(state.sessionID), state);
+    fixture.records.set(legacyPlanRecordKey(state.planID), state);
+    fixture.records.set(legacyPlanRevisionKey(state.planID, state.revision), state);
+
+    expect(await loadActivePlan(fixture.storage, state.sessionID, authority)).toEqual(state);
+    expect(await loadPlanRecord(fixture.storage, state.planID, authority)).toEqual(state);
+    expect(fixture.records.has(planKey(state.sessionID))).toBe(false);
+  });
+
+  test("compacta registros V5 terminales existentes de forma idempotente y acotada", async () => {
     const state = await completedState();
     const fixture = fixtureStorage();
     fixture.records.set(planKey(state.sessionID), state);

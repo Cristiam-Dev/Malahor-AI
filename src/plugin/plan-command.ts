@@ -6,9 +6,9 @@ import {
   type PlanningStorage,
 } from "./planning";
 import {
+  loadActivePlanRaw,
   loadPlanRecord,
   persistPlanState,
-  planKey,
 } from "./plan-retention";
 
 interface PlanInvocation {
@@ -58,7 +58,7 @@ export async function registerPlanCommand(
       const resolved = await resolvePlanningScope(sessionID, options);
       if (!resolved) throw new Error("Sesion sin afinidad a un proyecto registrado; plan no disponible.");
       const adapter: PlanningAdapter = {
-        loadActive: (id) => storage.get(planKey(id)),
+        loadActive: (id) => loadActivePlanRaw(storage, id),
         loadPlan: (planID) => loadPlanRecord(storage, planID, authority),
         save: (state) => persistPlanState(storage, state, authority).then(() => undefined),
         confirm: async (kind, state) => {

@@ -97,7 +97,11 @@ function renderState(options: {
   const mode = options.mode ?? "assistant";
   const phase = options.phase ?? "presented";
   return {
-    version: 4,
+    version: 5,
+    contractVersion: 5,
+    canonicalizerVersion: "action-intent-v1",
+    actionIntentSource: "canonical",
+    actionIntents: [],
     planID: "d".repeat(32),
     sessionID: "ses_plan_presentation",
     project: "malahor",
