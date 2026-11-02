@@ -471,12 +471,18 @@ function normalizeActionIntents(
 
 function normalizeSpecReference(specRef: unknown, specHash: unknown): Pick<PlanStateV5, "specRef" | "specHash"> {
   if (specRef === undefined && specHash === undefined) return {};
-  if (typeof specRef !== "string" || !specRef.trim() || specRef.length > 1_024
-    || /[\u0000\r\n]/u.test(specRef)
-    || typeof specHash !== "string" || !/^[a-f0-9]{64}$/.test(specHash)) {
-    throw new Error("Referencia de especificación no evaluable.");
+  if (typeof specRef !== "string" || typeof specHash !== "string") {
+    throw new Error("Referencia SDD no evaluable.");
   }
-  return { specRef: specRef.trim(), specHash };
+  const normalizedRef = specRef.trim();
+  const segments = normalizedRef.split("/");
+  if (!normalizedRef || normalizedRef.length > 1_024 || /[\u0000\r\n]/u.test(normalizedRef)
+    || !normalizedRef.startsWith("SDD/") || !normalizedRef.endsWith(".md")
+    || normalizedRef.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..")
+    || !/^[a-f0-9]{64}$/.test(specHash)) {
+    throw new Error("Referencia SDD no evaluable: usa un Markdown relativo bajo SDD/ y su SHA-256.");
+  }
+  return { specRef: normalizedRef, specHash };
 }
 
 function normalizePlanLevel(value: unknown): PlanLevel {
@@ -654,10 +660,14 @@ function validOptionalTimes(value: Record<string, unknown>): boolean {
 }
 
 function validSpecReference(specRef: unknown, specHash: unknown): boolean {
-  return (specRef === undefined && specHash === undefined)
-    || (typeof specRef === "string" && specRef.length > 0 && specRef.length <= 1_024
-      && !/[\u0000\r\n]/u.test(specRef)
-      && typeof specHash === "string" && /^[a-f0-9]{64}$/.test(specHash));
+  try {
+    const normalized = normalizeSpecReference(specRef, specHash);
+    return specRef === undefined && specHash === undefined
+      ? normalized.specRef === undefined && normalized.specHash === undefined
+      : normalized.specRef === specRef && normalized.specHash === specHash;
+  } catch {
+    return false;
+  }
 }
 
 function specReferenceFromState(value: Record<string, unknown>): Pick<PlanStateV5, "specRef" | "specHash"> {

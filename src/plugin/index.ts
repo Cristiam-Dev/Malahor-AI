@@ -34,8 +34,15 @@ import type { HookEvent, HookResult } from "../cli/core/hooks/types";
 import { injectMalahorProtocol } from "./protocol";
 import {
   evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, readPlan, registerPlanningTools,
+  resolvePlanningScope,
   type PlanningStorage, type PlanningTools,
 } from "./planning";
+import {
+  createCommitWorkflowRegistry,
+  registerCommitWorkflowTool,
+  type CommitWorkflowScope,
+} from "./commit-workflow";
+import { createPointActionMediator } from "./point-action-approval";
 import { registerModeCommand, type ModeCommandHost } from "./mode-command";
 import { registerPlanCommand, type PlanCommandHost } from "./plan-command";
 import { compactTerminalPlans } from "./plan-retention";
@@ -122,6 +129,8 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     shellRegistered: false,
     gitIntentRegistry: createGitIntentRegistry(),
   };
+  const commitWorkflow = createCommitWorkflowRegistry();
+  const pointActions = createPointActionMediator();
   const cleanups: Cleanup[] = [];
   const capabilities: Record<string, boolean> = {};
   const degraded: string[] = [];
@@ -213,13 +222,36 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     })
     : undefined;
   if (projectAffinity) options.resolveSessionProject = projectAffinity.resolveSessionProject;
+  const resolveCommitWorkflowScope = async (sessionID: string): Promise<CommitWorkflowScope | undefined> => {
+    const resolved = await resolvePlanningScope(sessionID, options);
+    if (!resolved) return undefined;
+    const paths = resolvePaths({ ...process.env, MALAHOR_OPENCODE_DETECT: "0" }, resolved.directory);
+    const roots = registeredProjectRoots(paths.projectsFile)
+      .filter((entry) => entry.canonicalKey === resolved.scope.project)
+      .sort((left, right) => right.root.length - left.root.length);
+    const root = roots.find((entry) => isWithin(resolved.directory, entry.root))?.root
+      ?? roots[0]?.root
+      ?? resolved.directory;
+    return {
+      sessionID: resolved.scope.sessionID,
+      project: resolved.scope.project,
+      policyRevision: resolved.scope.policyRevision,
+      mode: resolved.scope.mode,
+      root,
+    };
+  };
 
   const permission = domain("permission");
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
       const evaluated = await evaluatePermission(input, options);
       if (evaluated.effect !== "deny") await evaluatePlanningPermission(
-        input, options, planningAuthority ? planStorage : undefined, planningAuthority,
+        input,
+        options,
+        planningAuthority ? planStorage : undefined,
+        planningAuthority,
+        commitWorkflow,
+        capabilities["point-action.approval"] === true ? pointActions : undefined,
       );
       if (input.effect === "deny") {
         warn(`permission.evaluate deny: ${evaluated.effect === "deny" ? summary(evaluated.result) : String(input.message ?? "plan no autorizado")}`);
@@ -266,6 +298,8 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
         planningAuthority ? planStorage : undefined,
         planningAuthority,
         approvalPort,
+        commitWorkflow,
+        capabilities["point-action.approval"] === true ? pointActions : undefined,
       );
     }, cleanups);
     options.toolRegistered = registered;
@@ -301,10 +335,29 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       }
     }
     if (!capabilities["planning.v5"]) criticalGaps.push("planning.v5");
+    if (planningTools && approvalPort && projectAffinity && (options.resolveSessionProject || options.resolveSessionDirectory)
+      && options.permissionRegistered && registered) {
+      try {
+        const registration = await registerCommitWorkflowTool(
+          planningTools,
+          commitWorkflow,
+          resolveCommitWorkflowScope,
+          approvalPort,
+        );
+        if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
+        capabilities["commit.workflow.tool"] = true;
+      } catch (error) {
+        capabilities["commit.workflow.tool"] = false;
+        warn(`herramienta estructural de commit no registrada: ${(error as Error).message}`);
+      }
+    } else {
+      capabilities["commit.workflow.tool"] = false;
+    }
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
+    capabilities["commit.workflow.tool"] = false;
     criticalGaps.push("tool.hook");
     criticalGaps.push("planning.v5");
   }
@@ -350,6 +403,18 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
           } catch (error) {
             warn(`afinidad de proyecto no observable: ${error instanceof Error ? error.message : String(error)}`);
           }
+        }
+        if (event === "session.prompt.before" && capabilities["commit.workflow.tool"] === true) {
+          try {
+            await commitWorkflow.observePrompt(input, resolveCommitWorkflowScope);
+          } catch (error) {
+            const sessionID = typeof input.sessionID === "string" ? input.sessionID : "";
+            if (sessionID) commitWorkflow.invalidate(sessionID);
+            warn(`solicitud estructural de commit no observable: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        if (event === "session.prompt.before" && typeof input.sessionID === "string") {
+          pointActions.invalidate(input.sessionID);
         }
         const result = await evaluateSessionHook(event, input, options);
         if (event === "session.http-response.after") return;
@@ -412,6 +477,17 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);
+  capabilities["commit.workflow"] = capabilities["commit.workflow.tool"] === true
+    && capabilities["session.prompt.before"] === true
+    && capabilities["permission.evaluate"] === true
+    && capabilities["tool.execute.before"] === true
+    && capabilities["shell.create.before"] === true;
+  if (!capabilities["commit.workflow"]) criticalGaps.push("commit.workflow");
+  capabilities["point-action.approval"] = Boolean(approvalPort && planStorage && planningAuthority)
+    && capabilities["permission.evaluate"] === true
+    && capabilities["tool.execute.before"] === true
+    && capabilities["session.prompt.before"] === true;
+  if (!capabilities["point-action.approval"]) criticalGaps.push("point-action.approval");
 
   const event = eventDomain(context.event);
   if (event && storage) {
@@ -568,6 +644,11 @@ function locationCanonical(context: Record<string, unknown>): string | undefined
   const location = isRecord(context.location) ? context.location : undefined;
   const project = location && isRecord(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
+}
+
+function isWithin(value: string, root: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(value));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function transformDomain(value: unknown): McpTransformDomain | undefined {

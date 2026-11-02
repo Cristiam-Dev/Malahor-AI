@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -31,6 +32,9 @@ let repo: string;
 let home: string;
 let opencode: string;
 let env: NodeJS.ProcessEnv;
+const SPEC_REF = "SDD/hooks-plugin-fixture.md";
+const SPEC_CONTENT = "# Hooks plugin fixture\n";
+const SPEC_HASH = createHash("sha256").update(SPEC_CONTENT).digest("hex");
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-plugin-"));
@@ -42,6 +46,9 @@ beforeEach(() => {
   fs.mkdirSync(opencode, { recursive: true });
   fs.mkdirSync(path.join(home, "docs"), { recursive: true });
   fs.writeFileSync(path.join(home, "docs", "index.js"), "// docs fixture\n", "utf8");
+  const spec = path.join(home, "vault", "projects", "demo", SPEC_REF);
+  fs.mkdirSync(path.dirname(spec), { recursive: true });
+  fs.writeFileSync(spec, SPEC_CONTENT, "utf8");
   fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({ name: "demo" }, null, 2)}\n`, "utf8");
   env = {
     ...process.env,
@@ -121,7 +128,9 @@ describe("adaptador de plugin V2", () => {
     expect(system[0]?.text).toMatch(/ctx\.storage de OpenCode[\s\S]*independientes de Mnemo/i);
     expect(system[0]?.text).toMatch(/malahor_run[\s\S]*plan activo firmado[\s\S]*(?:no pidas|no exige)[\s\S]*(?:digest|\/malahor-plan detalles)/i);
     expect(system[0]?.text).toMatch(/inspecci[oó]n.*read-only.*sin plan.*sin.*go/is);
-    expect(system[0]?.text).toMatch(/commit expl[ií]cito.*[uú]nico plan.*nivel 0.*[uú]nico.*go/is);
+    expect(system[0]?.text).toMatch(/commit expl[ií]cito.*sin Planning.*aprobaci[oó]n nativa/is);
+    expect(system[0]?.text).toMatch(/malahor_commit_prepare.*rutas y comandos exactos/is);
+    expect(system[0]?.text).not.toMatch(/commit expl[ií]cito.*plan nivel 0/is);
   });
 
   test("compaction guarda checkpoint runtime e inyecta persistencia idempotente", async () => {
@@ -1163,6 +1172,20 @@ describe("adaptador de plugin V2", () => {
     expect(unknown.violations.some((violation) => violation.id === "MAL-HOOK-TOOL-UNKNOWN")).toBe(true);
   });
 
+  test("reconoce la tool estructural de commit sin abrir tools desconocidas", async () => {
+    writeProjectPolicy({ integrations: { blockUnapprovedIntegrations: true } });
+    const options = { cwd: repo, permissionRegistered: true, shellRegistered: true, env };
+    const managed = await evaluateToolHook({
+      tool: "malahor_commit_prepare",
+      input: { paths: ["src/a.ts"] },
+    }, options);
+    const short = await evaluateToolHook({ tool: "commit_prepare", input: {} }, options);
+
+    expect(managed.decision).toBe("allow");
+    expect(short.decision).toBe("allow");
+    expect(managed.violations.some((violation) => violation.id === "MAL-HOOK-TOOL-UNKNOWN")).toBe(false);
+  });
+
   test("tool hook pide aprobacion para rutas fuera de raices sin borrar el control", async () => {
     writeProjectPolicy({ files: { requireApprovalOutsideRoots: true } });
 
@@ -1313,10 +1336,249 @@ describe("adaptador de plugin V2", () => {
         capabilities: Record<string, boolean>;
       };
       expect(pluginState.capabilities["planning.retention"]).toBe(true);
+      expect(pluginState.capabilities["point-action.approval"]).toBe(false);
 
       await (cleanup as () => Promise<void>)();
       expect(disposed).toContain("permission.evaluate");
     } finally {
+      if (originalHome === undefined) delete process.env.MALAHOR_HOME;
+      else process.env.MALAHOR_HOME = originalHome;
+      if (originalOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
+      else process.env.MALAHOR_OPENCODE_DIR = originalOpenCodeDir;
+    }
+  });
+
+  test("hook real media una edición puntual con un único ASK nativo y reutiliza el ASK del host", async () => {
+    const sessionID = "ses_point_action_plugin";
+    const hooks = new Map<string, (input: Record<string, unknown>) => Promise<void> | void>();
+    const values = new Map<string, Record<string, unknown>>();
+    const approvals: Record<string, unknown>[] = [];
+    const register = (domain: string) => (
+      name: string,
+      callback: (input: Record<string, unknown>) => Promise<void> | void,
+    ) => {
+      hooks.set(`${domain}.${name}`, callback);
+      return { dispose: () => { hooks.delete(`${domain}.${name}`); } };
+    };
+    const originalHome = process.env.MALAHOR_HOME;
+    const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
+    process.env.MALAHOR_HOME = home;
+    process.env.MALAHOR_OPENCODE_DIR = opencode;
+    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({
+      demo: { context: "memory", roots: [repo], defaultRoot: repo },
+    })}\n`, "utf8");
+    fs.writeFileSync(path.join(home, "config.jsonc"), `${JSON.stringify({
+      execution: { intervention: "ejecutar", verification: true },
+    })}\n`, "utf8");
+    writeSourceFixture("src/point.ts", "export const point = 1;");
+    const target = path.join(repo, "src", "point.ts");
+    let cleanup: unknown;
+    try {
+      cleanup = await plugin.setup({
+        location: { directory: repo },
+        session: {
+          hook: register("session"),
+          get: async ({ sessionID: requested }: { sessionID: string }) => requested === sessionID
+            ? { id: requested, location: { directory: repo } }
+            : undefined,
+        },
+        permission: {
+          hook: register("permission"),
+          assert: async (request: Record<string, unknown>) => {
+            approvals.push(structuredClone(request));
+            const nativeInput: Record<string, unknown> = { ...request, effect: "allow" };
+            await hooks.get("permission.evaluate")?.(nativeInput);
+            expect(nativeInput.effect).toBe("ask");
+          },
+        },
+        tool: {
+          hook: register("tool"),
+          transform: (callback: (editor: {
+            namespace: (value: Record<string, unknown>) => void;
+            add: (value: Record<string, unknown>) => void;
+          }) => void) => callback({ namespace: () => undefined, add: () => undefined }),
+        },
+        shell: { hook: register("shell") },
+        storage: {
+          get: async (key: string) => values.get(key),
+          set: async (key: string, value: Record<string, unknown>) => { values.set(key, structuredClone(value)); },
+          remove: async (key: string) => { values.delete(key); },
+          scan: async () => ({ entries: [] }),
+        },
+      });
+
+      const firstSource = { type: "tool", messageID: "msg_point_first", id: "call_point_first" };
+      const firstPermission: Record<string, unknown> = {
+        sessionID,
+        action: "edit",
+        resources: [target],
+        source: firstSource,
+        effect: "allow",
+      };
+      await hooks.get("permission.evaluate")?.(firstPermission);
+      expect(firstPermission.effect).toBe("allow");
+      await hooks.get("tool.execute.before")?.({
+        sessionID,
+        agent: "malahor",
+        messageID: firstSource.messageID,
+        id: firstSource.id,
+        tool: "write",
+        input: { path: target, content: "export const point = 2;\n" },
+      });
+      expect(approvals).toHaveLength(1);
+      expect(approvals[0]).toMatchObject({ action: "malahor_point_action_execute", save: [] });
+      expect([...values.keys()].some((key) => key.startsWith("planning/v5/sessions/"))).toBe(false);
+
+      await hooks.get("session.prompt")?.({ sessionID, prompt: { text: "actualiza el mismo archivo" } });
+      const hostSource = { type: "tool", messageID: "msg_point_host", id: "call_point_host" };
+      const hostPermission: Record<string, unknown> = {
+        sessionID,
+        action: "edit",
+        resources: [target],
+        source: hostSource,
+        effect: "ask",
+      };
+      await hooks.get("permission.evaluate")?.(hostPermission);
+      expect(hostPermission.effect).toBe("ask");
+      await hooks.get("tool.execute.before")?.({
+        sessionID,
+        agent: "malahor",
+        messageID: hostSource.messageID,
+        id: hostSource.id,
+        tool: "edit",
+        input: { filePath: target, oldString: "point = 1", newString: "point = 3" },
+      });
+      expect(approvals).toHaveLength(1);
+    } finally {
+      if (typeof cleanup === "function") await cleanup();
+      if (originalHome === undefined) delete process.env.MALAHOR_HOME;
+      else process.env.MALAHOR_HOME = originalHome;
+      if (originalOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
+      else process.env.MALAHOR_OPENCODE_DIR = originalOpenCodeDir;
+    }
+  });
+
+  test("hook de prompt y tool gestionada autorizan el commit exacto sin crear plan", async () => {
+    const sessionID = "ses_structural_commit";
+    const hooks = new Map<string, (input: Record<string, unknown>) => Promise<void> | void>();
+    const definitions = new Map<string, Record<string, unknown>>();
+    const values = new Map<string, Record<string, unknown>>();
+    const approvals: Record<string, unknown>[] = [];
+    const register = (domain: string) => (
+      name: string,
+      callback: (input: Record<string, unknown>) => Promise<void> | void,
+    ) => {
+      hooks.set(`${domain}.${name}`, callback);
+      return { dispose: () => { hooks.delete(`${domain}.${name}`); } };
+    };
+    const originalHome = process.env.MALAHOR_HOME;
+    const originalOpenCodeDir = process.env.MALAHOR_OPENCODE_DIR;
+    process.env.MALAHOR_HOME = home;
+    process.env.MALAHOR_OPENCODE_DIR = opencode;
+    fs.writeFileSync(path.join(home, "projects.json"), `${JSON.stringify({
+      demo: { context: "memory", roots: [repo], defaultRoot: repo },
+    })}\n`, "utf8");
+    fs.writeFileSync(path.join(home, "config.jsonc"), `${JSON.stringify({
+      execution: { intervention: "ejecutar", verification: true },
+    })}\n`, "utf8");
+    writeSourceFixture("src/a.ts", "export const a = 1;");
+    fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({
+      name: "structural-commit-fixture",
+      scripts: { typecheck: "tsc --noEmit", test: "bun test", build: "bun build src/a.ts --outdir dist" },
+    })}\n`, "utf8");
+    let cleanup: unknown;
+    try {
+      cleanup = await plugin.setup({
+        location: { directory: repo },
+        session: {
+          hook: register("session"),
+          get: async ({ sessionID: requested }: { sessionID: string }) => requested === sessionID
+            ? { id: requested, location: { directory: repo } }
+            : undefined,
+        },
+        permission: { hook: register("permission"), assert: async (request: Record<string, unknown>) => {
+          approvals.push(structuredClone(request));
+          const nativeInput: Record<string, unknown> = { ...request, effect: "allow" };
+          await hooks.get("permission.evaluate")?.(nativeInput);
+          expect(nativeInput.effect).toBe("ask");
+        } },
+        tool: {
+          hook: register("tool"),
+          transform: (callback: (editor: {
+            namespace: (value: Record<string, unknown>) => void;
+            add: (value: Record<string, unknown>) => void;
+          }) => void) => callback({
+            namespace: () => undefined,
+            add: (definition) => { definitions.set(String(definition.name), definition); },
+          }),
+        },
+        shell: { hook: register("shell") },
+        storage: {
+          get: async (key: string) => values.get(key),
+          set: async (key: string, value: Record<string, unknown>) => { values.set(key, structuredClone(value)); },
+          remove: async (key: string) => { values.delete(key); },
+          scan: async () => ({ entries: [] }),
+        },
+      });
+
+      await hooks.get("session.prompt")?.({
+        sessionID,
+        messageID: "msg_user_commit",
+        prompt: { text: "comitea" },
+      });
+      const subject = "🐛 fix(git): corrige autorización";
+      const definition = definitions.get("commit_prepare");
+      expect(typeof definition?.execute).toBe("function");
+      const execute = definition?.execute as (value: unknown, call: Record<string, string>) => Promise<unknown>;
+      await execute({
+        paths: ["src/a.ts"],
+        subject,
+        commands: {
+          diagnostics: ["bun run typecheck"],
+          tests: ["bun test"],
+          build: ["bun run build"],
+          stage: "git add -- src/a.ts",
+          precommit: `malahor-ai git precommit --message '${subject}' --json`,
+          commit: `git commit -m '${subject}'`,
+          verify: ["git status --short --untracked-files=all", "git --no-pager log -1 --oneline"],
+        },
+      }, { sessionID, agent: "malahor", messageID: "msg_agent_commit", id: "call_prepare" });
+      expect(approvals).toHaveLength(1);
+      expect(approvals[0]).toMatchObject({ action: "malahor_commit_manifest", save: [] });
+
+      const command = "bun run typecheck";
+      const permission: Record<string, unknown> = {
+        sessionID,
+        action: "bash",
+        resources: [command],
+        metadata: { command },
+        source: { type: "tool", messageID: "msg_gate", id: "call_gate" },
+        effect: "allow",
+      };
+      await hooks.get("tool.execute.before")?.({
+        sessionID,
+        agent: "malahor",
+        messageID: "msg_gate",
+        id: "call_gate",
+        tool: "bash",
+        input: { command, workdir: repo },
+      });
+      await hooks.get("permission.evaluate")?.(permission);
+      expect(permission.effect, String(permission.message ?? "sin mensaje de rechazo")).toBe("allow");
+      expect([...values.keys()].some((key) => key.startsWith("planning/v5/sessions/"))).toBe(false);
+
+      await hooks.get("session.prompt")?.({ sessionID, prompt: { text: "continúa" } });
+      const stale: Record<string, unknown> = {
+        sessionID,
+        action: "bash",
+        resources: ["bun test"],
+        metadata: { command: "bun test" },
+        effect: "allow",
+      };
+      await hooks.get("permission.evaluate")?.(stale);
+      expect(stale.effect).toBe("deny");
+    } finally {
+      if (typeof cleanup === "function") await cleanup();
       if (originalHome === undefined) delete process.env.MALAHOR_HOME;
       else process.env.MALAHOR_HOME = originalHome;
       if (originalOpenCodeDir === undefined) delete process.env.MALAHOR_OPENCODE_DIR;
@@ -1399,6 +1661,8 @@ describe("adaptador de plugin V2", () => {
       const actualCommand = "git add -- src/core/a.ts src/core/b.ts tests/fixture.test.ts";
       await execute("plan")({
         level: 1,
+        specRef: SPEC_REF,
+        specHash: SPEC_HASH,
         summary: "Reparar la serialización exacta del stage",
         steps: ["Autorizar el manifest exacto"],
         presentation: {

@@ -175,10 +175,15 @@ describe("raíces registradas por proyecto", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/dependencia.*no hereda permisos.*nunca inicia autom[aá]ticamente/is);
   });
 
-  test("la proporcionalidad read-only y de commit es una regla estructural", () => {
+  test("la inspección directa, la acción puntual y el commit nativo son reglas estructurales", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/inspecci[oó]n.*read-only.*sin plan.*sin.*go/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/lectura.*equivalente.*no.*revisi[oó]n.*plan/is);
-    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/commit expl[ií]cito.*[uú]nico plan.*nivel 0.*[uú]nico.*go/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/acci[oó]n puntual.*archivo regular existente.*aprobaci[oó]n nativa/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/trabajo considerable.*SDD.*nivel 1 o 2.*specRef.*specHash/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/commit expl[ií]cito.*sin Planning.*aprobaci[oó]n nativa/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/malahor_commit_prepare.*manifest.*aprobaci[oó]n nativa/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/no presenta malahor_plan.*no invoca malahor_run.*no espera go/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).not.toMatch(/commit expl[ií]cito.*plan nivel 0/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/solo.*cambio material.*efectos.*recursos.*riesgo.*revisi[oó]n/is);
   });
 

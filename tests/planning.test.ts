@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -16,11 +17,15 @@ import {
   planRevisionKey, readPlan, registerPlanningTools, resolvePlanningScope, type PlanningStorage, type PlanningTools,
 } from "../src/plugin/planning";
 import { MALAHOR_RUNTIME_PROTOCOL } from "../src/plugin/protocol";
+import { createCommitWorkflowRegistry, type CommitPreparationInput } from "../src/plugin/commit-workflow";
 
 const SESSION = "ses_planning_fixture";
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
 const PLAN_MESSAGE = "msg_plan_fixture";
 const RUN_MESSAGE = "msg_run_fixture";
+const SPEC_REF = "SDD/planning-fixture.md";
+const SPEC_CONTENT = "# Planning fixture\n";
+const SPEC_HASH = createHash("sha256").update(SPEC_CONTENT).digest("hex");
 const PRESENTATION_ID_FIELDS = [
   "presentationMessageID", "presentedMessageID", "presentationInteractionID", "presentationID", "messageID", "interactionID",
 ] as const;
@@ -45,6 +50,9 @@ beforeEach(() => {
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(path.join(root, "opencode"), { recursive: true });
   fs.mkdirSync(path.join(root, "user"), { recursive: true });
+  const spec = path.join(home, "vault", "projects", "demo", SPEC_REF);
+  fs.mkdirSync(path.dirname(spec), { recursive: true });
+  fs.writeFileSync(spec, SPEC_CONTENT, "utf8");
   fs.writeFileSync(path.join(home, "projects.json"), JSON.stringify({
     demo: { context: "memory", roots: [repo], defaultRoot: repo },
     other: { context: "memory", roots: [otherRepo], defaultRoot: otherRepo },
@@ -102,6 +110,8 @@ function scope(mode: MalahorMode = "assistant"): PlanScope {
 function input(action: "edit" | "shell" | "subagent" = "edit"): PlanInput {
   return {
     level: 1,
+    specRef: SPEC_REF,
+    specHash: SPEC_HASH,
     summary: "Cambiar una ruta del fixture",
     steps: ["Presentar plan", "Cambiar solo lo declarado"],
     presentation: {
@@ -151,6 +161,8 @@ function levelZeroInput(action: "edit" | "shell" | "subagent" = "edit"): PlanInp
 function conceptInput(summary = "Alternativas"): PlanInput {
   return {
     level: 1,
+    specRef: SPEC_REF,
+    specHash: SPEC_HASH,
     summary,
     steps: [],
     presentation: {
@@ -193,11 +205,14 @@ function expectProgressiveDisclosureContract(text: string): void {
   expect(text).toMatch(/(?:comandos|rutas|identidad|digest)[\s\S]{0,260}(?:solo|[uú]nicamente)[\s\S]{0,180}\/malahor-plan detalles/i);
 }
 
-function expectLevelZeroContract(text: string): void {
-  expect(text).toMatch(/nivel 0[\s\S]{0,500}plan (?:mínimo|minimo)/i);
-  expect(text).toMatch(/plan (?:mínimo|minimo)[\s\S]{0,500}\bgo\b/i);
-  expect(text).toMatch(/nivel 0[\s\S]{0,500}(?:sin|no usa)[\s\S]{0,160}(?:Discovery|SDD)/i);
-  expect(text).toMatch(/commit[\s\S]{0,700}(?:status|diff)[\s\S]{0,300}(?:test|pruebas)[\s\S]{0,300}build/i);
+function expectNativeActionContract(text: string): void {
+  expect(text).toMatch(/(?:lecturas|inspecci[oó]n)[\s\S]{0,500}(?:directamente|sin plan)[\s\S]{0,220}(?:sin plan|sin.*go|aprobaci[oó]n redundante)/i);
+  expect(text).toMatch(/acci[oó]n puntual[\s\S]{0,700}(?:archivo regular existente|un archivo)[\s\S]{0,500}aprobaci[oó]n nativa/i);
+  expect(text).toMatch(/trabajo considerable[\s\S]{0,500}SDD[\s\S]{0,500}(?:nivel|level)[^\n]*(?:1|2)[\s\S]{0,260}specRef[\s\S]{0,180}specHash/i);
+  expect(text).toMatch(/commit expl[ií]cito[\s\S]{0,500}(?:sin Planning|sin plan)/i);
+  expect(text).toMatch(/malahor_commit_prepare[\s\S]{0,800}aprobaci[oó]n nativa/i);
+  expect(text).toMatch(/malahor_commit_prepare[\s\S]{0,400}(?:test|pruebas)[\s\S]{0,220}build[\s\S]{0,220}stage/i);
+  expect(text).not.toMatch(/nivel 0[\s\S]{0,240}plan (?:mínimo|minimo)/i);
 }
 
 function authorized(mode: "assistant" | "executor" = "assistant", now = Date.now()): PlanState {
@@ -597,6 +612,184 @@ describe("nucleo: dependencias y control persistente", () => {
 });
 
 describe("adaptador: solicitudes de permiso y segunda frontera", () => {
+  test("un grant estructural permite solo la secuencia exacta de commit sin plan activo", async () => {
+    configure("ejecutar");
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src", "a.ts"), "export const a = 1;\n", "utf8");
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+      name: "planning-commit-fixture",
+      scripts: { typecheck: "tsc --noEmit", test: "bun test", build: "bun build src/a.ts --outdir dist" },
+    }));
+    const subject = "🐛 fix(git): corrige autorización";
+    const manifest: CommitPreparationInput = {
+      paths: ["src/a.ts"],
+      subject,
+      commands: {
+        diagnostics: ["bun run typecheck"],
+        tests: ["bun test"],
+        build: ["bun run build"],
+        stage: "git add -- src/a.ts",
+        precommit: `malahor-ai git precommit --message '${subject}' --json`,
+        commit: `git commit -m '${subject}' -m '- Conserva el flujo exacto.'`,
+        verify: ["git status --short --branch --untracked-files=all", "git --no-pager log -1 --oneline"],
+      },
+    };
+    const registry = createCommitWorkflowRegistry();
+    const current = { ...scope("executor"), root: repo };
+    await registry.observePrompt({ sessionID: SESSION, prompt: { text: "comitea" } }, async () => current);
+    await registry.prepare(manifest, {
+      sessionID: SESSION, agent: "malahor", messageID: "msg_commit", id: "call_commit_prepare",
+    }, current, { assert: async (request) => {
+      const nativeInput: Record<string, unknown> = { ...request, effect: "allow" };
+      await evaluatePlanningPermission(nativeInput, options, storage, undefined, registry);
+      expect(nativeInput.effect).toBe("ask");
+    } }, async () => current);
+
+    const sequence = [
+      ...manifest.commands.diagnostics,
+      ...manifest.commands.tests,
+      ...manifest.commands.build,
+      manifest.commands.stage,
+      manifest.commands.precommit,
+      manifest.commands.commit,
+      ...manifest.commands.verify,
+    ];
+    for (const [index, command] of sequence.entries()) {
+      const messageID = `msg_gate_${index}`;
+      const id = `call_gate_${index}`;
+      await evaluatePlanningTool({
+        sessionID: SESSION,
+        agent: "malahor",
+        messageID,
+        id,
+        tool: "shell",
+        input: { command, workdir: repo },
+      }, options, storage, undefined, undefined, registry);
+      const permission = {
+        sessionID: SESSION,
+        action: "bash",
+        resources: [command],
+        metadata: { command },
+        source: { type: "tool", messageID, id },
+        effect: "allow",
+      };
+      await evaluatePlanningPermission(permission, options, storage, undefined, registry);
+      expect(permission.effect).toBe("allow");
+    }
+    expect(records.has(planKey(SESSION))).toBe(false);
+
+    const repeated = {
+      sessionID: SESSION,
+      action: "bash",
+      resources: [manifest.commands.stage],
+      metadata: { command: manifest.commands.stage },
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(repeated, options, storage, undefined, registry);
+    expect(repeated.effect).toBe("deny");
+    await expect(evaluatePlanningTool({
+      sessionID: SESSION,
+      tool: "shell",
+      input: { command: manifest.commands.stage, workdir: repo },
+    }, options, storage, undefined, undefined, registry)).rejects.toThrow();
+  });
+
+  test("un mismatch del grant se deniega con causa de commit y no cae a Planning", async () => {
+    configure("ejecutar");
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src", "a.ts"), "export const a = 1;\n", "utf8");
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+      scripts: { typecheck: "tsc --noEmit", test: "bun test", build: "bun build src/a.ts --outdir dist" },
+    }));
+    const subject = "🐛 fix(git): corrige autorización";
+    const manifest: CommitPreparationInput = {
+      paths: ["src/a.ts"],
+      subject,
+      commands: {
+        diagnostics: ["bun run typecheck"], tests: ["bun test"], build: ["bun run build"],
+        stage: "git add -- src/a.ts",
+        precommit: `malahor-ai git precommit --message '${subject}' --json`,
+        commit: `git commit -m '${subject}'`,
+        verify: ["git status --short --untracked-files=all", "git --no-pager log -1 --oneline"],
+      },
+    };
+    const registry = createCommitWorkflowRegistry();
+    const current = { ...scope("executor"), root: repo };
+    await registry.observePrompt({ sessionID: SESSION, prompt: { text: "comitea" } }, async () => current);
+    await registry.prepare(manifest, {
+      sessionID: SESSION, agent: "malahor", messageID: "msg_commit", id: "call_commit_prepare",
+    }, current, { assert: async (request) => {
+      const nativeInput: Record<string, unknown> = { ...request, effect: "allow" };
+      await evaluatePlanningPermission(nativeInput, options, storage, undefined, registry);
+    } }, async () => current);
+
+    await evaluatePlanningTool({
+      sessionID: SESSION,
+      agent: "malahor",
+      messageID: "msg_gate",
+      id: "call_gate",
+      tool: "shell",
+      input: { command: manifest.commands.diagnostics[0], workdir: repo },
+    }, options, storage, undefined, undefined, registry);
+    const mismatched: Record<string, unknown> = {
+      sessionID: SESSION,
+      action: "bash",
+      resources: [manifest.commands.diagnostics[0]],
+      metadata: { command: manifest.commands.diagnostics[0] },
+      source: { type: "tool", messageID: "msg_other", id: "call_other" },
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(mismatched, options, storage, undefined, registry);
+
+    expect(mismatched.effect).toBe("deny");
+    expect(String(mismatched.message)).toContain("COMMIT_GRANT_MISMATCH");
+    expect(String(mismatched.message)).not.toContain("NO_ACTIVE_PLAN");
+  });
+
+  test("una edición o un comando diferente invalida el grant y vuelve a exigir Planning", async () => {
+    configure("ejecutar");
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    const target = path.join(repo, "src", "a.ts");
+    fs.writeFileSync(target, "export const a = 1;\n", "utf8");
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+      scripts: { typecheck: "tsc --noEmit", test: "bun test", build: "bun build src/a.ts --outdir dist" },
+    }));
+    const subject = "🐛 fix(git): corrige autorización";
+    const manifest: CommitPreparationInput = {
+      paths: ["src/a.ts"], subject,
+      commands: {
+        diagnostics: ["bun run typecheck"], tests: ["bun test"], build: ["bun run build"],
+        stage: "git add -- src/a.ts",
+        precommit: `malahor-ai git precommit --message '${subject}' --json`,
+        commit: `git commit -m '${subject}'`,
+        verify: ["git status --short --untracked-files=all", "git --no-pager log -1 --oneline"],
+      },
+    };
+    const registry = createCommitWorkflowRegistry();
+    const current = { ...scope("executor"), root: repo };
+    await registry.observePrompt({ sessionID: SESSION, prompt: { text: "comitea" } }, async () => current);
+    await registry.prepare(manifest, {
+      sessionID: SESSION, agent: "malahor", messageID: "msg_commit", id: "call_commit_prepare",
+    }, current, { assert: async (request) => {
+      const nativeInput: Record<string, unknown> = { ...request, effect: "allow" };
+      await evaluatePlanningPermission(nativeInput, options, storage, undefined, registry);
+      expect(nativeInput.effect).toBe("ask");
+    } }, async () => current);
+
+    const edit = { sessionID: SESSION, action: "edit", resources: [target], effect: "allow" };
+    await evaluatePlanningPermission(edit, options, storage, undefined, registry);
+    expect(edit.effect).toBe("deny");
+    const gate = {
+      sessionID: SESSION,
+      action: "bash",
+      resources: [manifest.commands.diagnostics[0]!],
+      metadata: { command: manifest.commands.diagnostics[0]! },
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(gate, options, storage, undefined, registry);
+    expect(gate.effect).toBe("deny");
+  });
+
   test("las lecturas shell cerradas no requieren plan y pueden variar sin replanificar", async () => {
     configure("ejecutar");
     fs.mkdirSync(path.join(repo, "src"), { recursive: true });
@@ -802,6 +995,33 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: target } }, options, storage)).rejects.toThrow();
   });
 
+  test("malahor-diagnostico se ejecuta directamente sin plan; la delegación constructiva no", async () => {
+    const diagnostic = {
+      sessionID: SESSION,
+      action: "subagent",
+      resources: ["malahor-diagnostico"],
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(diagnostic, options, storage);
+    expect(diagnostic.effect).toBe("allow");
+    await expect(evaluatePlanningTool({
+      sessionID: SESSION,
+      agent: "malahor",
+      tool: "subagent",
+      input: { agent: "malahor-diagnostico" },
+    }, options, storage)).resolves.toBeUndefined();
+
+    const testing = { ...diagnostic, resources: ["malahor-testing"], effect: "allow" };
+    await evaluatePlanningPermission(testing, options, storage);
+    expect(testing.effect).toBe("deny");
+    await expect(evaluatePlanningTool({
+      sessionID: SESSION,
+      agent: "malahor",
+      tool: "subagent",
+      input: { agent: "malahor-testing" },
+    }, options, storage)).rejects.toThrow();
+  });
+
   test("comandos y subagentes deben coincidir exactamente en permission y tool", async () => {
     for (const [action, tool, key, resource] of [
       ["shell", "shell", "command", "echo fixture"],
@@ -813,7 +1033,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       await evaluatePlanningPermission(allowed, options, storage);
       expect(allowed.effect).toBe("allow");
       await evaluatePlanningTool({ sessionID: SESSION, tool, input: { [key]: resource } }, options, storage);
-      const changed = action === "shell" ? "echo other" : "malahor-diagnostico";
+      const changed = action === "shell" ? "echo other" : "malahor-unknown";
       const wrong = { ...allowed, effect: "allow", resources: [changed] };
       await evaluatePlanningPermission(wrong, options, storage);
       expect(wrong.effect).toBe("deny");
@@ -1037,7 +1257,7 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       ["bash", "echo fixture", "echo other"],
       ["write", "file.ts", "other.ts"],
       ["patch", "file.ts", "other.ts"],
-      ["task", "malahor-testing", "malahor-diagnostico"],
+      ["task", "malahor-testing", "malahor-unknown"],
     ] as const) {
       const allowed = { sessionID: SESSION, action, resources: [resource], effect: "allow" };
       await evaluatePlanningPermission(allowed, options, storage);
@@ -1279,10 +1499,14 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     };
     const schema = harness.definitions.get("plan")?.input as Schema;
     const sorted = (items: string[] | undefined) => [...(items ?? [])].sort();
-    expect(sorted(schema.required)).toEqual(sorted(["level", "summary", "steps", "presentation", "actions"]));
-    expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted(["level", "summary", "steps", "presentation", "actions", "dependencies"]));
+    expect(sorted(schema.required)).toEqual(sorted([
+      "level", "specRef", "specHash", "summary", "steps", "presentation", "actions",
+    ]));
+    expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted([
+      "level", "specRef", "specHash", "summary", "steps", "presentation", "actions", "dependencies",
+    ]));
     expect(schema.additionalProperties).toBe(false);
-    expect(schema.properties?.level?.enum).toEqual([0, 1, 2]);
+    expect(schema.properties?.level?.enum).toEqual([1, 2]);
     expect(sorted(schema.properties?.presentation?.required)).toEqual(sorted([
       "objective", "outcome", "steps", "impact", "risk", "exclusions", "completionCriteria",
     ]));
@@ -1319,7 +1543,13 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(runSchema.additionalProperties).toBe(false);
 
     const { level: _level, ...withoutLevel } = input();
-    await expect(harness.execute("plan", withoutLevel)).rejects.toThrow(/level 0, 1 o 2/i);
+    await expect(harness.execute("plan", withoutLevel)).rejects.toThrow(/level 1 o 2/i);
+    const { specHash: _specHash, ...withoutSpecHash } = input();
+    await expect(harness.execute("plan", withoutSpecHash)).rejects.toThrow(/specRef|specHash|SDD/i);
+    await expect(harness.execute("plan", { ...input(), specHash: "0".repeat(64) }))
+      .rejects.toThrow(/SHA-256|versión/i);
+    await expect(harness.execute("plan", { ...input(), specRef: "Product/not-sdd.md" }))
+      .rejects.toThrow(/SDD|documentación canónica/i);
   });
 
   test("malahor_plan guarda estado v5 ligado al turno y rechaza estados v3", async () => {
@@ -1332,6 +1562,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(records.has(planKey(SESSION))).toBe(true);
     const state = records.get(planKey(SESSION)) as PlanState;
     expect(state.version).toBe(5);
+    expect(state).toMatchObject({ specRef: SPEC_REF, specHash: SPEC_HASH });
     expect(state.plan.presentation).toEqual(input().presentation);
     expect(planResult.metadata).toMatchObject({
       planID: state.planID, revision: state.revision, digest: state.digest, phase: state.phase,
@@ -1513,56 +1744,16 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(harness.approvals).toHaveLength(0);
   });
 
-  test("nivel 0 conserva plan foreground y aprobación go, y rechaza rutas protegidas", async () => {
+  test("la tool no crea planes nivel 0; las acciones puntuales quedan fuera de Planning", async () => {
     configure("ejecutar");
-    fs.writeFileSync(path.join(repo, "file.ts"), "export const value = 1;\n");
     const harness = await registeredTools();
-    const planCall = call(SESSION, "malahor", "msg_level_zero_plan");
-    const result = await harness.execute("plan", levelZeroInput(), planCall);
-    const state = records.get(planKey(SESSION)) as PlanState;
-
-    expect(state.plan.level).toBe(0);
-    expect(foregroundMarkdown(result.content)).toContain("nivel 0");
-    expect(foregroundMarkdown(result.content)).not.toMatch(/^## Ruta$/m);
-    const edit = path.join(repo, "file.ts");
-    const before = { sessionID: SESSION, action: "edit", resources: [edit], effect: "allow" };
-    await evaluatePlanningPermission(before, options, storage);
-    expect(before.effect).toBe("deny");
-    await harness.execute("run", {}, call(SESSION, "malahor", "msg_level_zero_go"));
-    const after = { ...before, effect: "allow" };
-    await evaluatePlanningPermission(after, options, storage);
-    expect(after.effect).toBe("allow");
-
-    fs.mkdirSync(path.join(repo, ".github", "workflows"), { recursive: true });
-    const workflow = path.join(repo, ".github", "workflows", "ci.yml");
-    fs.writeFileSync(workflow, "name: ci\n");
-    await expect(harness.execute("plan", {
-      ...levelZeroInput(),
-      actions: [{ action: "edit", resource: workflow }],
-    }, call(SESSION, "malahor", "msg_level_zero_infra"))).rejects.toThrow(/nivel 0|protegida/i);
-    await expect(harness.execute("plan", {
-      ...levelZeroInput(),
-      actions: [{ action: "edit", resource: path.join(repo, "missing.ts") }],
-    }, call(SESSION, "malahor", "msg_level_zero_missing"))).rejects.toThrow(/nivel 0|existente/i);
-    await expect(harness.execute("plan", {
-      ...levelZeroInput("shell"),
-      actions: [{ action: "shell", resource: "sudo npm install left-pad" }],
-    }, call(SESSION, "malahor", "msg_level_zero_install"))).rejects.toThrow(/nivel 0|instala/i);
-    await expect(harness.execute("plan", {
-      ...levelZeroInput("shell"),
-      actions: [{ action: "shell", resource: "rm -rf .sandbox" }],
-    }, call(SESSION, "malahor", "msg_level_zero_destructive"))).rejects.toThrow(/nivel 0|destructivo/i);
-
-    if (process.platform !== "win32") {
-      const outside = path.join(root, "outside.ts");
-      const linkedDirectory = path.join(repo, "linked-outside");
-      fs.writeFileSync(outside, "export const outside = true;\n");
-      fs.symlinkSync(root, linkedDirectory, "dir");
-      await expect(harness.execute("plan", {
-        ...levelZeroInput(),
-        actions: [{ action: "edit", resource: path.join(linkedDirectory, "outside.ts") }],
-      }, call(SESSION, "malahor", "msg_level_zero_symlink"))).rejects.toThrow(/nivel 0|proyecto/i);
-    }
+    await expect(harness.execute(
+      "plan",
+      levelZeroInput(),
+      call(SESSION, "malahor", "msg_level_zero_rejected"),
+    )).rejects.toThrow(/level 1 o 2/i);
+    expect(records.has(planKey(SESSION))).toBe(false);
+    expect(harness.approvals).toHaveLength(0);
   });
 
   test("plan_control pausa, reanuda y completa sin ampliar efectos", async () => {
@@ -1775,7 +1966,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(text).toMatch(/sin remediacion verificable[\s\S]*no inventes lineas ni codigo/i);
     expect(text).toMatch(/edicion manual[\s\S]*revalidar/i);
     expectProgressiveDisclosureContract(text);
-    expectLevelZeroContract(text);
+    expectNativeActionContract(text);
     const absent: Record<string, unknown> = { sessionID: SESSION, agent: "malahor", system: [] };
     await injectPlanningInstructions(absent, options);
     expect((absent.system as Array<{ text: string }>)[0]?.text).toContain("no ejecutes");
@@ -1820,7 +2011,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/no inventes n[uú]meros de l[ií]nea, contenido ni c[oó]digo/i);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/modificaci[oó]n manual[\s\S]*revalida/i);
     expectProgressiveDisclosureContract(MALAHOR_RUNTIME_PROTOCOL);
-    expectLevelZeroContract(MALAHOR_RUNTIME_PROTOCOL);
+    expectNativeActionContract(MALAHOR_RUNTIME_PROTOCOL);
   });
 
   test("plugin V2 registra tools y hooks con un host estructural sintético, sin instalacion", async () => {
@@ -1845,7 +2036,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       storage,
     });
     try {
-      expect(definitions).toEqual(["plan", "run", "plan_control"]);
+      expect(definitions).toEqual(["plan", "run", "plan_control", "commit_prepare"]);
       expect(hooks.has("permission.evaluate")).toBe(true);
       expect(hooks.has("tool.execute.before")).toBe(true);
       expect(hooks.has("shell.create.before")).toBe(true);

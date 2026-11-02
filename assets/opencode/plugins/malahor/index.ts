@@ -1,9 +1,9 @@
 // malahor-managed
 // @ts-nocheck bundle generado desde src/plugin/index.ts; el source se typechequea con tsconfig.json
 // src/plugin/index.ts
-import fs17 from "node:fs";
+import fs20 from "node:fs";
 import os2 from "node:os";
-import path22 from "node:path";
+import path25 from "node:path";
 
 // src/cli/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -337,6 +337,25 @@ var CONTEXT_LEVELS = [
   "mnemo+graphify+obsidian"
 ];
 var DEFAULT_CONTEXT_LEVEL = "memory+codegraph";
+function resolveContextTarget(paths, aliases, override) {
+  if (override && override.trim()) {
+    const canonicalKey = resolveCanonicalProjectKey(override, aliases);
+    const registered = rootsForProject(paths.projectsFile, canonicalKey);
+    return {
+      name: override.trim(),
+      canonicalKey,
+      root: registered[0] ?? "",
+      registeredRoots: registered
+    };
+  }
+  const project = resolveRegisteredProject(paths, aliases);
+  return {
+    name: project.name,
+    canonicalKey: project.canonicalKey,
+    root: project.root,
+    registeredRoots: rootsForProject(paths.projectsFile, project.canonicalKey)
+  };
+}
 function resolveRegisteredProject(paths, aliases = {}, options = {}) {
   const canonicalKey = options.override?.trim() ? resolveCanonicalProjectKey(options.override, aliases) : resolveProjectHint(paths, aliases, options.projectHint);
   const absoluteTargets = (options.targetPaths ?? []).map((target) => path4.resolve(paths.cwd, target));
@@ -5151,6 +5170,8 @@ var KNOWN_OPENCODE_TOOLS = new Set([
   "malahor_plan",
   "malahor_run",
   "malahor_plan_control",
+  "malahor_commit_prepare",
+  "commit_prepare",
   "invalid"
 ]);
 function commandMatches(pattern, value) {
@@ -6265,23 +6286,27 @@ Proyecto y contexto
 Intervención y reparación
 - Respeta el nivel de intervención efectivo (ejecutar, guiar o acompanar) y la verificación configurada; una instrucción del usuario no lo rebaja.
 - Hay un único modo efectivo: execution.intervention. acompanar=asesor, guiar=asistente, ejecutar=ejecutor. No equivale a Plan/Build de OpenCode; el campo mode legado no lo modifica.
-- Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. Asistente: guía por pasos y dos confirmaciones distintas (revisión del plan, luego orden de ejecución). Ejecutor: plan visible y aprobación previa del plan para ejecutar. La autorización del plan no caduca por tiempo; si cambian revisión, efectos, proyecto, modo o política, deja de autorizar.
-- Cada plan declara nivel 0, 1 o 2 dentro de su payload firmado. Nivel 0 usa un plan mínimo visible y conserva la aprobación posterior go: nunca ejecuta en el turno de presentación ni elimina malahor_run.
-- Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentación ceremonial. Tras go ejecuta el alcance aprobado en una sola pasada y usa validación enfocada; un commit conserva excepcionalmente diagnóstico, tests, build y hooks completos.
-- Una inspección puramente read-only reconocida por la política cerrada se ejecuta sin plan y sin go; no extiendas esta excepción a comandos ambiguos, mutantes, remotos, indirectos o fuera de la raíz autorizada.
+- Asesor: solo concepto, sin pasos ni ejecución, aunque se pida. En asistente y ejecutor las confirmaciones de Planning aplican únicamente al trabajo considerable derivado de SDD; no conviertas cada mutación en un plan.
+- Una inspección puramente read-only reconocida por la política cerrada se ejecuta sin plan, go ni aprobación redundante. Incluye lecturas/listados cerrados, Git local read-only y el especialista gestionado malahor-diagnostico; no extiendas esta excepción a comandos ambiguos, mutantes, remotos, indirectos o fuera de la raíz autorizada.
+- Una acción puntual de bajo riesgo no usa Planning ni SDD: en la primera versión solo admite una edición de un archivo regular existente, dentro de la raíz, sin symlinks, creación, borrado, movimiento, secretos, infraestructura ni shell mutante. El harness solicita una única aprobación nativa ligada a sesión, proyecto, política, tool call, efecto y recurso exactos, con save vacío.
+- Si el host ya mostró un ASK exacto para esa llamada, reutilízalo sin producir un segundo diálogo. Después de aprobar, recalcula scope, política, ruta e intención; un cambio de turno, llamada, manifest o control invalida la acción.
+- El trabajo considerable se expande primero mediante SDD. Solo entonces usa malahor_plan con nivel 1 o 2, specRef bajo SDD/ y specHash SHA-256 de la versión documental canónica. Los estados históricos de nivel 0 siguen legibles, pero no se crean nuevos.
+- La autorización de un plan no caduca por tiempo; un cambio de revisión, efectos, proyecto, modo o política la invalida. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
 - Sustituir una lectura por otra equivalente no exige una revisión del plan cuando no cambian efectos, recursos ni riesgo. Solo un cambio material de efectos, recursos o riesgo exige una nueva revisión proporcional.
 - Los intentos técnicos equivalentes reutilizan la misma revisión V5 y crean otro attempt; solo un cambio material exige otro plan. ASK, DENY y controles críticos nunca se reintentan automáticamente.
-- Un commit explícito usa un único plan nivel 0 y un único go; después ejecuta diagnóstico, tests, build, stage exacto y commit ordinario local en una sola pasada, sin planes o confirmaciones redundantes.
+- Un commit explícito es un flujo especializado sin Planning: la orden inequívoca “commit”, “comitea” o “/malahor-commit” permite preparar el manifest, pero no es el grant ejecutable. No presenta malahor_plan, no invoca malahor_run y no espera go.
+- El hook de prompt invalida cualquier solicitud o grant de commit anterior y captura solo esa orden cerrada; menciones, preguntas, “continúa”, “listo” o “cierra la fase” no autorizan stage ni commit.
+- Tras inspeccionar y prevalidar el subject con git-commit-text, usa malahor_commit_prepare para validar el manifest y solicitar una única aprobación nativa ligada a sesión, proyecto, revisión de política, rutas y comandos exactos de diagnóstico, tests, build, stage, precommit, commit y revalidación. Cualquier cambio de prompt, scope, cwd, path, subject o comando invalida el grant; no sustituyas su ausencia por un plan.
 - Usa divulgación progresiva: el resumen debe entenderse en unos 30 segundos con objetivo, resultado, hasta cinco pasos breves, impacto, riesgo y “Qué debes hacer ahora” narrado en lenguaje técnico comprensible.
 - La vista normal no incrusta IDs, comandos ni el anexo técnico; tampoco muestra rutas exactas. Ante un riesgo alto o una categoría crítica de seguridad, datos, arquitectura o destrucción, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran únicamente mediante /malahor-plan detalles.
 - En asistente y ejecutor, despues de malahor_plan copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno. Una traza u output tecnico del tool en background no cuenta como presentacion. No invoques malahor_run en la misma respuesta: espera una solicitud posterior del usuario (go, implementa o equivalente). Una solicitud previa a ver el plan solo pide prepararlo y nunca aprueba un plan aun no visto.
 - malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible, pero debe coincidir exactamente y no sustituye las validaciones de scope, fase, turno o revision.
 - El usuario puede consultar o cambiar el modo persistido mediante /malahor-modo: status, preview <asesor|asistente|ejecutor> opcional, o <asesor|asistente|ejecutor> con confirmacion nativa. Es un comando de UI, no una tool del agente; no lo invoques por el usuario. No muestra tokens: el modo nuevo aplica desde el siguiente turno de la misma sesion e invalida todos los planes anteriores.
-- Donde exista adaptador, usa malahor_plan y malahor_run; las confirmaciones de UI son interacciones prácticas, no prueba criptográfica de identidad humana. No las uses para sobrepasar un DENY/ASK de otros guardrails ni como autorización de stage, commit, push o actualización real.
+- Usa malahor_plan y malahor_run solo para trabajo considerable originado por SDD. Las aprobaciones nativas de acciones puntuales y manifests de commit son interacciones prácticas, no prueba criptográfica de identidad humana; nunca sobrepasan un DENY/ASK especializado ni autorizan otros efectos.
 - Si un guardrail bloquea una lectura o edición, detente y no pruebes rutas indirectas. Cuando el hook entregue una remediación estructurada y saneada, explícasela a una persona no desarrolladora con este formato: abre el archivo y la línea indicados, identifica la referencia saneada, reemplaza el bloque completo por el bloque propuesto, guarda y pide revalidar.
 - No pidas a la persona interpretar variables, payloads o sintaxis si existe un bloque de reemplazo verificable. Si el hook no aporta esa evidencia, no inventes números de línea, contenido ni código: un ASK requiere aprobación; un hard DENY no admite instrucciones de ejecución; y un secreto real o ambiguo exige retirada, rotación o gestor de secretos, nunca ofuscación.
 - Una modificación manual reportada por la persona no demuestra éxito ni amplía autorización. Relee o revalida el recurso mediante el guardrail antes de reanudar el plan o afirmar que quedó corregido.
-- Un "go" posterior al plan solicita su aprobación e inicia la ejecución si procede. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
+- Un "go" solo aplica después de mostrar un plan derivado de SDD: solicita su aprobación e inicia la ejecución si procede. Nunca autoriza una acción puntual ni un commit. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos.
 - Los estados de planning viven en ctx.storage de OpenCode y son independientes de Mnemo. Una revisión terminal deja de actuar como plan activo: primero se archiva completa, firmada y comprimida; solo después se retiran copias vivas que aún coincidan exactamente. Sin verificación o sin capacidades de scan/remove se conservan las copias originales.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni las escrituras documentales autorizadas mediante docs_*.
 - Memoria rutinaria, checkpoints, context save y lecturas/escrituras documentales autorizadas siguen el flujo automático del agente; las confirmaciones explícitas quedan para operaciones críticas o destructivas.
@@ -6312,9 +6337,9 @@ Memoria y documentación
 - Antes de cambiar, pausar o compactar, conserva un checkpoint breve con objetivo, estado, decisiones, bloqueos, validaciones y próximo paso.
 
 Construcción y SDD
-- Elige el nivel proporcional y decláralo en malahor_plan: nivel 0 para cambios triviales y de alcance inequívoco; nivel 1 para cambios normales con objetivo, criterios, implementación y revisión; nivel 2 para arquitectura, migraciones, seguridad o alto riesgo, con SDD completo y trazabilidad.
-- Nivel 0 mantiene plan mínimo + go, pero omite Discovery/SDD, subagentes, documentación de proceso y fases ceremoniales. Admite como máximo un archivo existente, riesgo bajo, sin categorías críticas, dependencias, infraestructura, instalación, publicación, despliegue ni destrucción; si el alcance crece, presenta una revisión de nivel 1 o 2.
-- Explica el nivel elegido y reevalúalo si cambia el riesgo. No impongas diez fases a un cambio trivial.
+- Las acciones puntuales no crean plan ni documentación ceremonial. Si el alcance deja de ser puntual, detente y expándelo primero mediante SDD; no auto-planifiques para rescatar una llamada ambigua.
+- Los planes nuevos declaran nivel 1 para trabajo considerable normal o nivel 2 para arquitectura, migraciones, seguridad o alto riesgo, siempre con specRef/specHash SDD y trazabilidad.
+- Explica el nivel elegido y reevalúalo si cambia el riesgo. No impongas Planning a una lectura o edición puntual elegible.
 - Respeta specs y metodologías existentes como contexto; no crees un flujo paralelo ni sustituyas la metodología del proyecto sin acuerdo.
 - Si existe una definición aprobada de Discovery, reutiliza objetivos, criterios, alcance y decisiones por referencia; no la redefinas ni pidas doble aprobación.
 - La verificación completa (diagnóstico, testing y build) se ejecuta al pedir commit o cuando el usuario la solicite explícitamente, no en cada interacción.
@@ -6338,10 +6363,11 @@ Principio de socio
 
 Git y delegación
 - Git es local-only. Nunca ejecutes push, pull, fetch, clone, ls-remote, remote update, submódulos remotos ni equivalentes que contacten un remoto. Son hard DENY incluso si el usuario los pide; ningún plan, perfil, token, aprobación, metadata o fallback los habilita.
-- Stage y commit requieren una orden explícita del usuario; “continúa”, “listo” o “cierra la fase” no autorizan esas acciones. Un pedido inequívoco de commit o /malahor-commit se presenta como plan nivel 0 breve y espera go; después, tras gates verdes, autoriza el stage exclusivo de las rutas revisadas y un commit ordinario local sin otra confirmación humana.
+- Stage y commit requieren una orden explícita del usuario. “comitea” inicia, sin plan ni go, la preparación del flujo exacto; una única aprobación nativa del manifest habilita después gates completos, stage exclusivo de rutas revisadas y un commit ordinario local.
 - Propaga esa orden mediante la intención estructurada commit de malahor_hook_check. Esa intención solo cubre el stage exacto revisado y el commit ordinario; no autoriza amend, reset, rebase, cherry-pick, merge ni ramas.
 - Amend, reset, rebase, cherry-pick, merge y creación/cambio de ramas son locales y permitidos solo con una orden específica para esa operación. Las variantes destructivas exigen preview con target visible y un ASK/aprobación de un solo uso.
-- Al pedir commit/comitea o /malahor-commit: presenta primero el plan nivel 0 mínimo y espera go. Luego, en una sola pasada, revisa status/diff; ejecuta diagnóstico, testing y build; detente si falla; stagea solo las rutas revisadas con intent=commit; valida el staged y el mensaje con malahor-ai git precommit; vuelve a validar git.commit.before con intent=commit; ejecuta git commit sin --no-verify; relee status y git --no-pager log -1.
+- Al pedir commit/comitea o /malahor-commit: carga git-commit-text; revisa status/diff; prevalida el subject; determina rutas y comandos literales; usa malahor_commit_prepare y espera la aprobación nativa del manifest; ejecuta diagnóstico, testing y build; detente si falla; stagea solo las rutas revisadas con intent=commit; valida staged y mensaje con malahor-ai git precommit; vuelve a validar git.commit.before con intent=commit; ejecuta git commit sin --no-verify; relee status y git --no-pager log -1.
+- Si malahor_commit_prepare o la evidencia estructural no están disponibles, detente y reporta que el runtime requiere actualización o recarga. No uses un plan, un token humano ni una confirmación adicional como fallback.
 - Si y solo si precommit quedó verde, el staged y su huella siguen exactos y el intento real de git commit fue bloqueado por el host/harness, genera el fallback con malahor-ai git commit-fallback. Declara que el agente no ejecutó el commit, conserva subject/cuerpo/cwd, nunca uses --no-verify y revalida status/log después de la ejecución humana. Un DENY/ASK de contenido o política no admite fallback.
 - Antes de operaciones sensibles usa el flujo de hooks de Malahor. Si recibes DENY, detente; si recibes ASK pendiente, solicita evidencia humana verificable.
 - Un único primario coordina y construye. Los especialistas gestionados son subagentes hermanos, con contexto, restricciones, permisos y criterios explícitos; no delegan entre sí.
@@ -6389,8 +6415,9 @@ function isRecord4(value) {
 }
 
 // src/plugin/planning.ts
-import fs16 from "node:fs";
-import path20 from "node:path";
+import { createHash as createHash13 } from "node:crypto";
+import fs19 from "node:fs";
+import path23 from "node:path";
 
 // src/cli/core/config.ts
 import { createHash as createHash5 } from "node:crypto";
@@ -9458,10 +9485,15 @@ function normalizeActionIntents(value, actions, project) {
 function normalizeSpecReference(specRef, specHash) {
   if (specRef === undefined && specHash === undefined)
     return {};
-  if (typeof specRef !== "string" || !specRef.trim() || specRef.length > 1024 || /[\u0000\r\n]/u.test(specRef) || typeof specHash !== "string" || !/^[a-f0-9]{64}$/.test(specHash)) {
-    throw new Error("Referencia de especificación no evaluable.");
+  if (typeof specRef !== "string" || typeof specHash !== "string") {
+    throw new Error("Referencia SDD no evaluable.");
   }
-  return { specRef: specRef.trim(), specHash };
+  const normalizedRef = specRef.trim();
+  const segments = normalizedRef.split("/");
+  if (!normalizedRef || normalizedRef.length > 1024 || /[\u0000\r\n]/u.test(normalizedRef) || !normalizedRef.startsWith("SDD/") || !normalizedRef.endsWith(".md") || normalizedRef.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..") || !/^[a-f0-9]{64}$/.test(specHash)) {
+    throw new Error("Referencia SDD no evaluable: usa un Markdown relativo bajo SDD/ y su SHA-256.");
+  }
+  return { specRef: normalizedRef, specHash };
 }
 function normalizePlanLevel(value) {
   if (value === undefined)
@@ -9601,7 +9633,12 @@ function validOptionalTimes(value) {
   return ["reviewedAt", "authorizedAt", "startedAt", "pausedAt", "blockedAt", "completedAt", "revokedAt", "supersededAt"].every((key) => value[key] === undefined || validTime(value[key]));
 }
 function validSpecReference(specRef, specHash) {
-  return specRef === undefined && specHash === undefined || typeof specRef === "string" && specRef.length > 0 && specRef.length <= 1024 && !/[\u0000\r\n]/u.test(specRef) && typeof specHash === "string" && /^[a-f0-9]{64}$/.test(specHash);
+  try {
+    const normalized = normalizeSpecReference(specRef, specHash);
+    return specRef === undefined && specHash === undefined ? normalized.specRef === undefined && normalized.specHash === undefined : normalized.specRef === specRef && normalized.specHash === specHash;
+  } catch {
+    return false;
+  }
 }
 function specReferenceFromState(value) {
   return typeof value.specRef === "string" && typeof value.specHash === "string" ? { specRef: value.specRef, specHash: value.specHash } : {};
@@ -9660,6 +9697,7 @@ var AUTHORIZATION_DENIAL_CODES = [
   "PROTECTED_APPROVAL_REQUIRED",
   "HOST_ASK",
   "HOST_DENY",
+  "COMMIT_GRANT_MISMATCH",
   "CRITICAL_CONTROL_UNAVAILABLE"
 ];
 
@@ -9745,6 +9783,7 @@ function authorizationMessage(code, detail) {
     PROTECTED_APPROVAL_REQUIRED: "Malahor: la operación protegida requiere su aprobación específica.",
     HOST_ASK: "Malahor: el host requiere una aprobación humana específica.",
     HOST_DENY: "Malahor: el host denegó la operación.",
+    COMMIT_GRANT_MISMATCH: "Malahor: la llamada no coincide con el paso vigente del grant de commit.",
     CRITICAL_CONTROL_UNAVAILABLE: "Malahor: un control crítico de autorización no está disponible."
   };
   return detail ? `${base[code]} ${detail}` : base[code];
@@ -10367,6 +10406,149 @@ function denied(reason) {
   return { readOnly: false, reason };
 }
 
+// src/docs/resolver.ts
+import fs16 from "node:fs";
+import path20 from "node:path";
+var MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
+function resolveDocsProject(paths, aliases = {}, requestedProject, pathOverride) {
+  const target = resolveContextTarget(paths, aliases, requestedProject);
+  const projects = loadProjectsFile(paths.projectsFile);
+  return resolveDocsConfiguration(paths, target.canonicalKey, projects, pathOverride);
+}
+function resolveDocsConfiguration(paths, canonicalKey, projects, pathOverride) {
+  const entry = projects[canonicalKey];
+  if (!entry || !entry.roots?.length) {
+    throw new Error(`El proyecto ${canonicalKey} no esta registrado con una raiz de codigo.`);
+  }
+  assertProjectKey(canonicalKey);
+  const caseCollision = Object.keys(projects).find((key) => key !== canonicalKey && key.toLowerCase() === canonicalKey.toLowerCase());
+  if (caseCollision)
+    throw new Error(`Las claves ${canonicalKey} y ${caseCollision} colisionan en filesystems sin distincion de mayusculas.`);
+  const configured = pathOverride?.trim() || entry.docs?.path;
+  const plannedVaultRoot = path20.resolve(paths.vaultDir);
+  assertNoSymlinkComponents(plannedVaultRoot);
+  const vaultRoot = canonicalPlannedPath3(plannedVaultRoot);
+  const plannedDefaultRoot = path20.join(vaultRoot, "projects", canonicalKey);
+  assertNoSymlinkComponents(plannedDefaultRoot);
+  const defaultRoot = canonicalPlannedPath3(plannedDefaultRoot);
+  const plannedConfiguredRoot = configured ? path20.resolve(configured) : undefined;
+  if (plannedConfiguredRoot)
+    assertNoSymlinkComponents(plannedConfiguredRoot);
+  const configuredRoot = plannedConfiguredRoot ? canonicalPlannedPath3(plannedConfiguredRoot) : undefined;
+  const source = configuredRoot && !samePath(configuredRoot, defaultRoot) ? "override" : "default";
+  const projectRoot = source === "override" ? configuredRoot : defaultRoot;
+  const repositoryRoots = Object.values(projects).flatMap((project) => project.roots ?? []);
+  assertExternalDocsRoot(projectRoot, repositoryRoots);
+  if (source === "default") {
+    assertExternalDocsRoot(vaultRoot, repositoryRoots);
+  } else {
+    assertExternalOverride(projectRoot, paths.malahorHome, vaultRoot);
+  }
+  assertIsolatedProjectRoot(projectRoot, canonicalKey, projects, vaultRoot);
+  return {
+    project: canonicalKey,
+    projectRoot,
+    vaultRoot,
+    source,
+    initialized: secureDirectoryExists(projectRoot)
+  };
+}
+function assertExternalDocsRoot(candidate, repositoryRoots) {
+  const root = canonicalPlannedPath3(candidate);
+  if (isSandboxPath(root))
+    return;
+  const containingRepository = repositoryAncestor(root);
+  if (containingRepository) {
+    throw new Error(`La raiz documental debe estar fuera de repositorios: ${root} esta dentro de ${containingRepository}.`);
+  }
+  for (const repository of repositoryRoots) {
+    const codeRoot = canonicalPlannedPath3(repository);
+    if (isWithin4(root, codeRoot) || isWithin4(codeRoot, root)) {
+      throw new Error(`La raiz documental debe estar fuera de repositorios: ${root} entra en conflicto con ${codeRoot}.`);
+    }
+  }
+}
+function isSandboxPath(value) {
+  return path20.resolve(value).split(path20.sep).includes(".sandbox");
+}
+function assertProjectKey(value) {
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?$/.test(value) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value)) {
+    throw new Error(`Clave canonica no portable para el vault: ${value}`);
+  }
+}
+function canonicalPlannedPath3(value) {
+  const resolved = path20.resolve(value);
+  let current = resolved;
+  const suffix = [];
+  while (!fs16.existsSync(current)) {
+    const parent = path20.dirname(current);
+    if (parent === current)
+      break;
+    suffix.unshift(path20.basename(current));
+    current = parent;
+  }
+  const canonical3 = fs16.existsSync(current) ? fs16.realpathSync(current) : current;
+  return path20.resolve(canonical3, ...suffix);
+}
+function assertExternalOverride(projectRoot, malahorHome, vaultRoot) {
+  const home = canonicalPlannedPath3(malahorHome);
+  if (isWithin4(projectRoot, home) || isWithin4(home, projectRoot) || isWithin4(projectRoot, vaultRoot) || isWithin4(vaultRoot, projectRoot)) {
+    throw new Error(`El override documental debe ser externo a MALAHOR_HOME: ${projectRoot}`);
+  }
+}
+function assertIsolatedProjectRoot(projectRoot, project, projects, vaultRoot) {
+  for (const [otherProject, entry] of Object.entries(projects)) {
+    if (otherProject === project)
+      continue;
+    assertProjectKey(otherProject);
+    const otherRoot = canonicalPlannedPath3(entry.docs?.path ?? path20.join(vaultRoot, "projects", otherProject));
+    if (isWithin4(projectRoot, otherRoot) || isWithin4(otherRoot, projectRoot)) {
+      throw new Error(`Las raices documentales de ${project} y ${otherProject} se solapan: ${projectRoot} / ${otherRoot}.`);
+    }
+  }
+}
+function secureDirectoryExists(target) {
+  if (!fs16.existsSync(target))
+    return false;
+  assertNoSymlinkComponents(target);
+  const stat = fs16.lstatSync(target);
+  if (stat.isSymbolicLink() || !stat.isDirectory())
+    throw new Error(`La raiz documental no es un directorio real: ${target}`);
+  if (!samePath(fs16.realpathSync(target), path20.resolve(target)))
+    throw new Error(`La raiz documental usa un symlink: ${target}`);
+  return true;
+}
+function repositoryAncestor(target) {
+  for (let current = path20.resolve(target);; current = path20.dirname(current)) {
+    if (fs16.existsSync(path20.join(current, ".git")))
+      return current;
+    if (path20.dirname(current) === current)
+      return;
+  }
+}
+function assertNoSymlinkComponents(target) {
+  for (let current = path20.resolve(target);; current = path20.dirname(current)) {
+    try {
+      if (fs16.lstatSync(current).isSymbolicLink())
+        throw new Error(`Ruta con symlink no permitida: ${current}`);
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    }
+    if (path20.dirname(current) === current)
+      return;
+  }
+}
+function samePath(left, right) {
+  const normalizedLeft = path20.resolve(left);
+  const normalizedRight = path20.resolve(right);
+  return process.platform === "win32" ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase() : normalizedLeft === normalizedRight;
+}
+function isWithin4(value, root) {
+  const relative = path20.relative(path20.resolve(root), path20.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path20.isAbsolute(relative);
+}
+
 // src/plugin/plan-retention.ts
 import { createHash as createHash9 } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -10976,6 +11158,952 @@ function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// src/plugin/commit-workflow.ts
+import { execFileSync as execFileSync5 } from "node:child_process";
+import { createHash as createHash11 } from "node:crypto";
+import fs17 from "node:fs";
+import path21 from "node:path";
+var COMMIT_COMMAND_MARKER = "<!-- malahor-commit-request:v1 -->";
+var COMMIT_MANIFEST_APPROVAL = "malahor_commit_manifest";
+var COMMIT_GRANT_MISMATCH = "COMMIT_GRANT_MISMATCH";
+var PREPARE_TOOL_NAMES = new Set([
+  "commit_prepare",
+  "malahor_commit_prepare",
+  "malahor.commit_prepare",
+  "malahor:commit_prepare",
+  "malahor-commit-prepare"
+]);
+var SAFE_SCRIPT_NAME = /^(?:typecheck|type-check|lint|check|verify|diagnostic|test|tests|coverage|build|compile|sonar)(?::[a-z0-9._-]+)?$/i;
+var DIRECT_CHECK_EXECUTABLES = new Set([
+  "biome",
+  "cargo",
+  "dotnet",
+  "eslint",
+  "go",
+  "gradle",
+  "gradlew",
+  "jest",
+  "make",
+  "mvn",
+  "mvnw",
+  "node",
+  "prettier",
+  "pytest",
+  "python",
+  "python3",
+  "ruff",
+  "tsc",
+  "vitest"
+]);
+var NETWORK_EXECUTABLES = new Set([
+  "curl",
+  "ftp",
+  "gh",
+  "glab",
+  "nc",
+  "netcat",
+  "scp",
+  "sftp",
+  "ssh",
+  "telnet",
+  "wget"
+]);
+function createCommitWorkflowRegistry() {
+  const requests = new Map;
+  const grants = new Map;
+  const hostAsks = new Map;
+  const pending = new Map;
+  const invalidate = (sessionID) => {
+    requests.delete(sessionID);
+    grants.delete(sessionID);
+    for (const [key, scope] of hostAsks) {
+      if (scope.sessionID === sessionID)
+        hostAsks.delete(key);
+    }
+    for (const [key, evidence] of pending) {
+      if (evidence.scope.sessionID === sessionID)
+        pending.delete(key);
+    }
+  };
+  return {
+    async observePrompt(input, resolveScope) {
+      const sessionID = stringValue5(input.sessionID);
+      if (!sessionID)
+        return { explicit: false };
+      invalidate(sessionID);
+      if (!explicitCommitRequest(promptText(input)))
+        return { explicit: false };
+      const scope = await resolveScope(sessionID);
+      if (!scope || scope.sessionID !== sessionID || scope.mode === "advisor")
+        return { explicit: false };
+      const normalized = normalizeScope(scope);
+      requests.set(sessionID, { scope: normalized });
+      return { explicit: true, project: normalized.project };
+    },
+    observePreparationPermission(input) {
+      if (!isCommitPreparationTool(input.action) || input.scope.mode === "advisor")
+        return false;
+      const call = commitPermissionCall(input.scope.sessionID, input.source);
+      if (!call)
+        return false;
+      if (input.effect === "ask") {
+        hostAsks.set(commitCallKey(call), normalizeScope(input.scope));
+      } else if (input.effect !== "allow") {
+        return false;
+      }
+      return true;
+    },
+    evaluateApprovalPermission(input, currentScope) {
+      const call = commitPermissionCall(stringValue5(input.sessionID), input.source);
+      const resources = Array.isArray(input.resources) ? input.resources : [];
+      if (!call || !currentScope || resources.some((item) => typeof item !== "string"))
+        return false;
+      const evidence = pending.get(commitCallKey(call));
+      if (!evidence || !sameScope(evidence.scope, currentScope) || !sameStringArray(evidence.resources, resources))
+        return false;
+      input.effect = "ask";
+      input.message = `Autoriza un commit local ordinario de ${evidence.paths.length} ruta(s) con subject «${evidence.subject}». La aprobación cubre únicamente el manifest exacto, sus gates, stage y commit local; no autoriza red ni operaciones de historia.`;
+      return true;
+    },
+    async prepare(value, call, currentScope, approval, resolveScope) {
+      if (call.agent !== "malahor")
+        throw new Error("Solo el primario puede preparar un commit estructural.");
+      const request = requests.get(call.sessionID);
+      requests.delete(call.sessionID);
+      grants.delete(call.sessionID);
+      if (!request)
+        throw new Error("No hay una orden explícita de commit vigente para esta sesión.");
+      const scope = normalizeScope(currentScope);
+      if (!sameScope(request.scope, scope) || call.sessionID !== scope.sessionID || scope.mode === "advisor") {
+        throw new Error("La solicitud de commit ya no coincide con la sesión, proyecto, modo o política vigente.");
+      }
+      const prepared = validatePreparation(value, scope.root);
+      const key = commitCallKey(call);
+      const evidence = commitApprovalEvidence(scope, call, prepared);
+      const hostScope = hostAsks.get(key);
+      hostAsks.delete(key);
+      if (hostScope) {
+        if (!sameScope(hostScope, scope)) {
+          throw new Error("La aprobación nativa previa del manifest pertenece a otro scope.");
+        }
+      } else {
+        if (pending.has(key))
+          throw new Error("Ya existe una aprobación de commit pendiente para esta llamada.");
+        pending.set(key, evidence);
+        try {
+          await approval.assert({
+            sessionID: call.sessionID,
+            agent: call.agent,
+            source: { type: "tool", messageID: call.messageID, id: call.id },
+            action: COMMIT_MANIFEST_APPROVAL,
+            resources: evidence.resources,
+            save: []
+          });
+          if (!pending.has(key))
+            throw new Error("La aprobación del manifest fue invalidada antes de preparar el commit.");
+        } finally {
+          pending.delete(key);
+        }
+      }
+      const freshScope = await resolveScope();
+      if (!freshScope || !sameScope(scope, freshScope)) {
+        throw new Error("El proyecto, modo o política cambió durante la aprobación del manifest.");
+      }
+      const freshPrepared = validatePreparation(value, normalizeScope(freshScope).root);
+      if (!sameStringArray(evidence.resources, commitApprovalEvidence(scope, call, freshPrepared).resources)) {
+        throw new Error("El manifest de commit cambió durante la aprobación nativa.");
+      }
+      grants.set(call.sessionID, {
+        scope,
+        commands: freshPrepared.sequence,
+        cursor: 0,
+        consumedCallKeys: new Set
+      });
+      return {
+        paths: [...freshPrepared.paths],
+        subject: freshPrepared.subject,
+        commands: freshPrepared.sequence.length
+      };
+    },
+    authorizeShell(input) {
+      const grant = grants.get(input.sessionID);
+      if (!grant)
+        return { effect: "absent" };
+      const denyMismatch = () => {
+        invalidate(input.sessionID);
+        return { effect: "deny", code: COMMIT_GRANT_MISMATCH };
+      };
+      let scope;
+      let cwd;
+      try {
+        scope = normalizeScope(input);
+        cwd = canonicalDirectory(input.cwd);
+      } catch {
+        return denyMismatch();
+      }
+      const expected = grant.commands[grant.cursor];
+      if (!input.valid || !expected || !sameScope(grant.scope, scope) || cwd !== grant.scope.root || input.command !== expected || !input.messageID.trim() || !input.toolCallID.trim()) {
+        return denyMismatch();
+      }
+      const callKey = commitShellCallKey(input.messageID, input.toolCallID);
+      let step = grant.inFlight;
+      if (!step) {
+        if (grant.consumedCallKeys.has(callKey))
+          return denyMismatch();
+        step = {
+          index: grant.cursor,
+          command: input.command,
+          messageID: input.messageID,
+          toolCallID: input.toolCallID,
+          permissionSeen: false,
+          toolSeen: false
+        };
+        grant.inFlight = step;
+      } else if (step.index !== grant.cursor || step.command !== input.command || step.messageID !== input.messageID || step.toolCallID !== input.toolCallID) {
+        return denyMismatch();
+      }
+      if (input.boundary === "permission")
+        step.permissionSeen = true;
+      else
+        step.toolSeen = true;
+      if (step.permissionSeen && step.toolSeen) {
+        grant.consumedCallKeys.add(callKey);
+        grant.cursor += 1;
+        grant.inFlight = undefined;
+        if (grant.cursor >= grant.commands.length)
+          grants.delete(input.sessionID);
+      }
+      return { effect: "allow" };
+    },
+    invalidate
+  };
+}
+async function registerCommitWorkflowTool(tools, registry, resolveScope, approval) {
+  return tools.transform((editor) => {
+    editor.namespace({ name: "malahor", description: "Flujos estructurales de Malahor" });
+    editor.add({
+      name: "commit_prepare",
+      description: "Consume una orden explícita de commit, valida el manifest exacto y solicita una única aprobación nativa antes de habilitar sus gates. No crea un plan ni usa go.",
+      input: {
+        type: "object",
+        properties: {
+          paths: { type: "array", minItems: 1, maxItems: 200, uniqueItems: true, items: { type: "string" } },
+          subject: { type: "string" },
+          commands: {
+            type: "object",
+            properties: {
+              diagnostics: { type: "array", minItems: 1, maxItems: 12, items: { type: "string" } },
+              tests: { type: "array", minItems: 1, maxItems: 12, items: { type: "string" } },
+              build: { type: "array", minItems: 1, maxItems: 12, items: { type: "string" } },
+              stage: { type: "string" },
+              precommit: { type: "string" },
+              commit: { type: "string" },
+              verify: { type: "array", minItems: 2, maxItems: 2, items: { type: "string" } }
+            },
+            required: ["diagnostics", "tests", "build", "stage", "precommit", "commit", "verify"],
+            additionalProperties: false
+          }
+        },
+        required: ["paths", "subject", "commands"],
+        additionalProperties: false
+      },
+      options: { namespace: "malahor", codemode: false },
+      execute: async (value, call) => {
+        const scope = await resolveScope(call.sessionID);
+        if (!scope)
+          throw new Error("Proyecto registrado/sesión no evaluable: commit bloqueado.");
+        const result = await registry.prepare(value, call, scope, approval, () => resolveScope(call.sessionID));
+        return {
+          content: `Flujo de commit estructural preparado para ${result.paths.length} ruta(s) y ${result.commands} comando(s) exactos. Ejecuta los gates en orden; cualquier diferencia invalida la autorización.`,
+          metadata: {
+            kind: "malahor.commit.grant",
+            version: 1,
+            paths: result.paths.length,
+            commands: result.commands
+          }
+        };
+      }
+    });
+  });
+}
+function isCommitPreparationTool(value) {
+  return PREPARE_TOOL_NAMES.has(value.trim().toLowerCase());
+}
+function validatePreparation(value, projectRoot) {
+  const input = exactRecord(value, ["paths", "subject", "commands"], "Manifest de commit inválido.");
+  if (detectPayloadSecretKinds(JSON.stringify(input)).length > 0) {
+    throw new Error("El manifest de commit contiene material sensible y no puede sellarse.");
+  }
+  const root = canonicalDirectory(projectRoot);
+  const subject = requiredString(input.subject, "Subject de commit ausente.");
+  if (!isValidCommitSubject(subject))
+    throw new Error("Subject de commit inválido o no prevalidado.");
+  const rawPaths = stringArray2(input.paths, 1, 200, "El commit requiere rutas exactas.");
+  const paths = [...new Set(rawPaths.map((candidate) => validateCommitPath(candidate, root)))].sort(compareText3);
+  if (paths.length !== rawPaths.length)
+    throw new Error("Las rutas del commit deben ser únicas y canónicas.");
+  const commands = exactRecord(input.commands, [
+    "diagnostics",
+    "tests",
+    "build",
+    "stage",
+    "precommit",
+    "commit",
+    "verify"
+  ], "Comandos de commit incompletos.");
+  const diagnostics = stringArray2(commands.diagnostics, 1, 12, "Falta el diagnóstico del commit.");
+  const tests = stringArray2(commands.tests, 1, 12, "Faltan las pruebas del commit.");
+  const build = stringArray2(commands.build, 1, 12, "Falta el build del commit.");
+  for (const command of [...diagnostics, ...tests, ...build])
+    validateGateCommand(command, root);
+  const stage = requiredString(commands.stage, "Comando de stage ausente.");
+  const precommit = requiredString(commands.precommit, "Comando precommit ausente.");
+  const commit = requiredString(commands.commit, "Comando de commit ausente.");
+  const verify = stringArray2(commands.verify, 2, 2, "La revalidación requiere status y log exactos.");
+  validateStageCommand(stage, paths, root);
+  validatePrecommitCommand(precommit, subject);
+  validateCommitCommand(commit, subject, root);
+  validateVerifyCommands(verify, root);
+  const sequence = [...diagnostics, ...tests, ...build, stage, precommit, commit, ...verify];
+  if (new Set(sequence).size !== sequence.length)
+    throw new Error("Cada comando del grant debe ocupar una etapa única.");
+  return { paths, subject, sequence };
+}
+function validateCommitPath(value, root) {
+  const raw = value.normalize("NFC").trim();
+  if (!raw || raw.includes("\x00") || path21.isAbsolute(raw) || /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("~") || /[*?\[\]{}]/.test(raw)) {
+    throw new Error(`Ruta de commit no literal: ${raw || "<vacía>"}.`);
+  }
+  const absolute = path21.resolve(root, raw);
+  if (!inside4(absolute, root) || absolute === root)
+    throw new Error(`Ruta de commit fuera del proyecto: ${raw}.`);
+  if (classifyInfrastructurePath(root, absolute).protected) {
+    throw new Error(`La autorización estructural de commit no cubre infraestructura: ${raw}.`);
+  }
+  if (fs17.existsSync(absolute)) {
+    const stat = fs17.lstatSync(absolute);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw new Error(`El stage exacto requiere archivos regulares: ${raw}.`);
+    if (!inside4(fs17.realpathSync(absolute), root))
+      throw new Error(`Ruta de commit resuelve fuera del proyecto: ${raw}.`);
+  } else if (!trackedDeletion(root, raw)) {
+    throw new Error(`La ruta de commit no existe ni es una eliminación tracked: ${raw}.`);
+  }
+  return path21.relative(root, absolute).split(path21.sep).join("/");
+}
+function validateGateCommand(command, root) {
+  const tokens = closedCommand(command);
+  if (/[*?\[\]{}]/.test(command))
+    throw new Error("Los gates de commit no admiten expansión del shell.");
+  if (!safeGateTokenPaths(tokens, root))
+    throw new Error("Un gate de commit referencia una ruta fuera del proyecto.");
+  if (classifyInfrastructureCommand(command).protected)
+    throw new Error("Los gates de commit no ejecutan infraestructura, publicación ni despliegue.");
+  if (installationCommand(command))
+    throw new Error("Los gates de commit no instalan ni actualizan dependencias.");
+  if (destructiveCommand(command))
+    throw new Error("Los gates de commit no admiten comandos destructivos.");
+  const executable = executableName2(tokens[0] ?? "");
+  if (NETWORK_EXECUTABLES.has(executable))
+    throw new Error("Los gates de commit no contactan red.");
+  if (tokens.some((token) => ["--fix", "--fix-dry-run", "--write", "--update", "--update-snapshot", "--update-snapshots"].includes(token))) {
+    throw new Error("Los gates de commit no reescriben código ni snapshots.");
+  }
+  const git = classifyGitCommand(command, { aliases: loadGitAliases(root) });
+  if (git.hasGitCommand) {
+    if (git.remote || git.failClosed || git.destructive || git.operations.some((operation) => operation !== "read")) {
+      throw new Error("Un gate de commit solo puede usar Git read-only.");
+    }
+    if (!classifyReadOnlyShellCommand(command, root, { workingDirectory: root }).readOnly) {
+      throw new Error("Comando Git de diagnóstico no reconocido por la política cerrada.");
+    }
+    return;
+  }
+  if (!safeCheckInvocation(tokens, root))
+    throw new Error(`Gate de commit no reconocido: ${tokens[0] ?? "<vacío>"}.`);
+}
+function safeCheckInvocation(tokens, root) {
+  const executable = executableName2(tokens[0] ?? "");
+  if (["bun", "npm", "pnpm", "yarn"].includes(executable)) {
+    const args = tokens.slice(1);
+    if (executable === "bun" && args[0] === "test")
+      return true;
+    if (["npm", "pnpm"].includes(executable) && args[0] === "test")
+      return safePackageScript("test", root);
+    if (executable === "yarn" && args[0] === "test")
+      return safePackageScript("test", root);
+    const runAt = args[0] === "run" ? 1 : executable === "yarn" ? 0 : -1;
+    const script = runAt >= 0 ? args[runAt] : undefined;
+    return Boolean(script && SAFE_SCRIPT_NAME.test(script) && safePackageScript(script, root));
+  }
+  if (!DIRECT_CHECK_EXECUTABLES.has(executable))
+    return false;
+  if (["python", "python3"].includes(executable))
+    return tokens[1] === "-m" && ["pytest", "ruff"].includes(tokens[2] ?? "");
+  if (executable === "node")
+    return tokens.includes("--check") || tokens.some((token) => /(?:^|\/)(?:eslint|jest|tsc|vitest)(?:\.js)?$/.test(token));
+  if (executable === "go")
+    return ["test", "vet", "build"].includes(tokens[1] ?? "");
+  if (executable === "cargo")
+    return ["test", "check", "build", "clippy"].includes(tokens[1] ?? "");
+  if (executable === "dotnet")
+    return ["test", "build"].includes(tokens[1] ?? "");
+  if (["mvn", "mvnw", "gradle", "gradlew", "make"].includes(executable)) {
+    return tokens.slice(1).some((token) => SAFE_SCRIPT_NAME.test(token.replace(/^[-:]+/, "")));
+  }
+  return true;
+}
+function safeGateTokenPaths(tokens, root) {
+  const canonicalRoot2 = fs17.realpathSync(root);
+  return tokens.every((token, index) => {
+    const candidate = index === 0 ? token : token.startsWith("-") && token.includes("=") ? token.slice(token.indexOf("=") + 1) : token;
+    if (!candidate || candidate.startsWith("-") || /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
+      return !/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate);
+    }
+    const pathLike = path21.isAbsolute(candidate) || /^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith(".") || candidate.startsWith("~") || candidate.includes("/") || candidate.includes("\\");
+    if (!pathLike)
+      return true;
+    const absolute = path21.resolve(root, candidate);
+    if (!inside4(absolute, canonicalRoot2))
+      return false;
+    const existing = nearestExistingPath(absolute);
+    if (!existing)
+      return false;
+    try {
+      return inside4(fs17.realpathSync(existing), canonicalRoot2);
+    } catch {
+      return false;
+    }
+  });
+}
+function nearestExistingPath(target) {
+  let current = target;
+  while (!fs17.existsSync(current)) {
+    const parent = path21.dirname(current);
+    if (parent === current)
+      return;
+    current = parent;
+  }
+  return current;
+}
+function safePackageScript(name, root, seen = new Set) {
+  if (!SAFE_SCRIPT_NAME.test(name) || seen.has(name))
+    return false;
+  const scripts = packageScripts(root);
+  const body = scripts[name];
+  if (!body || body.length > 8000)
+    return false;
+  if (classifyInfrastructureCommand(body).protected || installationCommand(body) || destructiveCommand(body))
+    return false;
+  const git = classifyGitCommand(body, { aliases: loadGitAliases(root) });
+  if (git.remote || git.failClosed || git.destructive || git.operations.some((operation) => !["read"].includes(operation)))
+    return false;
+  if (/\b(?:curl|wget|ssh|scp|sftp|nc|netcat|telnet|gh|glab)\b/i.test(body))
+    return false;
+  const nested = [...body.matchAll(/\b(?:bun|npm|pnpm|yarn)\s+run\s+([^\s;&|]+)/gi)].map((match) => match[1]).filter((script) => !["test", "run"].includes(script));
+  const next = new Set(seen).add(name);
+  return nested.every((script) => script.includes("/") || script.includes("\\") ? safeLocalGateScript(script, root) : safePackageScript(script, root, next));
+}
+function safeLocalGateScript(value, root) {
+  if (value.includes("\x00") || path21.isAbsolute(value) || value.startsWith("~"))
+    return false;
+  const target = path21.resolve(root, value);
+  if (!inside4(target, root) || !fs17.existsSync(target))
+    return false;
+  const base = path21.basename(target).replace(/\.[a-z0-9]+$/i, "");
+  if (!/^(?:build|compile|test|lint|check|typecheck|verify|diagnostic)(?:[-_.].*)?$/i.test(base))
+    return false;
+  try {
+    const content = fs17.readFileSync(target, "utf8");
+    if (content.length > 200000 || classifyInfrastructureCommand(content).protected || installationCommand(content) || destructiveCommand(content) || /\b(?:curl|wget|ssh|scp|sftp|nc|netcat|telnet|gh|glab)\b/i.test(content))
+      return false;
+    const git = classifyGitCommand(content, { aliases: loadGitAliases(root) });
+    return !git.remote && !git.failClosed && !git.destructive && git.operations.every((operation) => operation === "read");
+  } catch {
+    return false;
+  }
+}
+function validateStageCommand(command, paths, root) {
+  const tokens = closedCommand(command);
+  if (tokens[0] !== "git" || tokens[1] !== "add" || tokens[2] !== "--") {
+    throw new Error("El stage debe usar `git add --` con rutas exactas.");
+  }
+  const staged = tokens.slice(3).map((candidate) => validateCommitPath(candidate, root));
+  if (staged.length !== paths.length || staged.some((candidate, index) => candidate !== paths[index])) {
+    throw new Error("El comando de stage no coincide exactamente con las rutas selladas.");
+  }
+  const classification = classifyGitCommand(command, { aliases: loadGitAliases(root) });
+  if (classification.remote || classification.failClosed || classification.destructive || classification.operations.length !== 1 || classification.operations[0] !== "stage") {
+    throw new Error("El grant solo admite un stage Git ordinario y exacto.");
+  }
+}
+function validatePrecommitCommand(command, subject) {
+  const tokens = closedCommand(command);
+  if (tokens[0] !== "malahor-ai" || tokens[1] !== "git" || tokens[2] !== "precommit") {
+    throw new Error("El grant requiere `malahor-ai git precommit`.");
+  }
+  let message;
+  let json = false;
+  const seen = new Set;
+  for (let index = 3;index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--json") {
+      if (seen.has(token))
+        throw new Error("Flag precommit duplicado.");
+      seen.add(token);
+      json = true;
+      continue;
+    }
+    if (token === "--message") {
+      if (seen.has(token) || !tokens[index + 1])
+        throw new Error("Opción precommit inválida.");
+      seen.add(token);
+      if (token === "--message")
+        message = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    throw new Error(`Opción precommit no autorizada: ${token}.`);
+  }
+  if (!json || message !== subject)
+    throw new Error("Precommit debe validar exactamente el subject sellado y devolver JSON.");
+}
+function validateCommitCommand(command, subject, root) {
+  const tokens = closedCommand(command);
+  if (tokens[0] !== "git" || tokens[1] !== "commit") {
+    throw new Error("El grant requiere un `git commit` ordinario.");
+  }
+  const messages = [];
+  for (let index = 2;index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token !== "-m" && token !== "--message")
+      throw new Error(`Opción de commit no autorizada: ${token}.`);
+    const message = tokens[index + 1];
+    if (!message)
+      throw new Error("Cada -m del commit requiere texto literal.");
+    messages.push(message);
+    index += 1;
+  }
+  if (messages[0] !== subject)
+    throw new Error("El commit final no conserva el subject sellado.");
+  const classification = classifyGitCommand(command, { aliases: loadGitAliases(root) });
+  if (classification.remote || classification.failClosed || classification.destructive || classification.operations.length !== 1 || classification.operations[0] !== "commit") {
+    throw new Error("La autorización no cubre amend, stage implícito ni otras mutaciones Git.");
+  }
+}
+function validateVerifyCommands(commands, root) {
+  const subcommands = commands.map((command) => {
+    const tokens = closedCommand(command);
+    if (!classifyReadOnlyShellCommand(command, root, { workingDirectory: root }).readOnly) {
+      throw new Error("La revalidación posterior debe ser Git read-only y cerrada.");
+    }
+    const git = tokens.indexOf("git");
+    if (git < 0)
+      throw new Error("La revalidación posterior requiere Git.");
+    let index = git + 1;
+    while (tokens[index]?.startsWith("-"))
+      index += 1;
+    return tokens[index];
+  });
+  if (subcommands[0] !== "status" || subcommands[1] !== "log") {
+    throw new Error("La revalidación sellada debe ejecutar status y después log.");
+  }
+}
+function explicitCommitRequest(value) {
+  if (!value)
+    return false;
+  if (value.trimStart().startsWith(COMMIT_COMMAND_MARKER))
+    return true;
+  const normalized = value.normalize("NFD").replace(/\p{M}+/gu, "").trim().replace(/\s+/g, " ").toLocaleLowerCase("es");
+  if (!normalized || /[?¿]/.test(normalized) || /^(?:no|sin)\b/.test(normalized))
+    return false;
+  const text = normalized.replace(/[.!]+$/g, "").trim();
+  if (text === "/malahor-commit")
+    return true;
+  const polite = text.replace(/^por favor,?\s+/, "");
+  return /^(?:commit|comitea(?:\s+(?:(?:el|este)\s+)?commit|\s+(?:(?:todos?|estos?|los|mis)\s+)?cambios)?|(?:haz|crea|realiza|ejecuta|genera)\s+(?:el\s+)?commit)$/.test(polite);
+}
+function promptText(input) {
+  if (typeof input.prompt === "string")
+    return input.prompt;
+  const prompt = recordValue4(input.prompt);
+  return stringValue5(prompt?.text) ?? stringValue5(input.text);
+}
+function closedCommand(command) {
+  const raw = requiredString(command, "Comando vacío.");
+  if (raw.length > 8000 || /[\r\n]/.test(raw) || /[;&|<>`]/.test(raw) || /\$\(|\$\{|<\(|>\(/.test(raw))
+    throw new Error("Comando indirecto o compuesto no autorizado.");
+  const tokens = shellTokens4(raw);
+  if (!tokens || tokens.length === 0)
+    throw new Error("Comando no evaluable.");
+  return tokens;
+}
+function shellTokens4(command) {
+  const tokens = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  let started = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (quote === '"' && (character === "$" || character === "`"))
+        return;
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      started = true;
+      continue;
+    }
+    if (character === "$" || character === "~" && current.length === 0)
+      return;
+    if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      if (started) {
+        tokens.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += character;
+    started = true;
+  }
+  if (quote || escaped)
+    return;
+  if (started)
+    tokens.push(current);
+  return tokens;
+}
+function normalizeScope(scope) {
+  const sessionID = requiredString(scope.sessionID, "Sesión de commit ausente.");
+  const project = requiredString(scope.project, "Proyecto de commit ausente.");
+  const policyRevision = requiredString(scope.policyRevision, "Revisión de política ausente.");
+  if (!["advisor", "assistant", "executor"].includes(scope.mode))
+    throw new Error("Modo de commit inválido.");
+  return { sessionID, project, policyRevision, mode: scope.mode, root: canonicalDirectory(scope.root) };
+}
+function sameScope(left, right) {
+  return left.sessionID === right.sessionID && left.project === right.project && left.policyRevision === right.policyRevision && left.mode === right.mode && left.root === right.root;
+}
+function canonicalDirectory(value) {
+  const resolved = path21.resolve(requiredString(value, "Raíz de commit ausente."));
+  const canonical3 = fs17.realpathSync(resolved);
+  if (!fs17.statSync(canonical3).isDirectory())
+    throw new Error("La raíz de commit no es un directorio.");
+  return canonical3;
+}
+function packageScripts(root) {
+  try {
+    const value = JSON.parse(fs17.readFileSync(path21.join(root, "package.json"), "utf8"));
+    const scripts = recordValue4(value.scripts);
+    if (!scripts)
+      return {};
+    return Object.fromEntries(Object.entries(scripts).filter((entry) => typeof entry[1] === "string"));
+  } catch {
+    return {};
+  }
+}
+function trackedDeletion(root, relative) {
+  try {
+    execFileSync5("git", ["ls-files", "--error-unmatch", "--", relative], {
+      cwd: root,
+      stdio: ["ignore", "ignore", "ignore"]
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function installationCommand(command) {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:(?:--?[a-z0-9._-]+)(?:=[^\s]+)?\s+)*(?:add|i|install|remove|rm|un|uninstall|up|update|upgrade)\b/i.test(command) || /\b(?:python(?:3)?\s+-m\s+)?(?:pip|pip3|uv(?:\s+pip)?|gem|cargo|go)\s+(?:install|uninstall)\b/i.test(command) || /\b(?:apt(?:-get)?|dnf|yum|apk|brew|choco|winget)\s+(?:install|remove|uninstall|update|upgrade)\b/i.test(command) || /\bmalahor-ai\s+(?:install|uninstall|update|codegraph\s+setup)\b/i.test(command);
+}
+function destructiveCommand(command) {
+  return /\b(?:rm|rmdir|unlink|shred|truncate|mkfs(?:\.[a-z0-9]+)?|wipefs)\b/i.test(command) || /\bdd\s+[^;&|]*\bof=/i.test(command);
+}
+function executableName2(value) {
+  return path21.basename(value).replace(/\.exe$/i, "").replace(/^\.\//, "").toLowerCase();
+}
+function commitApprovalEvidence(scope, call, prepared) {
+  const digest = createHash11("sha256").update(JSON.stringify({
+    paths: prepared.paths,
+    subject: prepared.subject,
+    sequence: prepared.sequence
+  })).digest("hex");
+  return {
+    scope: normalizeScope(scope),
+    callKey: commitCallKey(call),
+    resources: [digest, prepared.subject, ...prepared.paths],
+    paths: [...prepared.paths],
+    subject: prepared.subject
+  };
+}
+function commitPermissionCall(sessionID, value) {
+  const source = recordValue4(value);
+  const messageID = stringValue5(source?.messageID);
+  const id = stringValue5(source?.id);
+  return source?.type === "tool" && sessionID && messageID && id ? { sessionID, agent: "malahor", messageID, id } : undefined;
+}
+function commitCallKey(call) {
+  return [call.sessionID, call.messageID, call.id].join("\x00");
+}
+function commitShellCallKey(messageID, toolCallID) {
+  return JSON.stringify([messageID, toolCallID]);
+}
+function sameStringArray(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+function exactRecord(value, keys, message) {
+  const record3 = recordValue4(value);
+  if (!record3 || Object.keys(record3).sort(compareText3).join("\x00") !== [...keys].sort(compareText3).join("\x00")) {
+    throw new Error(message);
+  }
+  return record3;
+}
+function stringArray2(value, min, max, message) {
+  if (!Array.isArray(value) || value.length < min || value.length > max)
+    throw new Error(message);
+  const strings = value.map((item) => requiredString(item, message));
+  if (strings.some((item) => item.length > 8000))
+    throw new Error(message);
+  return strings;
+}
+function requiredString(value, message) {
+  if (typeof value !== "string" || !value.trim() || value.includes("\x00"))
+    throw new Error(message);
+  return value.trim();
+}
+function stringValue5(value) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+function recordValue4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function inside4(target, root) {
+  const relative = path21.relative(path21.resolve(root), path21.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path21.isAbsolute(relative);
+}
+function compareText3(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+// src/plugin/point-action-approval.ts
+import { createHash as createHash12 } from "node:crypto";
+import fs18 from "node:fs";
+import path22 from "node:path";
+var POINT_ACTION_APPROVAL = "malahor_point_action_execute";
+function createPointActionMediator() {
+  const hostAsks = new Map;
+  const pending = new Map;
+  const invalidate = (sessionID) => {
+    for (const [key, evidence] of hostAsks) {
+      if (evidence.scope.sessionID === sessionID)
+        hostAsks.delete(key);
+    }
+    for (const [key, evidence] of pending) {
+      if (evidence.scope.sessionID === sessionID)
+        pending.delete(key);
+    }
+  };
+  return {
+    observePermission(input) {
+      if (!input.toolRegistered || input.action !== "edit" || input.scope.mode === "advisor" || input.resources.length !== 1 || typeof input.resources[0] !== "string")
+        return false;
+      const call = permissionCall(input.scope.sessionID, input.source);
+      if (!call)
+        return false;
+      const candidate = candidateForTarget(input.scope, path22.resolve(input.directory, input.resources[0]));
+      if (!candidate)
+        return false;
+      const key = callKey(call);
+      if (input.effect === "ask") {
+        hostAsks.set(key, { ...candidate, callKey: key });
+      } else if (input.effect !== "allow") {
+        return false;
+      }
+      return true;
+    },
+    evaluateApprovalPermission(input, currentScope) {
+      const source = permissionCall(text(input.sessionID), input.source);
+      const resources = Array.isArray(input.resources) ? input.resources : [];
+      if (!source || !currentScope || resources.length !== 3 || resources.some((item) => typeof item !== "string"))
+        return false;
+      const evidence = pending.get(callKey(source));
+      if (!evidence || !sameScope2(evidence.scope, currentScope) || resources[0] !== evidence.actionID || resources[1] !== evidence.relativePath || resources[2] !== evidence.payloadDigest)
+        return false;
+      input.effect = "ask";
+      input.message = `Autoriza una edición puntual del archivo ${evidence.relativePath}. No crea, borra ni mueve archivos y no autoriza otros efectos.`;
+      return true;
+    },
+    async authorizeTool(input) {
+      if (input.call.agent !== "malahor" || input.call.sessionID !== input.scope.sessionID || input.scope.mode === "advisor")
+        return false;
+      const candidate = candidateForTool(input.scope, input.directory, input.tool, input.value);
+      if (!candidate)
+        return false;
+      const key = callKey(input.call);
+      const hostEvidence = hostAsks.get(key);
+      if (hostEvidence) {
+        hostAsks.delete(key);
+        if (!sameEvidence(hostEvidence, candidate)) {
+          throw new Error("La aprobación nativa previa no coincide con la edición puntual actual.");
+        }
+        const fresh = await input.revalidate();
+        if (!fresh || !fresh.noActivePlan || !sameScope2(candidate.scope, fresh.scope)) {
+          throw new Error("El proyecto, modo, política o Planning cambió después de la aprobación nativa.");
+        }
+        const revalidated = candidateForTool(fresh.scope, input.directory, input.tool, input.value);
+        if (!revalidated || !sameEvidence(candidate, revalidated)) {
+          throw new Error("La edición puntual cambió después de la aprobación nativa.");
+        }
+        return true;
+      }
+      if (pending.has(key))
+        throw new Error("Ya existe una aprobación puntual pendiente para esta llamada.");
+      const evidence = { ...candidate, callKey: key };
+      pending.set(key, evidence);
+      try {
+        await input.approval.assert({
+          sessionID: input.call.sessionID,
+          agent: input.call.agent,
+          source: { type: "tool", messageID: input.call.messageID, id: input.call.id },
+          action: POINT_ACTION_APPROVAL,
+          resources: [candidate.actionID, candidate.relativePath, candidate.payloadDigest],
+          save: []
+        });
+        if (!pending.has(key))
+          throw new Error("La aprobación puntual fue invalidada antes de ejecutar.");
+        const fresh = await input.revalidate();
+        if (!fresh || !fresh.noActivePlan || !sameScope2(candidate.scope, fresh.scope)) {
+          throw new Error("El proyecto, modo, política o Planning cambió durante la aprobación puntual.");
+        }
+        const revalidated = candidateForTool(fresh.scope, input.directory, input.tool, input.value);
+        if (!revalidated || !sameEvidence(candidate, revalidated)) {
+          throw new Error("La edición puntual cambió durante la aprobación nativa.");
+        }
+        return true;
+      } finally {
+        pending.delete(key);
+      }
+    },
+    invalidate
+  };
+}
+function candidateForTool(scope, directory, tool, value) {
+  const serialized = JSON.stringify(value);
+  if (!["edit", "write", "patch"].includes(tool) || typeof serialized !== "string" || Buffer.byteLength(serialized, "utf8") > 2 * 1024 * 1024 || detectPayloadSecretKinds(serialized).length > 0) {
+    return;
+  }
+  const args = recordValue5(value) ?? {};
+  let target;
+  if (tool === "patch") {
+    if (typeof args.patchText !== "string")
+      return;
+    const operations = parsePatchOperations(args.patchText);
+    if (operations.length !== 1 || operations[0]?.kind !== "update")
+      return;
+    target = operations[0].path;
+  } else {
+    const raw = args.path ?? args.filePath;
+    if (typeof raw !== "string")
+      return;
+    target = raw;
+  }
+  const candidate = candidateForTarget(scope, path22.resolve(directory, target));
+  return candidate ? {
+    ...candidate,
+    payloadDigest: createHash12("sha256").update(serialized).digest("hex")
+  } : undefined;
+}
+function candidateForTarget(scopeValue, target) {
+  try {
+    const scope = normalizeScope2(scopeValue);
+    const absolute = path22.resolve(target);
+    if (!inside5(absolute, scope.root) || absolute === scope.root || isProtectedDocumentationPath(scope.root, absolute) || classifyInfrastructurePath(scope.root, absolute).protected)
+      return;
+    const stat = fs18.lstatSync(absolute);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      return;
+    const real = fs18.realpathSync(absolute);
+    if (!inside5(real, scope.root))
+      return;
+    const intents = canonicalizeActionIntent({
+      kind: "edit",
+      project: scope.project,
+      root: scope.root,
+      rootRef: "project",
+      path: absolute,
+      existence: "must-exist",
+      constraints: { remote: false, infrastructure: false }
+    });
+    if (intents.length !== 1)
+      return;
+    return {
+      scope,
+      actionID: intents[0].actionID,
+      relativePath: path22.relative(scope.root, absolute).split(path22.sep).join("/"),
+      intent: intents[0]
+    };
+  } catch {
+    return;
+  }
+}
+function permissionCall(sessionID, value) {
+  const source = recordValue5(value);
+  const messageID = text(source?.messageID);
+  const id = text(source?.id);
+  return source?.type === "tool" && sessionID && messageID && id ? { sessionID, agent: "malahor", messageID, id } : undefined;
+}
+function normalizeScope2(scope) {
+  if (!scope.sessionID || !scope.project || !scope.policyRevision || !["advisor", "assistant", "executor"].includes(scope.mode)) {
+    throw new Error("Scope puntual no evaluable.");
+  }
+  const root = fs18.realpathSync(path22.resolve(scope.root));
+  if (!fs18.statSync(root).isDirectory())
+    throw new Error("Raíz puntual no evaluable.");
+  return { ...scope, root };
+}
+function sameEvidence(left, right) {
+  return left.actionID === right.actionID && left.relativePath === right.relativePath && (left.payloadDigest === undefined || right.payloadDigest === undefined || left.payloadDigest === right.payloadDigest) && sameScope2(left.scope, right.scope);
+}
+function sameScope2(left, right) {
+  try {
+    const a = normalizeScope2(left);
+    const b = normalizeScope2(right);
+    return a.sessionID === b.sessionID && a.project === b.project && a.policyRevision === b.policyRevision && a.mode === b.mode && a.root === b.root;
+  } catch {
+    return false;
+  }
+}
+function callKey(call) {
+  return [call.sessionID, call.messageID, call.id].join("\x00");
+}
+function inside5(target, root) {
+  const relative = path22.relative(path22.resolve(root), path22.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path22.isAbsolute(relative);
+}
+function text(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function recordValue5(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
 // src/plugin/planning.ts
 var REVIEW_ACTION = "malahor_plan_review";
 var RUN_ACTION = "malahor_plan_run";
@@ -11004,12 +12132,38 @@ var READ_ONLY_TOOLS = new Set([
 ]);
 var PROTECTED = new Set(["edit", "shell", "subagent"]);
 var CODE_READ_TOOLS = new Set(["read", "glob", "grep"]);
-async function evaluatePlanningPermission(input, options, storage, authority = fallbackAuthority) {
-  const action = text(input.action);
+async function evaluatePlanningPermission(input, options, storage, authority = fallbackAuthority, commitWorkflow, pointActions) {
+  const action = text2(input.action);
   const normalized = permissionAction(action);
   if (input.effect === "deny")
     return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
+  if (action === POINT_ACTION_APPROVAL) {
+    const root = resolved ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env) : undefined;
+    if (!root || !pointActions?.evaluateApprovalPermission(input, resolved ? pointScope(resolved.scope, root) : undefined)) {
+      deny2(input, "Aprobación puntual inválida, desactualizada o ajena a esta llamada.");
+    }
+    return;
+  }
+  if (action === COMMIT_MANIFEST_APPROVAL) {
+    const root = resolved ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env) : undefined;
+    if (!root || !commitWorkflow?.evaluateApprovalPermission(input, resolved ? commitScope(resolved.scope, root) : undefined)) {
+      deny2(input, "Aprobación de manifest de commit inválida, desactualizada o ajena a esta llamada.");
+    }
+    return;
+  }
+  if (isCommitPreparationTool(action)) {
+    if (resolved) {
+      const root = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+      commitWorkflow?.observePreparationPermission({
+        scope: commitScope(resolved.scope, root),
+        action,
+        effect: input.effect,
+        source: input.source
+      });
+    }
+    return;
+  }
   if (action === MODE_CHANGE_ACTION) {
     const resources2 = Array.isArray(input.resources) ? input.resources : [];
     if (!resolved || resources2.length !== 3 || resources2.some((item) => typeof item !== "string")) {
@@ -11061,6 +12215,38 @@ ${renderPlan(state)}`;
     return;
   }
   const projectRoot = resolved ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env) : undefined;
+  if (normalized === "subagent" && resolved?.scope.mode !== "advisor" && directDiagnosticPermission(input.resources))
+    return;
+  if (normalized === "shell" && resolved && projectRoot && resolved.scope.mode !== "advisor") {
+    const candidate = permissionShellCandidate(input, projectRoot);
+    const commitDecision = commitWorkflow?.authorizeShell({
+      ...commitScope(resolved.scope, projectRoot),
+      ...candidate,
+      boundary: "permission"
+    });
+    if (commitDecision?.effect === "allow")
+      return;
+    if (commitDecision?.effect === "deny") {
+      denyDecision(input, commitDecision);
+      return;
+    }
+  }
+  if (resolved && normalized !== "shell" && PROTECTED.has(normalized)) {
+    commitWorkflow?.invalidate(resolved.scope.sessionID);
+  }
+  if (normalized === "edit" && resolved && projectRoot && storage && resolved.scope.mode !== "advisor") {
+    const rawState2 = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+    if (noActivePlan(rawState2, authority) && pointActions?.observePermission({
+      scope: pointScope(resolved.scope, projectRoot),
+      directory: resolved.directory,
+      action: normalized,
+      resources: Array.isArray(input.resources) ? input.resources : [],
+      effect: input.effect,
+      source: input.source,
+      toolRegistered: options.toolRegistered === true
+    }))
+      return;
+  }
   if (normalized === "shell" && resolved && resolved.scope.mode !== "advisor" && projectRoot && readOnlyShellResources(input.resources, projectRoot, resolved.directory))
     return;
   if (!resolved || !storage) {
@@ -11086,8 +12272,10 @@ ${renderPlan(state)}`;
     denyDecision(input, decision);
   }
 }
-async function evaluatePlanningTool(input, options, storage, authority = fallbackAuthority, approvals) {
-  const tool = text(input.tool);
+async function evaluatePlanningTool(input, options, storage, authority = fallbackAuthority, approvals, commitWorkflow, pointActions) {
+  const tool = text2(input.tool);
+  if (isCommitPreparationTool(tool))
+    return;
   if (routineTool(tool))
     return;
   if (["question", "list", "todowrite", "todoread", "invalid"].includes(tool))
@@ -11104,16 +12292,59 @@ async function evaluatePlanningTool(input, options, storage, authority = fallbac
     throw new Error("Malahor: el asesor no ejecuta acciones de programacion.");
   }
   const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+  if (directDiagnosticTool(tool, input.input, input.agent))
+    return;
+  if (tool === "shell" || tool === "bash") {
+    const candidate = toolShellCandidate(input, resolved.directory, projectRoot);
+    const commitDecision = commitWorkflow?.authorizeShell({
+      ...commitScope(resolved.scope, projectRoot),
+      ...candidate,
+      boundary: "tool"
+    });
+    if (commitDecision?.effect === "allow")
+      return;
+    if (commitDecision?.effect === "deny") {
+      throw new PlanningAuthorizationError(commitDecision.code);
+    }
+  } else if (["edit", "write", "patch", "subagent", "task"].includes(tool)) {
+    commitWorkflow?.invalidate(resolved.scope.sessionID);
+  }
   if (readOnlyShellTool(tool, input.input, projectRoot, resolved.directory))
     return;
   if (!storage)
     throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
+  if (["edit", "write", "patch"].includes(tool) && approvals && pointActions) {
+    const rawState2 = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+    if (noActivePlan(rawState2, authority)) {
+      const call = pointToolCall(input);
+      if (call && await pointActions.authorizeTool({
+        scope: pointScope(resolved.scope, projectRoot),
+        directory: resolved.directory,
+        tool,
+        value: input.input,
+        call,
+        approval: approvals,
+        revalidate: async () => {
+          const fresh = await resolvePlanningScope(input.sessionID, options);
+          if (!fresh)
+            return;
+          const freshRoot = planningProjectRoot(fresh.scope.project, fresh.directory, options.env);
+          const freshState = await loadActivePlanRaw(storage, fresh.scope.sessionID);
+          return {
+            scope: pointScope(fresh.scope, freshRoot),
+            noActivePlan: noActivePlan(freshState, authority)
+          };
+        }
+      }))
+        return;
+    }
+  }
   if (["edit", "write", "patch", "shell", "bash"].includes(tool) && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority))
     return;
   const actions = toolActions(tool, input.input, resolved.directory);
   const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
   const args = isRecord9(input.input) ? input.input : {};
-  const operationCwd = typeof args.workdir === "string" ? path20.resolve(resolved.directory, args.workdir) : typeof args.cwd === "string" ? path20.resolve(resolved.directory, args.cwd) : resolved.directory;
+  const operationCwd = typeof args.workdir === "string" ? path23.resolve(resolved.directory, args.workdir) : typeof args.cwd === "string" ? path23.resolve(resolved.directory, args.cwd) : resolved.directory;
   const decision = authorizeOperations(rawState, resolved.scope, actions, resolved.directory, projectRoot, operationCwd, authority);
   if (decision.effect === "repair") {
     if (!validState(rawState, authority) || rawState.version !== 5 || !approvals) {
@@ -11133,11 +12364,13 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Registra un plan proporcional (nivel 0, 1 o 2) y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. Nivel 0 conserva plan y go, pero usa una vista minima. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
+      description: "Registra un plan de alcance considerable derivado de una especificacion SDD (nivel 1 o 2) y devuelve su Markdown para presentarlo en foreground exactamente una vez. Las acciones puntuales no usan esta tool.",
       input: {
         type: "object",
         properties: {
-          level: { type: "integer", enum: [0, 1, 2] },
+          level: { type: "integer", enum: [1, 2] },
+          specRef: { type: "string", pattern: "^SDD/.+\\.md$" },
+          specHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
           presentation: {
@@ -11196,7 +12429,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             additionalProperties: false
           } }
         },
-        required: ["level", "summary", "steps", "presentation", "actions"],
+        required: ["level", "specRef", "specHash", "summary", "steps", "presentation", "actions"],
         additionalProperties: false
       },
       options: { namespace: "malahor", codemode: false },
@@ -11205,16 +12438,18 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede presentar el plan.");
         const raw = value;
-        if (raw.level !== 0 && raw.level !== 1 && raw.level !== 2) {
-          throw new Error("malahor_plan requiere level 0, 1 o 2.");
+        if (raw.level !== 1 && raw.level !== 2) {
+          throw new Error("malahor_plan requiere level 1 o 2 y una especificacion SDD versionada.");
         }
+        if (typeof raw.specRef !== "string" || typeof raw.specHash !== "string") {
+          throw new Error("malahor_plan requiere specRef y specHash de una especificacion SDD versionada.");
+        }
+        verifySddSpec(raw.specRef, raw.specHash, resolved.scope.project, resolved.directory, options.env);
         if (detectSecretKinds(raw).length > 0)
           throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
-        if (raw.level === 0)
-          validateLevelZeroActions(actions ?? [], projectRoot);
-        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs16.existsSync(item.resource));
+        const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs19.existsSync(item.resource));
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const normalizedActions = sortedPlannedActions(actions ?? []);
@@ -11272,7 +12507,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         const resolved = await requireScope(call, options);
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede controlar el plan.");
-        const action = text(value.action);
+        const action = text2(value.action);
         if (!["status", "pause", "resume", "revoke", "complete"].includes(action)) {
           throw new Error("Control de plan invalido.");
         }
@@ -11322,20 +12557,22 @@ async function injectPlanningInstructions(input, options, storage, authority = f
   const state = resolved && await readPlan(storage, resolved.scope.sessionID, authority);
   const mode = resolved?.scope.mode;
   const instructions = !resolved || !storage ? "Planeacion Malahor no disponible: no ejecutes operaciones de programacion. Revisa proyecto registrado y adaptador del host." : mode === "advisor" ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, declara level 1 o 2; steps, presentation.steps, presentation.impact y actions van vacios." : [
-    `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
-    mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar." : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
-    "Declara level 0, 1 o 2 en malahor_plan. Nivel 0 usa un plan minimo visible y conserva la aprobacion posterior go antes de cualquier efecto.",
-    "Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentacion ceremonial; ejecuta en una sola pasada y aplica validacion enfocada. Commit es la excepcion: conserva todos sus gates y hooks obligatorios.",
-    "Usa nivel 0 solo con riesgo bajo, como maximo un archivo existente y sin categorias criticas, dependencias, infraestructura, instalacion, publicacion, despliegue ni destruccion; si el alcance crece, presenta nivel 1 o 2.",
-    "Commit nivel 0: tras go revisa status/diff y ejecuta diagnostico, tests, build, stage exacto, precommit, hooks y revalidacion; no pide otra confirmacion salvo fallo o cambio material.",
+    `Modo ${mode}: clasifica cada solicitud en inspeccion directa, accion puntual o trabajo considerable.`,
+    "Las lecturas, listados, Git read-only y el especialista malahor-diagnostico se ejecutan directamente sin plan, go ni aprobacion redundante.",
+    "Una unica edicion de bajo riesgo sobre un archivo regular existente no usa Planning ni SDD: define la llamada exacta y deja que el harness solicite una sola aprobacion nativa. No pidas go ni conviertas una accion ambigua en puntual.",
+    "Creacion, borrado, movimiento, symlinks, multiples recursos, secretos, infraestructura, shell mutante y superficies criticas quedan fuera del carril puntual y fallan cerrados.",
+    "Solo el trabajo considerable previamente expandido en una especificacion Markdown bajo SDD/ usa malahor_plan. Declara level 1 o 2 junto con specRef y specHash SHA-256 de esa version canonica.",
+    mode === "assistant" ? "Para trabajo considerable guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar." : "Para trabajo considerable presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+    "Commit explicito es un flujo especializado sin Planning: no uses malahor_plan, malahor_run ni pidas go. La orden solo habilita preparar el manifest; la autorizacion ejecutable procede de una unica aprobacion nativa de la UI.",
+    "Para ese commit carga git-commit-text, inspecciona y prevalida el subject; luego usa malahor_commit_prepare para validar el manifest y solicitar una única aprobación nativa de rutas y comandos exactos antes de diagnostico, tests, build, stage, precommit, commit y revalidacion. Cualquier diferencia invalida el grant.",
     "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto, riesgo y una seccion 'Que debes hacer ahora' narrada en lenguaje tecnico comprensible.",
     "La vista normal no incrusta IDs, comandos ni el anexo tecnico; tampoco muestra rutas exactas.",
     "Ante un riesgo alto o una categoria critica, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran unicamente mediante /malahor-plan detalles.",
     "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
     "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
-    "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
+    "Solo despues de presentar un plan derivado de SDD espera una solicitud posterior del usuario (por ejemplo, go o implementa) y entonces invoca malahor_run.",
     "malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible y debe coincidir exactamente.",
-    "Un go previo a la presentacion no aprueba un plan todavia no visto.",
+    "Un go previo a la presentacion no aprueba un plan todavia no visto y nunca autoriza una accion puntual.",
     "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
     "Los retries tecnicos con el mismo ActionIntentV1 reutilizan la revision V5; ASK, DENY, cambios materiales o loop guard bloquean sin auto-planificar.",
     "Si un guardrail incluye remediacion estructurada y saneada, explicala para una persona no desarrolladora como bloques completos de referencia y reemplazo: archivo y linea, busca, reemplaza, guarda y revalida.",
@@ -11357,14 +12594,14 @@ async function injectPlanningInstructions(input, options, storage, authority = f
   for (const part of system) {
     if (!isRecord9(part) || part.type !== "text" || typeof part.text !== "string")
       continue;
-    const text = part.text;
-    if (text.includes(marker)) {
+    const text2 = part.text;
+    if (text2.includes(marker)) {
       input.system = system;
       return;
     }
-    const legacyIndex = Math.max(...previousMarkers.map((previous) => text.indexOf(previous)));
+    const legacyIndex = Math.max(...previousMarkers.map((previous) => text2.indexOf(previous)));
     if (legacyIndex >= 0) {
-      part.text = `${text.slice(0, legacyIndex).trimEnd()}
+      part.text = `${text2.slice(0, legacyIndex).trimEnd()}
 
 ${marker}
 ${instructions}`;
@@ -11398,7 +12635,7 @@ async function resolveRunDigest(value, storage, scope, authority) {
     throw new Error("Entrada de malahor_run no evaluable.");
   const provided = value.digest;
   if (provided !== undefined)
-    return text(provided);
+    return text2(provided);
   const active = await readPlan(storage, scope.sessionID, authority);
   if (!active)
     throw new Error("No hay un plan activo firmado para solicitar ejecucion.");
@@ -11535,19 +12772,19 @@ function repairFromApprovalResources(resources) {
 function repairToolCall(input) {
   const context = isRecord9(input.context) ? input.context : {};
   const source = isRecord9(input.source) ? input.source : {};
-  const sessionID = text(input.sessionID || context.sessionID);
-  const messageID = text(input.messageID || context.messageID || source.messageID);
-  const id = text(input.id || input.callID || input.toolCallID || context.id || context.callID || source.id);
-  const agent = text(input.agent || context.agent) || "malahor";
+  const sessionID = text2(input.sessionID || context.sessionID);
+  const messageID = text2(input.messageID || context.messageID || source.messageID);
+  const id = text2(input.id || input.callID || input.toolCallID || context.id || context.callID || source.id);
+  const agent = text2(input.agent || context.agent) || "malahor";
   return sessionID && messageID && id ? { sessionID, messageID, id, agent } : undefined;
 }
 function repairInputActionID(input, project, projectRoot, directory) {
   try {
-    const operations = toolActions(text(input.tool), input.input, directory);
+    const operations = toolActions(text2(input.tool), input.input, directory);
     if (operations?.length !== 1 || operations[0]?.action !== "shell")
       return;
     const args = isRecord9(input.input) ? input.input : {};
-    const operationCwd = typeof args.workdir === "string" ? path20.resolve(directory, args.workdir) : typeof args.cwd === "string" ? path20.resolve(directory, args.cwd) : directory;
+    const operationCwd = typeof args.workdir === "string" ? path23.resolve(directory, args.workdir) : typeof args.cwd === "string" ? path23.resolve(directory, args.cwd) : directory;
     const intents = canonicalizePlannedAction(operations[0], {
       project,
       root: projectRoot,
@@ -11565,7 +12802,7 @@ function sameToolCall(left, right) {
   return left.sessionID === right.sessionID && left.agent === right.agent && left.messageID === right.messageID && left.id === right.id;
 }
 function attributedToolSource(value) {
-  return isRecord9(value) && value.type === "tool" && Boolean(text(value.messageID)) && Boolean(text(value.id));
+  return isRecord9(value) && value.type === "tool" && Boolean(text2(value.messageID)) && Boolean(text2(value.id));
 }
 async function requireScope(call, options) {
   const resolved = await resolvePlanningScope(call.sessionID, options);
@@ -11581,7 +12818,7 @@ async function resolvePlanningScope(value, options) {
       const project = await options.resolveSessionProject(value);
       if (!project)
         return;
-      const directory2 = path20.resolve(project.root);
+      const directory2 = path23.resolve(project.root);
       const env2 = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
       const config2 = loadConfig(env2, directory2);
       return { scope: {
@@ -11598,7 +12835,7 @@ async function resolvePlanningScope(value, options) {
       return;
     const env = { ...options.env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" };
     const paths = resolvePaths(env, directory);
-    const root = registeredProjectRoots(paths.projectsFile).sort((a, b) => b.root.length - a.root.length).find((entry) => inside4(directory, entry.root));
+    const root = registeredProjectRoots(paths.projectsFile).sort((a, b) => b.root.length - a.root.length).find((entry) => inside6(directory, entry.root));
     if (!root)
       return;
     const config = loadConfig(env, directory);
@@ -11617,7 +12854,7 @@ function toolActions(tool, value, directory) {
   if (tool === "shell" || tool === "bash") {
     if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && typeof cwd !== "string"))
       return;
-    if (typeof args.cwd === "string" && typeof args.workdir === "string" && path20.resolve(directory, args.cwd) !== path20.resolve(directory, args.workdir))
+    if (typeof args.cwd === "string" && typeof args.workdir === "string" && path23.resolve(directory, args.cwd) !== path23.resolve(directory, args.workdir))
       return;
     return typeof args.command === "string" && args.command.trim() ? [{ action: "shell", resource: args.command }] : undefined;
   }
@@ -11637,7 +12874,7 @@ function toolActions(tool, value, directory) {
   return;
 }
 function normalizeAction(action, resource, directory) {
-  return { action, resource: action === "edit" ? path20.resolve(directory, resource) : resource };
+  return { action, resource: action === "edit" ? path23.resolve(directory, resource) : resource };
 }
 var DUMMY_ACTION_ID = "0".repeat(64);
 function authorizeResources(state, scope, action, resources, directory, projectRoot, operationCwd, authority) {
@@ -11847,7 +13084,7 @@ function decisionForCanonicalizationFailure(state, scope, code, authority) {
   });
 }
 function sortedPlannedActions(actions) {
-  return [...new Map(actions.map((action) => [`${action.action}\x00${action.resource}`, { ...action }])).values()].sort((left, right) => compareText3(`${left.action}\x00${left.resource}`, `${right.action}\x00${right.resource}`));
+  return [...new Map(actions.map((action) => [`${action.action}\x00${action.resource}`, { ...action }])).values()].sort((left, right) => compareText4(`${left.action}\x00${left.resource}`, `${right.action}\x00${right.resource}`));
 }
 function readOnlyShellResources(value, projectRoot, workingDirectory) {
   if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string"))
@@ -11862,12 +13099,85 @@ function readOnlyShellTool(tool, value, projectRoot, sessionDirectory) {
   const args = isRecord9(value) ? value : {};
   if ([args.cwd, args.workdir].some((cwd2) => cwd2 !== undefined && typeof cwd2 !== "string"))
     return false;
-  const cwd = typeof args.cwd === "string" ? path20.resolve(sessionDirectory, args.cwd) : undefined;
-  const workdir = typeof args.workdir === "string" ? path20.resolve(sessionDirectory, args.workdir) : undefined;
+  const cwd = typeof args.cwd === "string" ? path23.resolve(sessionDirectory, args.cwd) : undefined;
+  const workdir = typeof args.workdir === "string" ? path23.resolve(sessionDirectory, args.workdir) : undefined;
   if (cwd && workdir && cwd !== workdir)
     return false;
   const workingDirectory = workdir ?? cwd ?? sessionDirectory;
   return typeof args.command === "string" && classifyReadOnlyShellCommand(args.command, projectRoot, { workingDirectory }).readOnly;
+}
+function permissionShellCandidate(input, projectRoot) {
+  const resources = Array.isArray(input.resources) ? input.resources : [];
+  const metadata = isRecord9(input.metadata) ? input.metadata : {};
+  const metadataCommand = text2(metadata.command || metadata.cmd);
+  const rawCwd = metadata.workdir ?? metadata.cwd;
+  const source = isRecord9(input.source) ? input.source : {};
+  const command = resources.length === 1 && typeof resources[0] === "string" ? resources[0] : "";
+  const messageID = text2(source.messageID);
+  const toolCallID = text2(source.id || source.callID || source.toolCallID);
+  const valid = Boolean(command) && (!metadataCommand || metadataCommand === command) && (rawCwd === undefined || typeof rawCwd === "string") && source.type === "tool" && Boolean(messageID && toolCallID);
+  return {
+    command,
+    cwd: typeof rawCwd === "string" ? path23.resolve(projectRoot, rawCwd) : projectRoot,
+    messageID,
+    toolCallID,
+    valid
+  };
+}
+function toolShellCandidate(input, sessionDirectory, projectRoot) {
+  const args = isRecord9(input.input) ? input.input : {};
+  const command = typeof args.command === "string" ? args.command : "";
+  const cwdValuesValid = [args.cwd, args.workdir].every((cwd2) => cwd2 === undefined || typeof cwd2 === "string");
+  const cwd = typeof args.cwd === "string" ? path23.resolve(sessionDirectory, args.cwd) : undefined;
+  const workdir = typeof args.workdir === "string" ? path23.resolve(sessionDirectory, args.workdir) : undefined;
+  const messageID = text2(input.messageID);
+  const toolCallID = text2(input.id || input.callID || input.toolCallID);
+  return {
+    command,
+    cwd: workdir ?? cwd ?? projectRoot,
+    messageID,
+    toolCallID,
+    valid: Boolean(command.trim()) && cwdValuesValid && (!cwd || !workdir || cwd === workdir) && Boolean(messageID && toolCallID)
+  };
+}
+function commitScope(scope, root) {
+  return {
+    sessionID: scope.sessionID,
+    project: scope.project,
+    policyRevision: scope.policyRevision,
+    mode: scope.mode,
+    root
+  };
+}
+function pointScope(scope, root) {
+  return {
+    sessionID: scope.sessionID,
+    project: scope.project,
+    policyRevision: scope.policyRevision,
+    mode: scope.mode,
+    root
+  };
+}
+function pointToolCall(input) {
+  const sessionID = text2(input.sessionID);
+  const agent = text2(input.agent);
+  const messageID = text2(input.messageID);
+  const id = text2(input.id || input.callID || input.toolCallID);
+  return sessionID && agent && messageID && id ? { sessionID, agent, messageID, id } : undefined;
+}
+function noActivePlan(value, authority) {
+  if (value === undefined || value === null)
+    return true;
+  return validState(value, authority) && ["completed", "revoked", "superseded"].includes(value.phase);
+}
+function directDiagnosticPermission(resources) {
+  return Array.isArray(resources) && resources.length === 1 && resources[0] === "malahor-diagnostico";
+}
+function directDiagnosticTool(tool, value, agent) {
+  if (tool !== "subagent" && tool !== "task")
+    return false;
+  const args = isRecord9(value) ? value : {};
+  return agent === "malahor" && args.agent === "malahor-diagnostico";
 }
 function permissionAction(action) {
   if (["bash", "command"].includes(action))
@@ -11890,67 +13200,38 @@ function routineTool(tool) {
 }
 function planningProjectRoot(project, directory, env) {
   const paths = resolvePaths({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
-  return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside4(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
+  return registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project && inside6(directory, entry.root))?.root ?? registeredProjectRoots(paths.projectsFile).find((entry) => entry.canonicalKey === project)?.root ?? directory;
 }
-function validateLevelZeroActions(actions, projectRoot) {
-  const aliases = loadGitAliases(projectRoot);
-  for (const action of actions) {
-    if (action.action === "edit") {
-      if (!insideExistingPath(action.resource, projectRoot)) {
-        throw new Error("Nivel 0 solo modifica archivos existentes dentro del proyecto.");
-      }
-      let stat;
-      try {
-        stat = fs16.lstatSync(action.resource);
-      } catch {
-        throw new Error("Nivel 0 solo modifica un archivo existente.");
-      }
-      if (!stat.isFile() || stat.isSymbolicLink())
-        throw new Error("Nivel 0 exige un archivo regular existente.");
-      if (isProtectedDocumentationPath(projectRoot, action.resource) || classifyInfrastructurePath(projectRoot, action.resource).protected) {
-        throw new Error("Nivel 0 no modifica documentacion operativa ni superficies protegidas.");
-      }
-      continue;
-    }
-    if (action.action !== "shell")
-      continue;
-    if (classifyInfrastructureCommand(action.resource).protected || installationCommand(action.resource)) {
-      throw new Error("Nivel 0 no instala, publica ni despliega.");
-    }
-    if (destructiveCommand(action.resource))
-      throw new Error("Nivel 0 no admite comandos destructivos.");
-    const git = classifyGitCommand(action.resource, { aliases });
-    if (git.remote || git.destructive || git.failClosed || git.operations.some((operation) => !["read", "stage", "commit"].includes(operation))) {
-      throw new Error("Nivel 0 solo admite lectura Git, stage exacto y commit ordinario bajo sus hooks.");
-    }
+function verifySddSpec(specRef, specHash, project, directory, env) {
+  const config = loadConfig({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
+  const docs = resolveDocsProject(config.paths, config.projects.aliases, project);
+  const segments = specRef.trim().split("/");
+  if (!docs.initialized || !specRef.startsWith("SDD/") || !specRef.endsWith(".md") || specRef.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("La referencia SDD no pertenece a la documentación canónica inicializada.");
   }
-}
-function installationCommand(command) {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:(?:--?[a-z0-9._-]+)(?:=[^\s]+)?\s+)*(?:add|i|install|remove|rm|un|uninstall|up|update|upgrade)\b/i.test(command) || /\b(?:python(?:3)?\s+-m\s+)?(?:pip|pip3|uv(?:\s+pip)?|gem|cargo|go)\s+(?:install|uninstall)\b/i.test(command) || /\b(?:apt(?:-get)?|dnf|yum|apk|brew|choco|winget)\s+(?:install|remove|uninstall|update|upgrade)\b/i.test(command) || /\bmalahor-ai\s+(?:install|uninstall|update|codegraph\s+setup)\b/i.test(command);
-}
-function destructiveCommand(command) {
-  return /\b(?:rm|rmdir|unlink|shred|truncate|mkfs(?:\.[a-z0-9]+)?|wipefs)\b/i.test(command) || /\bdd\s+[^;&|]*\bof=/i.test(command);
-}
-function insideExistingPath(target, root) {
-  if (!inside4(target, root))
-    return false;
-  try {
-    return inside4(fs16.realpathSync(target), fs16.realpathSync(root));
-  } catch {
-    return false;
+  const docsRoot = fs19.realpathSync(docs.projectRoot);
+  const target = path23.resolve(docsRoot, specRef);
+  if (!inside6(target, docsRoot))
+    throw new Error("La referencia SDD queda fuera de la documentación canónica.");
+  const stat = fs19.lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2 * 1024 * 1024 || !inside6(fs19.realpathSync(target), docsRoot)) {
+    throw new Error("La especificación SDD debe ser un Markdown regular y acotado dentro de la documentación canónica.");
   }
+  const actualHash = createHash13("sha256").update(fs19.readFileSync(target)).digest("hex");
+  if (actualHash !== specHash)
+    throw new Error("La versión SHA-256 de la especificación SDD ya no coincide.");
 }
-function inside4(target, root) {
-  const relative = path20.relative(path20.resolve(root), path20.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path20.isAbsolute(relative);
+function inside6(target, root) {
+  const relative = path23.relative(path23.resolve(root), path23.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path23.isAbsolute(relative);
 }
-function text(value) {
+function text2(value) {
   return typeof value === "string" ? value : "";
 }
 function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function compareText3(left, right) {
+function compareText4(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 function denyDecision(input, decision) {
@@ -12089,7 +13370,7 @@ async function registerPlanCommand(host, storage, authority, options) {
 }
 
 // src/plugin/project-affinity.ts
-import path21 from "node:path";
+import path24 from "node:path";
 import { fileURLToPath } from "node:url";
 var PROJECT_AFFINITY_MARKER = "<!-- malahor-project-affinity:v1 -->";
 function createProjectAffinityResolver(options) {
@@ -12132,23 +13413,23 @@ function createProjectAffinityResolver(options) {
     return;
   };
   const observePrompt = async (input) => {
-    const sessionID = stringValue5(input.sessionID);
+    const sessionID = stringValue6(input.sessionID);
     if (!sessionID || !validSessionID(sessionID))
       return;
     const registry = loadRegistry(options);
     if (registry.projects.length === 0)
       return;
     const record3 = await readRecord2(options.storage, sessionID);
-    const text2 = promptText(input);
-    const promptCandidate = candidateFromText(text2, registry.projects);
+    const text3 = promptText2(input);
+    const promptCandidate = candidateFromText(text3, registry.projects);
     const selected = promptCandidate ?? candidateFromPaths(promptPaths(input), registry.projects, options.cwd);
-    if (record3?.pending?.kind === "conflict" && record3.pending.target && affirmative(text2)) {
+    if (record3?.pending?.kind === "conflict" && record3.pending.target && affirmative(text3)) {
       const target = findProject(registry.projects, record3.pending.target);
       if (target)
         return bind(options, sessionID, target);
     }
     if (selected) {
-      if (!record3?.canonicalKey || record3.canonicalKey === selected.canonicalKey || record3.pending?.kind === "ambiguous" || explicitSwitch(text2)) {
+      if (!record3?.canonicalKey || record3.canonicalKey === selected.canonicalKey || record3.pending?.kind === "ambiguous" || explicitSwitch(text3)) {
         return bind(options, sessionID, selected);
       }
       await writePending(options, sessionID, record3.canonicalKey, "conflict", [record3.canonicalKey, selected.canonicalKey], selected.canonicalKey);
@@ -12157,7 +13438,7 @@ function createProjectAffinityResolver(options) {
     return resolveSessionProject(sessionID);
   };
   const injectContext = async (input) => {
-    const sessionID = stringValue5(input.sessionID);
+    const sessionID = stringValue6(input.sessionID);
     if (!sessionID || !validSessionID(sessionID))
       return false;
     const system = Array.isArray(input.system) ? input.system : [];
@@ -12199,7 +13480,7 @@ function loadRegistry(options) {
     for (const root of roots) {
       const info = resolveProject(root, config.projects.aliases);
       names.add(info.name);
-      names.add(path21.basename(root));
+      names.add(path24.basename(root));
       for (const alias of info.aliases)
         names.add(alias);
     }
@@ -12237,14 +13518,14 @@ function candidateFromPaths(values, projects, base) {
     if (!filePath)
       continue;
     for (const project of projects) {
-      if (project.roots.some((root) => inside5(filePath, root)))
+      if (project.roots.some((root) => inside7(filePath, root)))
         matches.add(project.canonicalKey);
     }
   }
   return matches.size === 1 ? findProject(projects, [...matches][0]) : undefined;
 }
-function candidateFromText(text2, projects) {
-  const normalized = projectLookupKey(text2);
+function candidateFromText(text3, projects) {
+  const normalized = projectLookupKey(text3);
   if (!normalized)
     return;
   const matches = projects.filter((project) => project.names.some((name) => normalized === name || normalized.startsWith(`${name}-`) || normalized.endsWith(`-${name}`) || normalized.includes(`-${name}-`)));
@@ -12272,7 +13553,7 @@ async function readRecord2(storage, sessionID) {
   const value = await storage.get(projectAffinityKey(sessionID));
   if (!isRecord10(value) || value.schema !== 1 || value.sessionID !== sessionID)
     return;
-  const canonicalKey = stringValue5(value.canonicalKey);
+  const canonicalKey = stringValue6(value.canonicalKey);
   const pendingValue = isRecord10(value.pending) ? value.pending : undefined;
   const kind = pendingValue?.kind === "ambiguous" || pendingValue?.kind === "conflict" ? pendingValue.kind : undefined;
   const candidates = Array.isArray(pendingValue?.candidates) ? pendingValue.candidates.filter((item) => typeof item === "string") : [];
@@ -12283,10 +13564,10 @@ async function readRecord2(storage, sessionID) {
     ...kind ? { pending: {
       kind,
       candidates,
-      ...stringValue5(pendingValue?.target) ? { target: stringValue5(pendingValue?.target) } : {},
+      ...stringValue6(pendingValue?.target) ? { target: stringValue6(pendingValue?.target) } : {},
       ...pendingValue?.clarificationAsked === true ? { clarificationAsked: true } : {}
     } } : {},
-    updatedAt: stringValue5(value.updatedAt) ?? new Date(0).toISOString()
+    updatedAt: stringValue6(value.updatedAt) ?? new Date(0).toISOString()
   };
 }
 function clarificationInstruction(record3) {
@@ -12303,9 +13584,9 @@ Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${r
   return `${PROJECT_AFFINITY_MARKER}
 Proyecto ambiguo. Pregunta UNA sola vez cual proyecto usar entre: ${candidates}. La respuesta fijara la afinidad de esta sesion. No pidas claves tecnicas ni ejecutes operaciones protegidas antes de resolverlo.`;
 }
-function promptText(input) {
+function promptText2(input) {
   const prompt = isRecord10(input.prompt) ? input.prompt : undefined;
-  return [stringValue5(prompt?.text), stringValue5(input.text), stringValue5(input.message)].filter(Boolean).join(`
+  return [stringValue6(prompt?.text), stringValue6(input.text), stringValue6(input.message)].filter(Boolean).join(`
 `);
 }
 function promptPaths(input) {
@@ -12343,9 +13624,9 @@ function normalizedPath(value, base) {
       return;
     }
   }
-  if (!path21.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
+  if (!path24.isAbsolute(plain) && !plain.includes("/") && !plain.includes("\\"))
     return;
-  return path21.resolve(base, plain);
+  return path24.resolve(base, plain);
 }
 function resolved(project) {
   return { canonicalKey: project.canonicalKey, root: project.roots[0] };
@@ -12353,24 +13634,24 @@ function resolved(project) {
 function findProject(projects, canonicalKey) {
   return projects.find((project) => project.canonicalKey === canonicalKey);
 }
-function explicitSwitch(text2) {
-  return /\b(cambia|cambiar|usa|usar|vincula|vincular|asigna|asignar|switch)\b/i.test(text2);
+function explicitSwitch(text3) {
+  return /\b(cambia|cambiar|usa|usar|vincula|vincular|asigna|asignar|switch)\b/i.test(text3);
 }
-function affirmative(text2) {
-  return /^(?:si|sí|yes|confirmo|de acuerdo)[.!\s]*$/i.test(text2.trim());
+function affirmative(text3) {
+  return /^(?:si|sí|yes|confirmo|de acuerdo)[.!\s]*$/i.test(text3.trim());
 }
-function appendSystemText(system, text2) {
+function appendSystemText(system, text3) {
   const last = system.at(-1);
   if (isTextPart4(last))
     last.text = `${last.text}
 
-${text2}`;
+${text3}`;
   else
-    system.push({ type: "text", text: text2 });
+    system.push({ type: "text", text: text3 });
 }
-function inside5(value, root) {
-  const relative = path21.relative(path21.resolve(root), path21.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path21.isAbsolute(relative);
+function inside7(value, root) {
+  const relative = path24.relative(path24.resolve(root), path24.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path24.isAbsolute(relative);
 }
 function timestamp2(options) {
   return new Date((options.now ?? Date.now)()).toISOString();
@@ -12378,7 +13659,7 @@ function timestamp2(options) {
 function validSessionID(value) {
   return /^ses[A-Za-z0-9_-]{1,128}$/.test(value);
 }
-function stringValue5(value) {
+function stringValue6(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 function isTextPart4(value) {
@@ -12421,6 +13702,8 @@ async function setupV2(context) {
     shellRegistered: false,
     gitIntentRegistry: createGitIntentRegistry()
   };
+  const commitWorkflow = createCommitWorkflowRegistry();
+  const pointActions = createPointActionMediator();
   const cleanups = [];
   const capabilities = {};
   const degraded = [];
@@ -12507,12 +13790,27 @@ async function setupV2(context) {
   }) : undefined;
   if (projectAffinity)
     options.resolveSessionProject = projectAffinity.resolveSessionProject;
+  const resolveCommitWorkflowScope = async (sessionID) => {
+    const resolved2 = await resolvePlanningScope(sessionID, options);
+    if (!resolved2)
+      return;
+    const paths = resolvePaths({ ...process.env, MALAHOR_OPENCODE_DETECT: "0" }, resolved2.directory);
+    const roots = registeredProjectRoots(paths.projectsFile).filter((entry) => entry.canonicalKey === resolved2.scope.project).sort((left, right) => right.root.length - left.root.length);
+    const root = roots.find((entry) => isWithin5(resolved2.directory, entry.root))?.root ?? roots[0]?.root ?? resolved2.directory;
+    return {
+      sessionID: resolved2.scope.sessionID,
+      project: resolved2.scope.project,
+      policyRevision: resolved2.scope.policyRevision,
+      mode: resolved2.scope.mode,
+      root
+    };
+  };
   const permission = domain("permission");
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
       const evaluated = await evaluatePermission(input, options);
       if (evaluated.effect !== "deny")
-        await evaluatePlanningPermission(input, options, planningAuthority ? planStorage : undefined, planningAuthority);
+        await evaluatePlanningPermission(input, options, planningAuthority ? planStorage : undefined, planningAuthority, commitWorkflow, capabilities["point-action.approval"] === true ? pointActions : undefined);
       if (input.effect === "deny") {
         warn(`permission.evaluate deny: ${evaluated.effect === "deny" ? summary(evaluated.result) : String(input.message ?? "plan no autorizado")}`);
       }
@@ -12551,7 +13849,7 @@ async function setupV2(context) {
       if (shouldBlockPluginResult(result, options)) {
         throw new Error(formatPluginBlock(result));
       }
-      await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority, approvalPort);
+      await evaluatePlanningTool(input, options, planningAuthority ? planStorage : undefined, planningAuthority, approvalPort, commitWorkflow, capabilities["point-action.approval"] === true ? pointActions : undefined);
     }, cleanups);
     options.toolRegistered = registered;
     capabilities.tool = true;
@@ -12585,10 +13883,24 @@ async function setupV2(context) {
     }
     if (!capabilities["planning.v5"])
       criticalGaps.push("planning.v5");
+    if (planningTools && approvalPort && projectAffinity && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
+      try {
+        const registration = await registerCommitWorkflowTool(planningTools, commitWorkflow, resolveCommitWorkflowScope, approvalPort);
+        if (registration && typeof registration.dispose === "function")
+          cleanups.push(() => registration.dispose?.());
+        capabilities["commit.workflow.tool"] = true;
+      } catch (error) {
+        capabilities["commit.workflow.tool"] = false;
+        warn(`herramienta estructural de commit no registrada: ${error.message}`);
+      }
+    } else {
+      capabilities["commit.workflow.tool"] = false;
+    }
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
+    capabilities["commit.workflow.tool"] = false;
     criticalGaps.push("tool.hook");
     criticalGaps.push("planning.v5");
   }
@@ -12627,6 +13939,19 @@ async function setupV2(context) {
           } catch (error) {
             warn(`afinidad de proyecto no observable: ${error instanceof Error ? error.message : String(error)}`);
           }
+        }
+        if (event2 === "session.prompt.before" && capabilities["commit.workflow.tool"] === true) {
+          try {
+            await commitWorkflow.observePrompt(input, resolveCommitWorkflowScope);
+          } catch (error) {
+            const sessionID = typeof input.sessionID === "string" ? input.sessionID : "";
+            if (sessionID)
+              commitWorkflow.invalidate(sessionID);
+            warn(`solicitud estructural de commit no observable: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        if (event2 === "session.prompt.before" && typeof input.sessionID === "string") {
+          pointActions.invalidate(input.sessionID);
         }
         const result = await evaluateSessionHook(event2, input, options);
         if (event2 === "session.http-response.after")
@@ -12693,6 +14018,12 @@ async function setupV2(context) {
     criticalGaps.push("session.hook");
   }
   capabilities.session = Boolean(session);
+  capabilities["commit.workflow"] = capabilities["commit.workflow.tool"] === true && capabilities["session.prompt.before"] === true && capabilities["permission.evaluate"] === true && capabilities["tool.execute.before"] === true && capabilities["shell.create.before"] === true;
+  if (!capabilities["commit.workflow"])
+    criticalGaps.push("commit.workflow");
+  capabilities["point-action.approval"] = Boolean(approvalPort && planStorage && planningAuthority) && capabilities["permission.evaluate"] === true && capabilities["tool.execute.before"] === true && capabilities["session.prompt.before"] === true;
+  if (!capabilities["point-action.approval"])
+    criticalGaps.push("point-action.approval");
   const event = eventDomain(context.event);
   if (event && storage) {
     const capture = startEventCapture(event, storage, {
@@ -12836,6 +14167,10 @@ function locationCanonical(context) {
   const project = location && isRecord11(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
+function isWithin5(value, root) {
+  const relative = path25.relative(path25.resolve(root), path25.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path25.isAbsolute(relative);
+}
 function transformDomain(value) {
   if (!isRecord11(value) || typeof value.transform !== "function")
     return;
@@ -12865,21 +14200,21 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
   const memoryProject = memoryProjectForLocation(paths, cwd, canonical3);
-  const horielIndex = paths.horielIndex ?? path22.join(paths.malahorHome, "horiel", "index.js");
-  const horielDatabase = paths.horielDb ?? path22.join(paths.malahorHome, "horiel", "horiel.sqlite");
-  const horielSnapshots = paths.horielSnapshots ?? path22.join(paths.malahorHome, "horiel", "snapshots");
-  if (!fs17.existsSync(paths.mnemoIndex)) {
+  const horielIndex = paths.horielIndex ?? path25.join(paths.malahorHome, "horiel", "index.js");
+  const horielDatabase = paths.horielDb ?? path25.join(paths.malahorHome, "horiel", "horiel.sqlite");
+  const horielSnapshots = paths.horielSnapshots ?? path25.join(paths.malahorHome, "horiel", "snapshots");
+  if (!fs20.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   } else if (!memoryProject) {
     warnings.push("mcp.mnemo-project-unresolved");
   }
-  if (!fs17.existsSync(paths.docsIndex)) {
+  if (!fs20.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs17.existsSync(paths.mnemoIndex)) {
+      if (fs20.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
@@ -12900,7 +14235,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
         }
       }
       const existingDocs = editor.get("docs");
-      if (fs17.existsSync(paths.docsIndex)) {
+      if (fs20.existsSync(paths.docsIndex)) {
         if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
           editor.set("docs", {
             ...existingDocs ?? {},
@@ -12914,7 +14249,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
         }
       }
       const existingHoriel = editor.get("horiel");
-      if (fs17.existsSync(horielIndex)) {
+      if (fs20.existsSync(horielIndex)) {
         if (!memoryProject) {
           warnings.push("mcp.horiel-project-unresolved");
         } else if (!existingHoriel || isMalahorHoriel(existingHoriel, paths)) {
@@ -12938,7 +14273,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
       }
       let target;
       try {
-        const registered = canonical3 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs17.realpathSync(entry.root) === fs17.realpathSync(canonical3)) : undefined;
+        const registered = canonical3 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs20.realpathSync(entry.root) === fs20.realpathSync(canonical3)) : undefined;
         if (!canonical3 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
@@ -12980,14 +14315,14 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical3) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path22.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path25.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function memoryProjectForLocation(paths, cwd, canonical3) {
   const roots = registeredProjectRoots(paths.projectsFile).sort((left, right) => right.root.length - left.root.length);
   const canonicalValue = canonical3?.trim();
   const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
   const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
-  const byCanonicalPath = canonicalValue && path22.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
+  const byCanonicalPath = canonicalValue && path25.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
   const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey].filter((value) => Boolean(value)));
   if (candidates.size > 1)
     return;
@@ -13007,33 +14342,33 @@ function validMemoryProject(value) {
 }
 function canonicalLocation(value) {
   try {
-    return fs17.realpathSync(value);
+    return fs20.realpathSync(value);
   } catch {
-    return path22.resolve(value);
+    return path25.resolve(value);
   }
 }
 function pathInside(value, root) {
-  const relative = path22.relative(canonicalLocation(root), canonicalLocation(value));
-  return relative === "" || !relative.startsWith("..") && !path22.isAbsolute(relative);
+  const relative = path25.relative(canonicalLocation(root), canonicalLocation(value));
+  return relative === "" || !relative.startsWith("..") && !path25.isAbsolute(relative);
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path22.resolve(paths.opencodeDir, item) === path22.resolve(paths.mnemoIndex));
+  return command.some((item) => path25.resolve(paths.opencodeDir, item) === path25.resolve(paths.mnemoIndex));
 }
 function isMalahorDocs(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path22.resolve(paths.opencodeDir, item) === path22.resolve(paths.docsIndex));
+  return command.some((item) => path25.resolve(paths.opencodeDir, item) === path25.resolve(paths.docsIndex));
 }
 function isMalahorHoriel(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
-  const index = paths.horielIndex ?? path22.join(paths.malahorHome, "horiel", "index.js");
+  const index = paths.horielIndex ?? path25.join(paths.malahorHome, "horiel", "index.js");
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path22.resolve(paths.opencodeDir, item) === path22.resolve(index));
+  return command.some((item) => path25.resolve(paths.opencodeDir, item) === path25.resolve(index));
 }
 function withoutHorielEnablement(value) {
   if (!isRecord11(value))
@@ -13057,7 +14392,7 @@ function sessionLocationProject(value) {
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path22.join(directory, "plugin-state.json");
+  const file = path25.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -13069,15 +14404,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs17.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path22.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs17.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs20.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path25.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs20.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs17.chmodSync(temporary, 384);
-    fs17.renameSync(temporary, file);
+    fs20.chmodSync(temporary, 384);
+    fs20.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -13087,8 +14422,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path22.resolve(override);
-  return path22.join(os2.homedir(), ".malahor");
+    return path25.resolve(override);
+  return path25.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))

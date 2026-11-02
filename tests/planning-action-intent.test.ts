@@ -552,6 +552,7 @@ describe("A1: ActionIntentV1 y decisiones tipadas", () => {
       "PROTECTED_APPROVAL_REQUIRED",
       "HOST_ASK",
       "HOST_DENY",
+      "COMMIT_GRANT_MISMATCH",
       "CRITICAL_CONTROL_UNAVAILABLE",
     ];
 

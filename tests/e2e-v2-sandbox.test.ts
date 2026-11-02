@@ -13,6 +13,8 @@ const CRITICAL_CAPABILITIES = [
   "permission.evaluate",
   "shell.create.before",
   "tool.execute.before",
+  "commit.workflow",
+  "point-action.approval",
   "planning.v4",
   "session.prompt.before",
   "session.context.before",

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -32,9 +33,8 @@ import {
 import type { PlanningAuthority } from "../cli/core/planning-authority";
 import { detectSecretKinds, type PluginAdapterOptions } from "../cli/core/hooks/plugin-adapter";
 import { isProtectedDocumentationPath, parsePatchOperations } from "../cli/core/documentation-boundary";
-import { classifyInfrastructureCommand, classifyInfrastructurePath } from "../cli/core/infrastructure-boundary";
-import { classifyGitCommand, loadGitAliases } from "../cli/core/git-command-policy";
 import { classifyReadOnlyShellCommand } from "../cli/core/read-only-shell-policy";
+import { resolveDocsProject } from "../docs/resolver";
 import {
   loadActivePlan,
   loadActivePlanRaw,
@@ -43,6 +43,18 @@ import {
   type PlanningRetentionStorage,
 } from "./plan-retention";
 import { createExecutionGuard } from "./execution-guard";
+import {
+  COMMIT_MANIFEST_APPROVAL,
+  isCommitPreparationTool,
+  type CommitWorkflowRegistry,
+  type CommitWorkflowScope,
+} from "./commit-workflow";
+import {
+  POINT_ACTION_APPROVAL,
+  type PointActionCall,
+  type PointActionMediator,
+  type PointActionScope,
+} from "./point-action-approval";
 
 export type PlanningStorage = PlanningRetentionStorage;
 
@@ -95,11 +107,41 @@ const CODE_READ_TOOLS = new Set(["read", "glob", "grep"]);
 export async function evaluatePlanningPermission(
   input: Record<string, unknown>, options: PluginAdapterOptions, storage?: PlanningStorage,
   authority: PlanningAuthority = fallbackAuthority,
+  commitWorkflow?: CommitWorkflowRegistry,
+  pointActions?: PointActionMediator,
 ): Promise<void> {
   const action = text(input.action);
   const normalized = permissionAction(action);
   if (input.effect === "deny") return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
+  if (action === POINT_ACTION_APPROVAL) {
+    const root = resolved ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env) : undefined;
+    if (!root || !pointActions?.evaluateApprovalPermission(input, resolved
+      ? pointScope(resolved.scope, root) : undefined)) {
+      deny(input, "Aprobación puntual inválida, desactualizada o ajena a esta llamada.");
+    }
+    return;
+  }
+  if (action === COMMIT_MANIFEST_APPROVAL) {
+    const root = resolved ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env) : undefined;
+    if (!root || !commitWorkflow?.evaluateApprovalPermission(input, resolved
+      ? commitScope(resolved.scope, root) : undefined)) {
+      deny(input, "Aprobación de manifest de commit inválida, desactualizada o ajena a esta llamada.");
+    }
+    return;
+  }
+  if (isCommitPreparationTool(action)) {
+    if (resolved) {
+      const root = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+      commitWorkflow?.observePreparationPermission({
+        scope: commitScope(resolved.scope, root),
+        action,
+        effect: input.effect,
+        source: input.source,
+      });
+    }
+    return;
+  }
   if (action === MODE_CHANGE_ACTION) {
     const resources = Array.isArray(input.resources) ? input.resources : [];
     if (!resolved || resources.length !== 3 || resources.some((item) => typeof item !== "string")) {
@@ -162,6 +204,36 @@ export async function evaluatePlanningPermission(
   const projectRoot = resolved
     ? planningProjectRoot(resolved.scope.project, resolved.directory, options.env)
     : undefined;
+  if (normalized === "subagent" && resolved?.scope.mode !== "advisor"
+    && directDiagnosticPermission(input.resources)) return;
+  if (normalized === "shell" && resolved && projectRoot && resolved.scope.mode !== "advisor") {
+    const candidate = permissionShellCandidate(input, projectRoot);
+    const commitDecision = commitWorkflow?.authorizeShell({
+      ...commitScope(resolved.scope, projectRoot),
+      ...candidate,
+      boundary: "permission",
+    });
+    if (commitDecision?.effect === "allow") return;
+    if (commitDecision?.effect === "deny") {
+      denyDecision(input, commitDecision);
+      return;
+    }
+  }
+  if (resolved && normalized !== "shell" && PROTECTED.has(normalized)) {
+    commitWorkflow?.invalidate(resolved.scope.sessionID);
+  }
+  if (normalized === "edit" && resolved && projectRoot && storage && resolved.scope.mode !== "advisor") {
+    const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+    if (noActivePlan(rawState, authority) && pointActions?.observePermission({
+      scope: pointScope(resolved.scope, projectRoot),
+      directory: resolved.directory,
+      action: normalized,
+      resources: Array.isArray(input.resources) ? input.resources : [],
+      effect: input.effect,
+      source: input.source,
+      toolRegistered: options.toolRegistered === true,
+    })) return;
+  }
   if (normalized === "shell" && resolved && resolved.scope.mode !== "advisor" && projectRoot
     && readOnlyShellResources(input.resources, projectRoot, resolved.directory)) return;
   if (!resolved || !storage) {
@@ -201,8 +273,11 @@ export async function evaluatePlanningTool(
   input: Record<string, unknown>, options: PluginAdapterOptions, storage?: PlanningStorage,
   authority: PlanningAuthority = fallbackAuthority,
   approvals?: ApprovalPort,
+  commitWorkflow?: CommitWorkflowRegistry,
+  pointActions?: PointActionMediator,
 ): Promise<void> {
   const tool = text(input.tool);
+  if (isCommitPreparationTool(tool)) return;
   if (routineTool(tool)) return;
   if (["question", "list", "todowrite", "todoread", "invalid"].includes(tool)) return;
   const resolved = await resolvePlanningScope(input.sessionID, options);
@@ -215,8 +290,47 @@ export async function evaluatePlanningTool(
     throw new Error("Malahor: el asesor no ejecuta acciones de programacion.");
   }
   const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+  if (directDiagnosticTool(tool, input.input, input.agent)) return;
+  if (tool === "shell" || tool === "bash") {
+    const candidate = toolShellCandidate(input, resolved.directory, projectRoot);
+    const commitDecision = commitWorkflow?.authorizeShell({
+      ...commitScope(resolved.scope, projectRoot),
+      ...candidate,
+      boundary: "tool",
+    });
+    if (commitDecision?.effect === "allow") return;
+    if (commitDecision?.effect === "deny") {
+      throw new PlanningAuthorizationError(commitDecision.code);
+    }
+  } else if (["edit", "write", "patch", "subagent", "task"].includes(tool)) {
+    commitWorkflow?.invalidate(resolved.scope.sessionID);
+  }
   if (readOnlyShellTool(tool, input.input, projectRoot, resolved.directory)) return;
   if (!storage) throw new Error("Malahor: sesion/proyecto de planeacion no mediable.");
+  if (["edit", "write", "patch"].includes(tool) && approvals && pointActions) {
+    const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
+    if (noActivePlan(rawState, authority)) {
+      const call = pointToolCall(input);
+      if (call && await pointActions.authorizeTool({
+        scope: pointScope(resolved.scope, projectRoot),
+        directory: resolved.directory,
+        tool,
+        value: input.input,
+        call,
+        approval: approvals,
+        revalidate: async () => {
+          const fresh = await resolvePlanningScope(input.sessionID, options);
+          if (!fresh) return undefined;
+          const freshRoot = planningProjectRoot(fresh.scope.project, fresh.directory, options.env);
+          const freshState = await loadActivePlanRaw(storage, fresh.scope.sessionID);
+          return {
+            scope: pointScope(fresh.scope, freshRoot),
+            noActivePlan: noActivePlan(freshState, authority),
+          };
+        },
+      })) return;
+    }
+  }
   if (["edit", "write", "patch", "shell", "bash"].includes(tool)
     && await delegatedSpecialist(input.sessionID, resolved.scope, options, storage, authority)) return;
   const actions = toolActions(tool, input.input, resolved.directory);
@@ -265,10 +379,12 @@ export async function registerPlanningTools(
     editor.namespace({ name: "malahor", description: "Plan de trabajo portable de Malahor" });
     editor.add({
       name: "plan",
-      description: "Registra un plan proporcional (nivel 0, 1 o 2) y devuelve su Markdown para presentarlo en foreground exactamente una vez como mensaje normal. Nivel 0 conserva plan y go, pero usa una vista minima. En asistente solicita la primera revision; en ejecutor espera una solicitud posterior antes de pedir aprobacion.",
+      description: "Registra un plan de alcance considerable derivado de una especificacion SDD (nivel 1 o 2) y devuelve su Markdown para presentarlo en foreground exactamente una vez. Las acciones puntuales no usan esta tool.",
       input: {
         type: "object", properties: {
-          level: { type: "integer", enum: [0, 1, 2] },
+          level: { type: "integer", enum: [1, 2] },
+          specRef: { type: "string", pattern: "^SDD/.+\\.md$" },
+          specHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
           presentation: {
@@ -311,20 +427,23 @@ export async function registerPlanningTools(
             type: "object", properties: { planID: { type: "string" }, revision: { type: "string" } },
             required: ["planID", "revision"], additionalProperties: false,
           } },
-        }, required: ["level", "summary", "steps", "presentation", "actions"], additionalProperties: false,
+        }, required: ["level", "specRef", "specHash", "summary", "steps", "presentation", "actions"], additionalProperties: false,
       },
       options: { namespace: "malahor", codemode: false },
       execute: async (value: unknown, call: ToolCall) => {
         const resolved = await requireScope(call, options);
         if (call.agent !== "malahor") throw new Error("Solo el primario puede presentar el plan.");
         const raw = value as PlanInput;
-        if (raw.level !== 0 && raw.level !== 1 && raw.level !== 2) {
-          throw new Error("malahor_plan requiere level 0, 1 o 2.");
+        if (raw.level !== 1 && raw.level !== 2) {
+          throw new Error("malahor_plan requiere level 1 o 2 y una especificacion SDD versionada.");
         }
+        if (typeof raw.specRef !== "string" || typeof raw.specHash !== "string") {
+          throw new Error("malahor_plan requiere specRef y specHash de una especificacion SDD versionada.");
+        }
+        verifySddSpec(raw.specRef, raw.specHash, resolved.scope.project, resolved.directory, options.env);
          if (detectSecretKinds(raw).length > 0) throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
          const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory));
          const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
-         if (raw.level === 0) validateLevelZeroActions(actions ?? [], projectRoot);
         const newRepoDoc = actions?.find((item) => item.action === "edit"
           && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));
          if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
@@ -446,21 +565,23 @@ export async function injectPlanningInstructions(
     : mode === "advisor"
       ? "Modo asesor: presenta solo concepto/alternativas; sin pasos, rutas de implementacion ni ejecucion. Si usas malahor_plan, declara level 1 o 2; steps, presentation.steps, presentation.impact y actions van vacios."
       : [
-        `Modo ${mode}: presenta plan visible mediante malahor_plan antes de ejecutar.`,
-        mode === "assistant" ? "Guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar."
-          : "Presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
-        "Declara level 0, 1 o 2 en malahor_plan. Nivel 0 usa un plan minimo visible y conserva la aprobacion posterior go antes de cualquier efecto.",
-        "Nivel 0 no usa Discovery ni SDD, no delega en subagentes y no crea documentacion ceremonial; ejecuta en una sola pasada y aplica validacion enfocada. Commit es la excepcion: conserva todos sus gates y hooks obligatorios.",
-        "Usa nivel 0 solo con riesgo bajo, como maximo un archivo existente y sin categorias criticas, dependencias, infraestructura, instalacion, publicacion, despliegue ni destruccion; si el alcance crece, presenta nivel 1 o 2.",
-        "Commit nivel 0: tras go revisa status/diff y ejecuta diagnostico, tests, build, stage exacto, precommit, hooks y revalidacion; no pide otra confirmacion salvo fallo o cambio material.",
+        `Modo ${mode}: clasifica cada solicitud en inspeccion directa, accion puntual o trabajo considerable.`,
+        "Las lecturas, listados, Git read-only y el especialista malahor-diagnostico se ejecutan directamente sin plan, go ni aprobacion redundante.",
+        "Una unica edicion de bajo riesgo sobre un archivo regular existente no usa Planning ni SDD: define la llamada exacta y deja que el harness solicite una sola aprobacion nativa. No pidas go ni conviertas una accion ambigua en puntual.",
+        "Creacion, borrado, movimiento, symlinks, multiples recursos, secretos, infraestructura, shell mutante y superficies criticas quedan fuera del carril puntual y fallan cerrados.",
+        "Solo el trabajo considerable previamente expandido en una especificacion Markdown bajo SDD/ usa malahor_plan. Declara level 1 o 2 junto con specRef y specHash SHA-256 de esa version canonica.",
+        mode === "assistant" ? "Para trabajo considerable guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar."
+          : "Para trabajo considerable presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
+        "Commit explicito es un flujo especializado sin Planning: no uses malahor_plan, malahor_run ni pidas go. La orden solo habilita preparar el manifest; la autorizacion ejecutable procede de una unica aprobacion nativa de la UI.",
+        "Para ese commit carga git-commit-text, inspecciona y prevalida el subject; luego usa malahor_commit_prepare para validar el manifest y solicitar una única aprobación nativa de rutas y comandos exactos antes de diagnostico, tests, build, stage, precommit, commit y revalidacion. Cualquier diferencia invalida el grant.",
         "Usa divulgacion progresiva: el resumen humano contiene objetivo, resultado, hasta cinco pasos, impacto, riesgo y una seccion 'Que debes hacer ahora' narrada en lenguaje tecnico comprensible.",
         "La vista normal no incrusta IDs, comandos ni el anexo tecnico; tampoco muestra rutas exactas.",
         "Ante un riesgo alto o una categoria critica, los riesgos, consecuencias y controles reforzados permanecen visibles en lenguaje humano. Los comandos, rutas, identidad y digest se muestran unicamente mediante /malahor-plan detalles.",
         "Despues de malahor_plan, copia el Markdown delimitado como una presentacion foreground exactamente una vez en un mensaje normal y termina este turno; no invoques malahor_run en la misma respuesta.",
         "Una traza u output tecnico del tool en background no cuenta como presentacion del plan y nunca sustituye el mensaje normal.",
-        "Espera una solicitud posterior del usuario (por ejemplo, go o implementa) y solo entonces invoca malahor_run.",
+        "Solo despues de presentar un plan derivado de SDD espera una solicitud posterior del usuario (por ejemplo, go o implementa) y entonces invoca malahor_run.",
         "malahor_run resuelve el plan activo firmado desde ctx.storage; no pidas al usuario el digest ni le exijas /malahor-plan detalles para ejecutar. Un digest explicito sigue siendo compatible y debe coincidir exactamente.",
-        "Un go previo a la presentacion no aprueba un plan todavia no visto.",
+        "Un go previo a la presentacion no aprueba un plan todavia no visto y nunca autoriza una accion puntual.",
         "El plan enumera rutas/comandos/subagentes exactos. Si cambian materialmente, presenta una revision nueva y vuelve a pedir confirmaciones.",
         "Los retries tecnicos con el mismo ActionIntentV1 reutilizan la revision V5; ASK, DENY, cambios materiales o loop guard bloquean sin auto-planificar.",
         "Si un guardrail incluye remediacion estructurada y saneada, explicala para una persona no desarrolladora como bloques completos de referencia y reemplazo: archivo y linea, busca, reemplaza, guarda y revalida.",
@@ -1110,6 +1231,98 @@ function readOnlyShellTool(
     && classifyReadOnlyShellCommand(args.command, projectRoot, { workingDirectory }).readOnly;
 }
 
+function permissionShellCandidate(
+  input: Record<string, unknown>,
+  projectRoot: string,
+): { command: string; cwd: string; messageID: string; toolCallID: string; valid: boolean } {
+  const resources = Array.isArray(input.resources) ? input.resources : [];
+  const metadata = isRecord(input.metadata) ? input.metadata : {};
+  const metadataCommand = text(metadata.command || metadata.cmd);
+  const rawCwd = metadata.workdir ?? metadata.cwd;
+  const source = isRecord(input.source) ? input.source : {};
+  const command = resources.length === 1 && typeof resources[0] === "string" ? resources[0] : "";
+  const messageID = text(source.messageID);
+  const toolCallID = text(source.id || source.callID || source.toolCallID);
+  const valid = Boolean(command)
+    && (!metadataCommand || metadataCommand === command)
+    && (rawCwd === undefined || typeof rawCwd === "string")
+    && source.type === "tool"
+    && Boolean(messageID && toolCallID);
+  return {
+    command,
+    cwd: typeof rawCwd === "string" ? path.resolve(projectRoot, rawCwd) : projectRoot,
+    messageID,
+    toolCallID,
+    valid,
+  };
+}
+
+function toolShellCandidate(
+  input: Record<string, unknown>,
+  sessionDirectory: string,
+  projectRoot: string,
+): { command: string; cwd: string; messageID: string; toolCallID: string; valid: boolean } {
+  const args = isRecord(input.input) ? input.input : {};
+  const command = typeof args.command === "string" ? args.command : "";
+  const cwdValuesValid = [args.cwd, args.workdir]
+    .every((cwd) => cwd === undefined || typeof cwd === "string");
+  const cwd = typeof args.cwd === "string" ? path.resolve(sessionDirectory, args.cwd) : undefined;
+  const workdir = typeof args.workdir === "string" ? path.resolve(sessionDirectory, args.workdir) : undefined;
+  const messageID = text(input.messageID);
+  const toolCallID = text(input.id || input.callID || input.toolCallID);
+  return {
+    command,
+    cwd: workdir ?? cwd ?? projectRoot,
+    messageID,
+    toolCallID,
+    valid: Boolean(command.trim()) && cwdValuesValid && (!cwd || !workdir || cwd === workdir)
+      && Boolean(messageID && toolCallID),
+  };
+}
+
+function commitScope(scope: PlanScope, root: string): CommitWorkflowScope {
+  return {
+    sessionID: scope.sessionID,
+    project: scope.project,
+    policyRevision: scope.policyRevision,
+    mode: scope.mode,
+    root,
+  };
+}
+
+function pointScope(scope: PlanScope, root: string): PointActionScope {
+  return {
+    sessionID: scope.sessionID,
+    project: scope.project,
+    policyRevision: scope.policyRevision,
+    mode: scope.mode,
+    root,
+  };
+}
+
+function pointToolCall(input: Record<string, unknown>): PointActionCall | undefined {
+  const sessionID = text(input.sessionID);
+  const agent = text(input.agent);
+  const messageID = text(input.messageID);
+  const id = text(input.id || input.callID || input.toolCallID);
+  return sessionID && agent && messageID && id ? { sessionID, agent, messageID, id } : undefined;
+}
+
+function noActivePlan(value: unknown, authority: PlanningAuthority): boolean {
+  if (value === undefined || value === null) return true;
+  return validState(value, authority) && ["completed", "revoked", "superseded"].includes(value.phase);
+}
+
+function directDiagnosticPermission(resources: unknown): boolean {
+  return Array.isArray(resources) && resources.length === 1 && resources[0] === "malahor-diagnostico";
+}
+
+function directDiagnosticTool(tool: string, value: unknown, agent: unknown): boolean {
+  if (tool !== "subagent" && tool !== "task") return false;
+  const args = isRecord(value) ? value : {};
+  return agent === "malahor" && args.agent === "malahor-diagnostico";
+}
+
 function permissionAction(action: string): string {
   if (["bash", "command"].includes(action)) return "shell";
   if (["write", "patch", "create"].includes(action)) return "edit";
@@ -1132,55 +1345,30 @@ function planningProjectRoot(project: string, directory: string, env: NodeJS.Pro
     ?? directory;
 }
 
-function validateLevelZeroActions(actions: PlannedAction[], projectRoot: string): void {
-  const aliases = loadGitAliases(projectRoot);
-  for (const action of actions) {
-    if (action.action === "edit") {
-      if (!insideExistingPath(action.resource, projectRoot)) {
-        throw new Error("Nivel 0 solo modifica archivos existentes dentro del proyecto.");
-      }
-      let stat: fs.Stats;
-      try { stat = fs.lstatSync(action.resource); }
-      catch { throw new Error("Nivel 0 solo modifica un archivo existente."); }
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Nivel 0 exige un archivo regular existente.");
-      if (isProtectedDocumentationPath(projectRoot, action.resource)
-        || classifyInfrastructurePath(projectRoot, action.resource).protected) {
-        throw new Error("Nivel 0 no modifica documentacion operativa ni superficies protegidas.");
-      }
-      continue;
-    }
-    if (action.action !== "shell") continue;
-    if (classifyInfrastructureCommand(action.resource).protected || installationCommand(action.resource)) {
-      throw new Error("Nivel 0 no instala, publica ni despliega.");
-    }
-    if (destructiveCommand(action.resource)) throw new Error("Nivel 0 no admite comandos destructivos.");
-    const git = classifyGitCommand(action.resource, { aliases });
-    if (git.remote || git.destructive || git.failClosed
-      || git.operations.some((operation) => !["read", "stage", "commit"].includes(operation))) {
-      throw new Error("Nivel 0 solo admite lectura Git, stage exacto y commit ordinario bajo sus hooks.");
-    }
+function verifySddSpec(
+  specRef: string,
+  specHash: string,
+  project: string,
+  directory: string,
+  env: NodeJS.ProcessEnv | undefined,
+): void {
+  const config = loadConfig({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
+  const docs = resolveDocsProject(config.paths, config.projects.aliases, project);
+  const segments = specRef.trim().split("/");
+  if (!docs.initialized || !specRef.startsWith("SDD/") || !specRef.endsWith(".md")
+    || specRef.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("La referencia SDD no pertenece a la documentación canónica inicializada.");
   }
-}
-
-function installationCommand(command: string): boolean {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:(?:--?[a-z0-9._-]+)(?:=[^\s]+)?\s+)*(?:add|i|install|remove|rm|un|uninstall|up|update|upgrade)\b/i.test(command)
-    || /\b(?:python(?:3)?\s+-m\s+)?(?:pip|pip3|uv(?:\s+pip)?|gem|cargo|go)\s+(?:install|uninstall)\b/i.test(command)
-    || /\b(?:apt(?:-get)?|dnf|yum|apk|brew|choco|winget)\s+(?:install|remove|uninstall|update|upgrade)\b/i.test(command)
-    || /\bmalahor-ai\s+(?:install|uninstall|update|codegraph\s+setup)\b/i.test(command);
-}
-
-function destructiveCommand(command: string): boolean {
-  return /\b(?:rm|rmdir|unlink|shred|truncate|mkfs(?:\.[a-z0-9]+)?|wipefs)\b/i.test(command)
-    || /\bdd\s+[^;&|]*\bof=/i.test(command);
-}
-
-function insideExistingPath(target: string, root: string): boolean {
-  if (!inside(target, root)) return false;
-  try {
-    return inside(fs.realpathSync(target), fs.realpathSync(root));
-  } catch {
-    return false;
+  const docsRoot = fs.realpathSync(docs.projectRoot);
+  const target = path.resolve(docsRoot, specRef);
+  if (!inside(target, docsRoot)) throw new Error("La referencia SDD queda fuera de la documentación canónica.");
+  const stat = fs.lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2 * 1024 * 1024
+    || !inside(fs.realpathSync(target), docsRoot)) {
+    throw new Error("La especificación SDD debe ser un Markdown regular y acotado dentro de la documentación canónica.");
   }
+  const actualHash = createHash("sha256").update(fs.readFileSync(target)).digest("hex");
+  if (actualHash !== specHash) throw new Error("La versión SHA-256 de la especificación SDD ya no coincide.");
 }
 
 function inside(target: string, root: string): boolean {

@@ -985,6 +985,8 @@ const KNOWN_OPENCODE_TOOLS = new Set([
   "malahor_plan",
   "malahor_run",
   "malahor_plan_control",
+  "malahor_commit_prepare",
+  "commit_prepare",
   "invalid",
 ]);
 

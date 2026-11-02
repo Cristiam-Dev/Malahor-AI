@@ -132,13 +132,18 @@ describe("comandos gestionados de OpenCode", () => {
     expect(commit).toContain("git diff --stat");
     expect(commit).toContain("Ejecuta directamente el diagnostico disponible del stack");
     expect(commit).toContain("Ejecuta directamente las pruebas");
-    expect(commit).toContain("No delegues un commit nivel 0");
+    expect(commit).toContain("No delegues este flujo de commit");
     expect(commit).toContain("git-commit-text");
     expect(commit).not.toContain("caveman-commit");
     expect(commit).toContain("malahor-ai git precommit");
     expect(commit).toContain("git commit -m");
     expect(commit).toContain("Git remoto es hard DENY");
     expect(commit).toContain('intent: "commit"');
+    expect(commit).toContain("malahor_commit_prepare");
+    expect(commit).toContain("<!-- malahor-commit-request:v1 -->");
+    expect(commit).toMatch(/una [uú]nica aprobaci[oó]n nativa/i);
+    expect(commit).toMatch(/No presentes `malahor_plan`/i);
+    expect(commit).not.toMatch(/plan nivel 0/i);
     expect(commit).toContain("malahor-ai git commit-fallback");
     expect(commit).toContain('--paths \'["ruta/uno.ts","ruta/con,coma.ts"]\'');
     expect(commit).toContain("PowerShell");
@@ -167,7 +172,12 @@ describe("comandos gestionados de OpenCode", () => {
       expect(prompt).toContain("malahor-ai git precommit");
       expect(prompt).toContain("Git es local-only");
       expect(prompt).toContain("commit-fallback");
-      expect(prompt).toMatch(/sin (?:otra )?confirmación redundante/);
+      expect(prompt).toMatch(/aprobaci[oó]n nativa/i);
+      if (host === "v2") {
+        expect(prompt).toContain("malahor_commit_prepare");
+        expect(prompt).toMatch(/manifest exacto/i);
+        expect(prompt).not.toMatch(/comitea[^\n]*plan nivel 0/i);
+      }
     }
   });
 

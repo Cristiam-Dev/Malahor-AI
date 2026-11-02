@@ -24,6 +24,7 @@ export const AUTHORIZATION_DENIAL_CODES = [
   "PROTECTED_APPROVAL_REQUIRED",
   "HOST_ASK",
   "HOST_DENY",
+  "COMMIT_GRANT_MISMATCH",
   "CRITICAL_CONTROL_UNAVAILABLE",
 ] as const;
 
@@ -141,6 +142,7 @@ export function authorizationMessage(code: AuthorizationDenialCode, detail?: str
     PROTECTED_APPROVAL_REQUIRED: "Malahor: la operación protegida requiere su aprobación específica.",
     HOST_ASK: "Malahor: el host requiere una aprobación humana específica.",
     HOST_DENY: "Malahor: el host denegó la operación.",
+    COMMIT_GRANT_MISMATCH: "Malahor: la llamada no coincide con el paso vigente del grant de commit.",
     CRITICAL_CONTROL_UNAVAILABLE: "Malahor: un control crítico de autorización no está disponible.",
   };
   return detail ? `${base[code]} ${detail}` : base[code];
