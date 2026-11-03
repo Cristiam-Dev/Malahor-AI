@@ -122,6 +122,9 @@ describe("autorización estructural del commit local", () => {
       "comitea los cambios",
       "haz el commit",
       "por favor, realiza el commit",
+      "listo realiza el commit",
+      "ok, haz el commit",
+      "dale, comitea",
       "/malahor-commit",
       `${COMMIT_COMMAND_MARKER}\n\nEjecuta el flujo gestionado.`,
     ]) {
@@ -169,6 +172,53 @@ describe("autorización estructural del commit local", () => {
     }
     expect(shell(registry, commands.at(-1)!, "tool")).toEqual({ effect: "absent" });
     expect(shell(registry, commands[0]!, "tool")).toEqual({ effect: "absent" });
+  });
+
+  test("acepta la misma secuencia con comillas, espacios y Unicode distintos", async () => {
+    const { registry } = await request("comitea");
+    await prepare(registry);
+    const commands = [
+      ...preparation().commands.diagnostics,
+      ...preparation().commands.tests,
+      ...preparation().commands.build,
+      preparation().commands.stage,
+    ];
+    for (const [index, command] of commands.entries()) {
+      const call = { messageID: `msg_variant_${index}`, toolCallID: `call_variant_${index}` };
+      expect(shell(registry, command, "tool", scope, call)).toEqual({ effect: "allow" });
+      expect(shell(registry, command, "permission", scope, call)).toEqual({ effect: "allow" });
+    }
+    const precommit = preparation().commands.precommit;
+    const variant = precommit.replace(/'/g, '"').replace(/--message\s+/, "--message   ");
+    const call = { messageID: "msg_variant_precommit", toolCallID: "call_variant_precommit" };
+    expect(shell(registry, variant, "tool", scope, call)).toEqual({ effect: "allow" });
+    expect(shell(registry, variant, "permission", scope, call)).toEqual({ effect: "allow" });
+
+    const commit = preparation().commands.commit;
+    const commitCall = { messageID: "msg_variant_commit", toolCallID: "call_variant_commit" };
+    expect(shell(registry, commit, "tool", scope, commitCall)).toEqual({ effect: "allow" });
+    expect(shell(registry, commit, "permission", scope, commitCall)).toEqual({ effect: "allow" });
+  });
+
+  test("acepta el precommit sin comillas y con el subject dividido", async () => {
+    const { registry } = await request("comitea");
+    await prepare(registry);
+    const commands = [
+      ...preparation().commands.diagnostics,
+      ...preparation().commands.tests,
+      ...preparation().commands.build,
+      preparation().commands.stage,
+    ];
+    for (const [index, command] of commands.entries()) {
+      const call = { messageID: `msg_no_quotes_${index}`, toolCallID: `call_no_quotes_${index}` };
+      expect(shell(registry, command, "tool", scope, call)).toEqual({ effect: "allow" });
+      expect(shell(registry, command, "permission", scope, call)).toEqual({ effect: "allow" });
+    }
+    const precommit = preparation().commands.precommit;
+    const withoutQuotes = precommit.replace(/'/g, "");
+    const call = { messageID: "msg_no_quotes_precommit", toolCallID: "call_no_quotes_precommit" };
+    expect(shell(registry, withoutQuotes, "tool", scope, call)).toEqual({ effect: "allow" });
+    expect(shell(registry, withoutQuotes, "permission", scope, call)).toEqual({ effect: "allow" });
   });
 
   test("mantiene compatibilidad permission→tool y fronteras repetidas idempotentes", async () => {

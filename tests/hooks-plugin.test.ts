@@ -43,6 +43,7 @@ beforeEach(() => {
   home = path.join(root, "home");
   opencode = path.join(root, "opencode");
   fs.mkdirSync(repo, { recursive: true });
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(opencode, { recursive: true });
   fs.mkdirSync(path.join(home, "docs"), { recursive: true });
@@ -460,7 +461,7 @@ describe("adaptador de plugin V2", () => {
       input: { filePath: path.join(repo, "package.json") },
     }, { cwd: home, permissionRegistered: true, shellRegistered: true, env });
 
-    expect(result.decision).toBe("allow");
+    expect(result.decision, JSON.stringify(result.violations)).toBe("allow");
     const audit = fs.readFileSync(path.join(home, "audit", "security.jsonl"), "utf8")
       .trim()
       .split("\n")
@@ -827,7 +828,7 @@ describe("adaptador de plugin V2", () => {
       },
     }, toolHookOptions());
 
-    expect(result.decision).toBe("allow");
+    expect(result.decision, JSON.stringify(result.violations)).toBe("allow");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
   });
 
@@ -968,7 +969,7 @@ describe("adaptador de plugin V2", () => {
       },
     }, toolHookOptions());
 
-    expect(result.decision).toBe("allow");
+    expect(result.decision, JSON.stringify(result.violations)).toBe("allow");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-PATCH-UNEVALUABLE")).toBe(false);
   });
@@ -1014,6 +1015,66 @@ describe("adaptador de plugin V2", () => {
     expect(output).toContain('"prefix "');
     expect(output).toContain("\"' suffix\"");
     expect(output).not.toContain(syntheticValue);
+  });
+
+  test("tool edit evalúa la postimagen y permite eliminar el único fixture sintético", async () => {
+    const relativePath = "src/edit-remediate.ts";
+    const assignment = detectedAssignment();
+    writeSourceFixture(relativePath, assignment);
+
+    const result = await evaluateToolHook({
+      tool: "edit",
+      input: {
+        path: path.join(repo, relativePath),
+        oldString: assignment,
+        newString: "export const ready = true;",
+      },
+    }, toolHookOptions());
+
+    expect(result.decision, JSON.stringify(result.violations)).toBe("allow");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+  });
+
+  test("tool edit no evaluable distingue contexto de secreto", async () => {
+    const relativePath = "src/edit-unevaluable.ts";
+    writeSourceFixture(relativePath, "export const ready = true;");
+
+    const result = await evaluateToolHook({
+      tool: "edit",
+      input: {
+        path: path.join(repo, relativePath),
+        oldString: "texto-que-no-existe",
+        newString: "export const ready = false;",
+      },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-PATCH-UNEVALUABLE")).toBe(true);
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+  });
+
+  test("tool write escanea la postimagen y deniega un secreto real", async () => {
+    const relativePath = "src/write-secret.ts";
+    const assignment = detectedAssignment();
+
+    const result = await evaluateToolHook({
+      tool: "write",
+      input: { path: path.join(repo, relativePath), content: `${assignment}\n` },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("deny");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
+  });
+
+  test("tool write limpio crea el archivo sin un falso positivo", async () => {
+    const relativePath = "src/write-clean.ts";
+
+    const result = await evaluateToolHook({
+      tool: "write",
+      input: { path: path.join(repo, relativePath), content: "export const ready = true;\n" },
+    }, toolHookOptions());
+
+    expect(result.decision, JSON.stringify(result.violations)).toBe("allow");
   });
 
   test("tool patch deniega un cambio no relacionado que conserva el hallazgo", async () => {
@@ -1268,7 +1329,7 @@ describe("adaptador de plugin V2", () => {
       resolveSessionProject: async () => undefined,
       env,
     });
-    expect(result.decision).toBe("allow");
+    expect(result.decision, JSON.stringify(result.violations)).toBe("allow");
   });
 
   test("un fallo al resolver la sesion deniega en vez de usar la instancia", async () => {

@@ -117,6 +117,7 @@ describe("catálogo gestionado de skills para OpenCode V2", () => {
     expect(unexpectedFiles).toEqual([]);
     expect(publishedIds).toContain("programming-frontend-angular");
     expect(publishedIds).toContain("git-commit-text");
+    expect(publishedIds).toContain("planificacion-verificada");
     expect(fs.existsSync(path.join(destination, MANIFEST_FILE))).toBe(true);
     expect(() => JSON.parse(fs.readFileSync(path.join(destination, MANIFEST_FILE), "utf8"))).not.toThrow();
 

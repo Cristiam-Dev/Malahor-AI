@@ -624,7 +624,10 @@ function secretScanGuard(context: HookContext): HookViolation[] {
   const scan = context.security
     ? context.security.git?.scanStagedContent !== false || context.security.persistence?.blockSecrets !== false
     : context.policy?.secrets.scanBeforeCommit !== false;
-  if (context.event === "file.write.before" && context.metadata?.tool === "patch") {
+  const writeTool = String(context.metadata?.tool);
+  if (context.event === "file.write.before"
+    && (writeTool === "patch"
+      || (["edit", "write"].includes(writeTool) && context.metadata?.secretPatchSummary !== undefined))) {
     return patchSecretScanGuard(context);
   }
   if (!scan) return [];
@@ -647,12 +650,13 @@ function secretScanGuard(context: HookContext): HookViolation[] {
 function patchSecretScanGuard(context: HookContext): HookViolation[] {
   const evidence = context.metadata?.secretPatchSummary;
   const summary = parseSecretPatchSummary(evidence);
-  if (!summary?.evaluable || !patchSummaryMatchesTargets(context, summary)
+  const isPatch = String(context.metadata?.tool) === "patch";
+  if (!summary?.evaluable || (isPatch && (!patchSummaryMatchesTargets(context, summary)
     || !revalidateSecretPatchSummary(evidence, context.cwd, {
       projectRoot: context.projectRoot,
       ...(context.project ? { project: context.project } : {}),
       ...(context.policyMeta?.policyHash ? { policyHash: context.policyMeta.policyHash } : {}),
-    })) {
+    })))) {
     const unavailable = summary?.evaluable === true || context.metadata?.secretPatchControlUnavailable === true;
     const failure = summary?.failure ?? {
       code: unavailable ? "SECURITY_CONTROL_UNAVAILABLE" : "PATCH_NOT_EVALUABLE",

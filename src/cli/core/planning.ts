@@ -501,7 +501,15 @@ export function normalizePlannedActions(actions: PlannedAction[]): PlannedAction
     return { action: item.action, resource: item.resource, key, dependsOn };
   });
   const unique = new Map<string, PlannedAction>();
+  const editTargets = new Map<string, string>();
   for (const item of normalized) {
+    if (item.action === "edit") {
+      const previousKey = editTargets.get(item.resource);
+      if (previousKey !== undefined && previousKey !== item.key) {
+        throw new Error("Dos acciones de edición no pueden compartir el mismo archivo; agrupa los cambios en una sola edición o divide el trabajo en otro plan.");
+      }
+      editTargets.set(item.resource, item.key!);
+    }
     const identity = `${item.action}\0${item.resource}`;
     const previous = unique.get(identity);
     if (previous && (previous.key !== item.key || !sameStrings(previous.dependsOn ?? [], item.dependsOn ?? []))) {

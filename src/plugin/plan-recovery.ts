@@ -366,6 +366,7 @@ export function createPlanRevisionRecovery(
       await ensureParentCheckpoint(storage, parent, checkpoint, authority);
       const normalized = createCandidateRecord(parent, candidate, checkpoint, authority);
       const key = planRevisionCandidateKey(parent.planID);
+      if (typeof storage.remove === "function") await storage.remove(key);
       await writeAndVerify(storage, key, normalized, (value) =>
         validRevisionCandidate(value, parent, authority)
           && value.proof === normalized.proof);
@@ -1090,7 +1091,7 @@ async function writeAndVerify<T>(
 ): Promise<void> {
   await storage.set(key, structuredClone(value));
   const persisted = await storage.get(key);
-  if (!valid(persisted)) throw new Error(`La escritura durable no quedó verificable: ${key}.`);
+  if (!valid(persisted)) throw new Error(`La escritura durable no quedó verificable: ${key}. Completa, pausa o revoca el plan antes de reintentar.`);
 }
 
 function samePlanRevision(

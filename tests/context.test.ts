@@ -180,6 +180,8 @@ describe("raíces registradas por proyecto", () => {
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/lectura.*equivalente.*no.*revisi[oó]n.*plan/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/acci[oó]n puntual.*archivo regular existente.*aprobaci[oó]n nativa/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/trabajo considerable.*SDD.*nivel 1 o 2.*specRef.*specHash/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/planificacion-verificada.*preflight read-only.*mapa de impacto.*12 acciones/is);
+    expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/Ninguna acción edit.*bloque exacto.*único.*oldString literal/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/commit expl[ií]cito.*sin Planning.*aprobaci[oó]n nativa/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/malahor_commit_prepare.*manifest.*aprobaci[oó]n nativa/is);
     expect(MALAHOR_RUNTIME_PROTOCOL).toMatch(/no presenta malahor_plan.*no invoca malahor_run.*no espera go/is);

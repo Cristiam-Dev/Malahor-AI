@@ -98,8 +98,12 @@ const AWS_ACCESS_KEY = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g;
 const BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g;
 const CREDENTIAL_ASSIGNMENT = new RegExp(CREDENTIAL_ASSIGNMENT_SOURCE, "gi");
 const SECRET_KIND_SET = new Set<string>(SECRET_KINDS);
-const SECRET_PATCH_SUMMARY_BRAND = Symbol("malahor.secret-patch-summary");
-const PATCH_EVIDENCE = new WeakMap<SecretPatchSummary, PatchEvidence>();
+const SECRET_PATCH_SUMMARY_BRAND = Symbol.for("malahor.secret-patch-summary");
+const PATCH_EVIDENCE_KEY = Symbol.for("malahor.secret-patch-evidence");
+const PATCH_EVIDENCE: WeakMap<SecretPatchSummary, PatchEvidence> =
+  (globalThis as Record<PropertyKey, unknown>)[PATCH_EVIDENCE_KEY] as WeakMap<SecretPatchSummary, PatchEvidence>
+  ?? new WeakMap<SecretPatchSummary, PatchEvidence>();
+(globalThis as Record<PropertyKey, unknown>)[PATCH_EVIDENCE_KEY] = PATCH_EVIDENCE;
 const MAX_SCANNED_FILE_BYTES = 512 * 1024;
 const MAX_PATCH_FILES = 100;
 const MAX_FINDINGS_PER_KIND = 1_000_000;
@@ -335,6 +339,116 @@ export function revalidateSecretPatchSummary(
     } else if (readRegularTextFile(item.absolute)?.hash !== item.hash) return false;
   }
   return true;
+}
+
+/** Resumen de una escritura completa propuesta, no de la preimagen. */
+export function buildSecretFileSummary(input: {
+  cwd: string;
+  path: string;
+  operation: "add" | "update";
+  content: string;
+  binding?: SecretPatchBinding;
+}): SecretPatchSummary {
+  const root = path.resolve(input.cwd);
+  const absolute = path.resolve(root, input.path);
+  const fail = (reason: SecretPatchDiagnostic["reason"], code: SecretPatchDiagnostic["code"] = "PATCH_NOT_EVALUABLE") =>
+    brandedSummary(false, [], {
+      root,
+      binding: input.binding,
+      patchHash: digest(input.content),
+      prestate: [],
+    }, { code, reason, operation: input.operation });
+  if (!input.path || /[\\\u0000-\u001f\u007f]/.test(input.path)
+    || !isWithin(absolute, root) || absolute === root) return fail("invalid-path");
+  if (!pathComponentsAreRegular(root, absolute)) return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  if (Buffer.byteLength(input.content) > MAX_SCANNED_FILE_BYTES) {
+    return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  }
+  const relative = path.relative(root, absolute).split(path.sep).join("/");
+  if (input.operation === "add") {
+    if (lstatIfExists(absolute) !== null) return fail("file-unavailable");
+    return brandedSummary(true, [{
+      path: relative,
+      operation: "add",
+      before: {},
+      after: detectFileSecretCounts(input.content, absolute),
+    }], {
+      root,
+      binding: input.binding,
+      patchHash: digest(input.content),
+      prestate: [{ absolute, hash: null }],
+    });
+  }
+  const current = readRegularTextFile(absolute);
+  if (current === null) return fail("file-unavailable");
+  return brandedSummary(true, [{
+    path: relative,
+    operation: "update",
+    before: detectFileSecretCounts(current.content, absolute),
+    after: detectFileSecretCounts(input.content, absolute),
+  }], {
+    root,
+    binding: input.binding,
+    patchHash: digest(input.content),
+    prestate: [{ absolute, hash: current.hash }],
+  });
+}
+
+/** Simula un edit exacto y devuelve el resumen de su postimagen. */
+export function buildSecretEditSummary(input: {
+  cwd: string;
+  path: string;
+  oldString: string;
+  newString: string;
+  replaceAll?: boolean;
+  binding?: SecretPatchBinding;
+}): SecretPatchSummary {
+  const root = path.resolve(input.cwd);
+  const absolute = path.resolve(root, input.path);
+  const fail = (reason: SecretPatchDiagnostic["reason"], code: SecretPatchDiagnostic["code"] = "PATCH_NOT_EVALUABLE") =>
+    brandedSummary(false, [], {
+      root,
+      binding: input.binding,
+      patchHash: digest(input.newString),
+      prestate: [],
+    }, { code, reason, operation: "update" });
+  if (!input.path || /[\\\u0000-\u001f\u007f]/.test(input.path)
+    || !isWithin(absolute, root) || absolute === root) return fail("invalid-path");
+  if (!pathComponentsAreRegular(root, absolute)) return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  const current = readRegularTextFile(absolute);
+  if (current === null) return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  const occurrences = countOccurrences(current.content, input.oldString);
+  if (occurrences === 0) return fail("context-mismatch");
+  if (occurrences > 1 && input.replaceAll !== true) return fail("ambiguous-context");
+  const post = input.replaceAll
+    ? current.content.split(input.oldString).join(input.newString)
+    : current.content.replace(input.oldString, input.newString);
+  if (Buffer.byteLength(post) > MAX_SCANNED_FILE_BYTES) {
+    return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  }
+  const relative = path.relative(root, absolute).split(path.sep).join("/");
+  return brandedSummary(true, [{
+    path: relative,
+    operation: "update",
+    before: detectFileSecretCounts(current.content, absolute),
+    after: detectFileSecretCounts(post, absolute),
+  }], {
+    root,
+    binding: input.binding,
+    patchHash: digest(post),
+    prestate: [{ absolute, hash: current.hash }],
+  });
+}
+
+function countOccurrences(content: string, value: string): number {
+  if (!value) return 0;
+  let count = 0;
+  let index = 0;
+  while ((index = content.indexOf(value, index)) !== -1) {
+    count += 1;
+    index += value.length;
+  }
+  return count;
 }
 
 function countPatterns(content: string, patterns: SecretPattern[]): SecretCounts {

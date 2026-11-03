@@ -185,6 +185,13 @@ describe("agentes malahor gestionados", () => {
     );
   });
 
+  test("los primarios V1/V2 exigen el método de planificación verificada", () => {
+    for (const host of ["v1", "v2"] as const) {
+      const content = fs.readFileSync(assetPath(host, "malahor"), "utf8");
+      expect(content).toContain("planificacion-verificada");
+    }
+  });
+
   for (const host of ["v1", "v2"] as const) {
     test(`el primario ${host.toUpperCase()} comparte el rollout local explicito`, () => {
       expectExplicitLocalUpdateRollout(fs.readFileSync(assetPath(host, "malahor"), "utf8"));

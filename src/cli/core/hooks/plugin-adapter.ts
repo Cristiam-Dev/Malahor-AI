@@ -161,24 +161,64 @@ export async function evaluateToolHook(
       tool,
     },
   }, scope.project);
-  if (built?.context && tool.toLowerCase() === "patch") {
+  if (built?.context) {
     const context = built.context;
-    try {
-      context.metadata = {
-        ...context.metadata,
-        secretPatchSummary: buildSecretPatchSummary(
-          stringValue(recordValue(toolInput)?.patchText) ?? "",
-          context.cwd,
-          {
-            projectRoot: context.projectRoot,
-            ...(context.project ? { project: context.project } : {}),
-            ...(context.policyMeta?.policyHash ? { policyHash: context.policyMeta.policyHash } : {}),
-          },
-        ),
-      };
-    } catch {
-      // El motivo es interno y cerrado; nunca persistir excepciones ni contenido.
-      context.metadata = { ...context.metadata, secretPatchControlUnavailable: true };
+    const toolName = tool.toLowerCase();
+    if (["patch", "edit", "write"].includes(toolName)) {
+      try {
+        const { buildSecretFileSummary, buildSecretEditSummary } = await import("./secret-scan");
+        const args = recordValue(toolInput) ?? {};
+        const binding = {
+          projectRoot: context.projectRoot,
+          ...(context.project ? { project: context.project } : {}),
+          ...(context.policyMeta?.policyHash ? { policyHash: context.policyMeta.policyHash } : {}),
+        };
+        let summary;
+        if (toolName === "patch") {
+          summary = buildSecretPatchSummary(stringValue(args.patchText) ?? "", context.cwd, binding);
+        } else {
+          const target = stringValue(args.path) ?? stringValue(args.filePath);
+          if (target) {
+            if (toolName === "write") {
+              const content = typeof args.content === "string" ? args.content : undefined;
+              if (content !== undefined) {
+                const update = buildSecretFileSummary({
+                  cwd: context.cwd, path: target, operation: "update", content, binding,
+                });
+                summary = update.evaluable || update.failure?.code === "SECURITY_CONTROL_UNAVAILABLE"
+                  || update.failure?.reason !== "file-unavailable"
+                  ? update
+                  : buildSecretFileSummary({ cwd: context.cwd, path: target, operation: "add", content, binding });
+              }
+            } else {
+              const oldString = typeof args.oldString === "string" ? args.oldString : undefined;
+              const newString = typeof args.newString === "string" ? args.newString : undefined;
+              if (oldString !== undefined && newString !== undefined) {
+                summary = buildSecretEditSummary({
+                  cwd: context.cwd,
+                  path: target,
+                  oldString,
+                  newString,
+                  replaceAll: args.replaceAll === true,
+                  binding,
+                });
+              }
+            }
+          }
+        }
+        if (summary) {
+          context.metadata = {
+            ...context.metadata,
+            secretPatchSummary: summary,
+            ...(summary.files.length > 0
+              ? { fileOperations: summary.files.map((file) => ({ kind: file.operation, path: file.path })) }
+              : {}),
+          };
+        }
+      } catch {
+        // El motivo es interno y cerrado; nunca persistir excepciones ni contenido.
+        context.metadata = { ...context.metadata, secretPatchControlUnavailable: true };
+      }
     }
   }
 

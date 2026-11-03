@@ -17,6 +17,8 @@ Usar este flujo para cambios no triviales: features nuevas, refactors amplios, c
 
 ## Reglas
 
+- Antes de presentar un plan, aplica `planificacion-verificada`: preflight
+  read-only, mapa de impacto y slice pequeño.
 - No saltar `sdd-quality`.
 - Si calidad falla, volver a `sdd-apply` antes de verificar.
 - Guardar decisiones importantes en Mnemo.

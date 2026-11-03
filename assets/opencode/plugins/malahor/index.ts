@@ -1318,6 +1318,21 @@ var init_git_commit_message = __esm(() => {
 });
 
 // src/cli/core/hooks/secret-scan.ts
+var exports_secret_scan = {};
+__export(exports_secret_scan, {
+  secretKinds: () => secretKinds,
+  revalidateSecretPatchSummary: () => revalidateSecretPatchSummary,
+  redactPayloadSecrets: () => redactPayloadSecrets,
+  parseSecretPatchSummary: () => parseSecretPatchSummary,
+  isPotentialSecretPath: () => isPotentialSecretPath,
+  detectPayloadSecretKinds: () => detectPayloadSecretKinds,
+  detectFileSecretFindings: () => detectFileSecretFindings,
+  detectFileSecretCounts: () => detectFileSecretCounts,
+  buildSecretPatchSummary: () => buildSecretPatchSummary,
+  buildSecretFileSummary: () => buildSecretFileSummary,
+  buildSecretEditSummary: () => buildSecretEditSummary,
+  SECRET_KINDS: () => SECRET_KINDS
+});
 import fs10 from "node:fs";
 import path14 from "node:path";
 import { createHash as createHash5 } from "node:crypto";
@@ -1533,6 +1548,102 @@ function revalidateSecretPatchSummary(value, cwd, binding) {
       return false;
   }
   return true;
+}
+function buildSecretFileSummary(input) {
+  const root = path14.resolve(input.cwd);
+  const absolute = path14.resolve(root, input.path);
+  const fail = (reason, code = "PATCH_NOT_EVALUABLE") => brandedSummary(false, [], {
+    root,
+    binding: input.binding,
+    patchHash: digest(input.content),
+    prestate: []
+  }, { code, reason, operation: input.operation });
+  if (!input.path || /[\\\u0000-\u001f\u007f]/.test(input.path) || !isWithin2(absolute, root) || absolute === root)
+    return fail("invalid-path");
+  if (!pathComponentsAreRegular(root, absolute))
+    return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  if (Buffer.byteLength(input.content) > MAX_SCANNED_FILE_BYTES) {
+    return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  }
+  const relative = path14.relative(root, absolute).split(path14.sep).join("/");
+  if (input.operation === "add") {
+    if (lstatIfExists(absolute) !== null)
+      return fail("file-unavailable");
+    return brandedSummary(true, [{
+      path: relative,
+      operation: "add",
+      before: {},
+      after: detectFileSecretCounts(input.content, absolute)
+    }], {
+      root,
+      binding: input.binding,
+      patchHash: digest(input.content),
+      prestate: [{ absolute, hash: null }]
+    });
+  }
+  const current = readRegularTextFile(absolute);
+  if (current === null)
+    return fail("file-unavailable");
+  return brandedSummary(true, [{
+    path: relative,
+    operation: "update",
+    before: detectFileSecretCounts(current.content, absolute),
+    after: detectFileSecretCounts(input.content, absolute)
+  }], {
+    root,
+    binding: input.binding,
+    patchHash: digest(input.content),
+    prestate: [{ absolute, hash: current.hash }]
+  });
+}
+function buildSecretEditSummary(input) {
+  const root = path14.resolve(input.cwd);
+  const absolute = path14.resolve(root, input.path);
+  const fail = (reason, code = "PATCH_NOT_EVALUABLE") => brandedSummary(false, [], {
+    root,
+    binding: input.binding,
+    patchHash: digest(input.newString),
+    prestate: []
+  }, { code, reason, operation: "update" });
+  if (!input.path || /[\\\u0000-\u001f\u007f]/.test(input.path) || !isWithin2(absolute, root) || absolute === root)
+    return fail("invalid-path");
+  if (!pathComponentsAreRegular(root, absolute))
+    return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  const current = readRegularTextFile(absolute);
+  if (current === null)
+    return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  const occurrences = countOccurrences(current.content, input.oldString);
+  if (occurrences === 0)
+    return fail("context-mismatch");
+  if (occurrences > 1 && input.replaceAll !== true)
+    return fail("ambiguous-context");
+  const post = input.replaceAll ? current.content.split(input.oldString).join(input.newString) : current.content.replace(input.oldString, input.newString);
+  if (Buffer.byteLength(post) > MAX_SCANNED_FILE_BYTES) {
+    return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE");
+  }
+  const relative = path14.relative(root, absolute).split(path14.sep).join("/");
+  return brandedSummary(true, [{
+    path: relative,
+    operation: "update",
+    before: detectFileSecretCounts(current.content, absolute),
+    after: detectFileSecretCounts(post, absolute)
+  }], {
+    root,
+    binding: input.binding,
+    patchHash: digest(post),
+    prestate: [{ absolute, hash: current.hash }]
+  });
+}
+function countOccurrences(content, value) {
+  if (!value)
+    return 0;
+  let count = 0;
+  let index = 0;
+  while ((index = content.indexOf(value, index)) !== -1) {
+    count += 1;
+    index += value.length;
+  }
+  return count;
 }
 function countPatterns(content, patterns) {
   const counts = {};
@@ -2010,7 +2121,7 @@ function isWithin2(value, root) {
 function objectValue(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 }
-var SECRET_KINDS, PRIVATE_KEY_SOURCE, CREDENTIAL_NAME_SOURCE = "api[_-]?key|access[_-]?token|secret[_-]?key|password", CREDENTIAL_ASSIGNMENT_SOURCE, FILE_PATTERNS, PAYLOAD_PATTERNS, PRIVATE_KEY_BLOCK, PRIVATE_KEY_HEADER, AWS_ACCESS_KEY, BEARER_TOKEN, CREDENTIAL_ASSIGNMENT, SECRET_KIND_SET, SECRET_PATCH_SUMMARY_BRAND, PATCH_EVIDENCE, MAX_SCANNED_FILE_BYTES, MAX_PATCH_FILES = 100, MAX_FINDINGS_PER_KIND = 1e6, MAX_EXPORTED_FINDINGS = 100, MAX_REMEDIATION_LINE_CHARS = 500, SYNTHETIC_VALUE_EXPRESSION = '["synthetic", "fixture", "credential"].join("-")', SYNTHETIC_VALUE_PATTERN, DIRECT_SYNTHETIC_ASSIGNMENT, SERIALIZED_DECLARATION, SERIALIZED_SYNTHETIC_ASSIGNMENT;
+var SECRET_KINDS, PRIVATE_KEY_SOURCE, CREDENTIAL_NAME_SOURCE = "api[_-]?key|access[_-]?token|secret[_-]?key|password", CREDENTIAL_ASSIGNMENT_SOURCE, FILE_PATTERNS, PAYLOAD_PATTERNS, PRIVATE_KEY_BLOCK, PRIVATE_KEY_HEADER, AWS_ACCESS_KEY, BEARER_TOKEN, CREDENTIAL_ASSIGNMENT, SECRET_KIND_SET, SECRET_PATCH_SUMMARY_BRAND, PATCH_EVIDENCE_KEY, PATCH_EVIDENCE, MAX_SCANNED_FILE_BYTES, MAX_PATCH_FILES = 100, MAX_FINDINGS_PER_KIND = 1e6, MAX_EXPORTED_FINDINGS = 100, MAX_REMEDIATION_LINE_CHARS = 500, SYNTHETIC_VALUE_EXPRESSION = '["synthetic", "fixture", "credential"].join("-")', SYNTHETIC_VALUE_PATTERN, DIRECT_SYNTHETIC_ASSIGNMENT, SERIALIZED_DECLARATION, SERIALIZED_SYNTHETIC_ASSIGNMENT;
 var init_secret_scan = __esm(() => {
   SECRET_KINDS = [
     "private-key",
@@ -2038,8 +2149,10 @@ var init_secret_scan = __esm(() => {
   BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g;
   CREDENTIAL_ASSIGNMENT = new RegExp(CREDENTIAL_ASSIGNMENT_SOURCE, "gi");
   SECRET_KIND_SET = new Set(SECRET_KINDS);
-  SECRET_PATCH_SUMMARY_BRAND = Symbol("malahor.secret-patch-summary");
-  PATCH_EVIDENCE = new WeakMap;
+  SECRET_PATCH_SUMMARY_BRAND = Symbol.for("malahor.secret-patch-summary");
+  PATCH_EVIDENCE_KEY = Symbol.for("malahor.secret-patch-evidence");
+  PATCH_EVIDENCE = globalThis[PATCH_EVIDENCE_KEY] ?? new WeakMap;
+  globalThis[PATCH_EVIDENCE_KEY] = PATCH_EVIDENCE;
   MAX_SCANNED_FILE_BYTES = 512 * 1024;
   SYNTHETIC_VALUE_PATTERN = /^synthetic[-_][A-Za-z0-9._-]{8,80}$/i;
   DIRECT_SYNTHETIC_ASSIGNMENT = new RegExp(`^(\\s*(?:(?:export\\s+)?(?:const|let)\\s+)?)(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\4([,;]?\\s*)$`, "i");
@@ -7158,7 +7271,8 @@ function commitMessageGuard(context) {
 }
 function secretScanGuard(context) {
   const scan = context.security ? context.security.git?.scanStagedContent !== false || context.security.persistence?.blockSecrets !== false : context.policy?.secrets.scanBeforeCommit !== false;
-  if (context.event === "file.write.before" && context.metadata?.tool === "patch") {
+  const writeTool = String(context.metadata?.tool);
+  if (context.event === "file.write.before" && (writeTool === "patch" || ["edit", "write"].includes(writeTool) && context.metadata?.secretPatchSummary !== undefined)) {
     return patchSecretScanGuard(context);
   }
   if (!scan)
@@ -7180,11 +7294,12 @@ function secretScanGuard(context) {
 function patchSecretScanGuard(context) {
   const evidence = context.metadata?.secretPatchSummary;
   const summary = parseSecretPatchSummary(evidence);
-  if (!summary?.evaluable || !patchSummaryMatchesTargets(context, summary) || !revalidateSecretPatchSummary(evidence, context.cwd, {
+  const isPatch = String(context.metadata?.tool) === "patch";
+  if (!summary?.evaluable || isPatch && (!patchSummaryMatchesTargets(context, summary) || !revalidateSecretPatchSummary(evidence, context.cwd, {
     projectRoot: context.projectRoot,
     ...context.project ? { project: context.project } : {},
     ...context.policyMeta?.policyHash ? { policyHash: context.policyMeta.policyHash } : {}
-  })) {
+  }))) {
     const unavailable = summary?.evaluable === true || context.metadata?.secretPatchControlUnavailable === true;
     const failure = summary?.failure ?? {
       code: unavailable ? "SECURITY_CONTROL_UNAVAILABLE" : "PATCH_NOT_EVALUABLE",
@@ -8016,19 +8131,62 @@ async function evaluateToolHook(input, options) {
       tool
     }
   }, scope.project);
-  if (built?.context && tool.toLowerCase() === "patch") {
+  if (built?.context) {
     const context = built.context;
-    try {
-      context.metadata = {
-        ...context.metadata,
-        secretPatchSummary: buildSecretPatchSummary(stringValue4(recordValue3(toolInput)?.patchText) ?? "", context.cwd, {
+    const toolName = tool.toLowerCase();
+    if (["patch", "edit", "write"].includes(toolName)) {
+      try {
+        const { buildSecretFileSummary: buildSecretFileSummary2, buildSecretEditSummary: buildSecretEditSummary2 } = await Promise.resolve().then(() => (init_secret_scan(), exports_secret_scan));
+        const args = recordValue3(toolInput) ?? {};
+        const binding = {
           projectRoot: context.projectRoot,
           ...context.project ? { project: context.project } : {},
           ...context.policyMeta?.policyHash ? { policyHash: context.policyMeta.policyHash } : {}
-        })
-      };
-    } catch {
-      context.metadata = { ...context.metadata, secretPatchControlUnavailable: true };
+        };
+        let summary;
+        if (toolName === "patch") {
+          summary = buildSecretPatchSummary(stringValue4(args.patchText) ?? "", context.cwd, binding);
+        } else {
+          const target = stringValue4(args.path) ?? stringValue4(args.filePath);
+          if (target) {
+            if (toolName === "write") {
+              const content = typeof args.content === "string" ? args.content : undefined;
+              if (content !== undefined) {
+                const update = buildSecretFileSummary2({
+                  cwd: context.cwd,
+                  path: target,
+                  operation: "update",
+                  content,
+                  binding
+                });
+                summary = update.evaluable || update.failure?.code === "SECURITY_CONTROL_UNAVAILABLE" || update.failure?.reason !== "file-unavailable" ? update : buildSecretFileSummary2({ cwd: context.cwd, path: target, operation: "add", content, binding });
+              }
+            } else {
+              const oldString = typeof args.oldString === "string" ? args.oldString : undefined;
+              const newString = typeof args.newString === "string" ? args.newString : undefined;
+              if (oldString !== undefined && newString !== undefined) {
+                summary = buildSecretEditSummary2({
+                  cwd: context.cwd,
+                  path: target,
+                  oldString,
+                  newString,
+                  replaceAll: args.replaceAll === true,
+                  binding
+                });
+              }
+            }
+          }
+        }
+        if (summary) {
+          context.metadata = {
+            ...context.metadata,
+            secretPatchSummary: summary,
+            ...summary.files.length > 0 ? { fileOperations: summary.files.map((file) => ({ kind: file.operation, path: file.path })) } : {}
+          };
+        }
+      } catch {
+        context.metadata = { ...context.metadata, secretPatchControlUnavailable: true };
+      }
     }
   }
   const result = built?.context ? evaluate(built.context) : policyFailure(mapped.event, scope.options, scope.error ?? built?.error ?? "politica no evaluable", scope.project);
@@ -8667,6 +8825,9 @@ Intervención y reparación
 - Una acción puntual de bajo riesgo no usa Planning ni SDD: en la primera versión solo admite una edición de un archivo regular existente, dentro de la raíz, sin symlinks, creación, borrado, movimiento, secretos, infraestructura ni shell mutante. El harness solicita una única aprobación nativa ligada a sesión, proyecto, política, tool call, efecto y recurso exactos, con save vacío.
 - Si el host ya mostró un ASK exacto para esa llamada, reutilízalo sin producir un segundo diálogo. Después de aprobar, recalcula scope, política, ruta e intención; un cambio de turno, llamada, manifest o control invalida la acción.
 - El trabajo considerable se expande primero mediante SDD. Solo entonces usa malahor_plan con nivel 1 o 2, specRef bajo SDD/ y specHash SHA-256 de la versión documental canónica. Los estados históricos de nivel 0 siguen legibles, pero no se crean nuevos.
+- Antes de malahor_plan, aplica planificacion-verificada: preflight read-only de archivos, call sites, tests y fixtures, mapa de impacto y slice de hasta 12 acciones. Un plan sin evidencia no se presenta.
+- Ninguna acción edit se planifica sin leer el bloque exacto que se reemplazará, confirmar que es único y copiar el oldString literal del archivo. Si el bloque no coincide o no es único, no presentes el plan.
+- Una acción edit cubre un archivo y se ejecuta una sola vez: agrupa los cambios de ese archivo en una sola edición y no ejecutes ediciones paralelas sobre el mismo recurso. Para otro cambio, presenta una revisión del plan.
 - Antes de una mutación, clasifica la tarea por cierre y consecuencias. El modelo aporta señales; el runtime deriva la ruta. Toda mutación directa exige aprobación nativa exacta y ninguna salida del modelo se convierte en grant.
 - malahor_task_classify es read-only y no autoriza tools. malahor_direct_prepare exige una decisión direct vigente, compila el envelope y solicita la aprobación nativa; si falta la decisión o cambia el scope, falla cerrado.
 - La autorización de un plan no caduca por tiempo; un cambio de revisión, efectos, proyecto, modo o política la invalida. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
@@ -11254,7 +11415,15 @@ function normalizePlannedActions(actions) {
     return { action: item.action, resource: item.resource, key, dependsOn };
   });
   const unique2 = new Map;
+  const editTargets = new Map;
   for (const item of normalized) {
+    if (item.action === "edit") {
+      const previousKey = editTargets.get(item.resource);
+      if (previousKey !== undefined && previousKey !== item.key) {
+        throw new Error("Dos acciones de edición no pueden compartir el mismo archivo; agrupa los cambios en una sola edición o divide el trabajo en otro plan.");
+      }
+      editTargets.set(item.resource, item.key);
+    }
     const identity = `${item.action}\x00${item.resource}`;
     const previous = unique2.get(identity);
     if (previous && (previous.key !== item.key || !sameStrings2(previous.dependsOn ?? [], item.dependsOn ?? []))) {
@@ -11741,9 +11910,9 @@ function decideAuthorization(raw) {
 }
 function authorizationMessage(code, detail) {
   const base = {
-    NO_ACTIVE_PLAN: "Malahor: no hay un plan activo para esta sesión.",
+    NO_ACTIVE_PLAN: "Malahor: no hay un plan activo para esta sesión. Las lecturas read-only no lo necesitan; si el comando no es una lectura reconocida, usa read/glob/grep o crea o reanuda un plan con la acción exacta.",
     PLAN_INVALID: "Malahor: el estado del plan no es verificable.",
-    PLAN_NOT_RUNNING: "Malahor: el plan no está aprobado y en ejecución.",
+    PLAN_NOT_RUNNING: "Malahor: el plan no está aprobado y en ejecución; revisa su estado o solicita la aprobación.",
     PLAN_SCHEMA_UPGRADE_REQUIRED: "Malahor: el plan activo usa un contrato anterior; presenta y revisa una revisión V5.",
     SESSION_MISMATCH: "Malahor: el plan pertenece a otra sesión.",
     PROJECT_MISMATCH: "Malahor: el plan pertenece a otro proyecto.",
@@ -11753,9 +11922,9 @@ function authorizationMessage(code, detail) {
     ACTION_NOT_CANONICALIZABLE: "Malahor: la acción no puede representarse con el canonicalizador cerrado.",
     ACTION_SERIALIZATION_MISMATCH: "Malahor: la representación técnica no coincide con los intents firmados.",
     ACTION_REPAIR_EXHAUSTED: "Malahor: la reparación técnica equivalente ya fue consumida o dejó de ser verificable.",
-    DEPENDENCY_BLOCKED: "Malahor: la acción espera a que termine una dependencia declarada.",
-    ACTION_IN_FLIGHT: "Malahor: la acción ya tiene una llamada en curso.",
-    ACTION_ALREADY_COMPLETED: "Malahor: la acción ya quedó completada en esta revisión.",
+    DEPENDENCY_BLOCKED: "Malahor: la acción espera a una dependencia declarada. Revisa el estado del plan o reanuda cuando la dependencia termine.",
+    ACTION_IN_FLIGHT: "Malahor: la acción ya tiene una llamada en curso. No ejecutes dos ediciones del mismo archivo en paralelo; espera a que termine la primera.",
+    ACTION_ALREADY_COMPLETED: "Malahor: esta revisión ya conserva la acción completada; no hace falta repetirla. Si necesitas otro cambio en el mismo archivo, agrupa los cambios en una sola edición o presenta una revisión del plan.",
     ACTION_REMOVED: "Malahor: la acción fue retirada por una revisión posterior.",
     PLAN_CHECKPOINT_INVALID: "Malahor: el progreso firmado del plan no es verificable.",
     PLAN_CORRELATION_MISMATCH: "Malahor: la llamada no coincide con la reserva firmada de la acción.",
@@ -12017,6 +12186,8 @@ function createPlanRevisionRecovery(input) {
       await ensureParentCheckpoint(storage, parent, checkpoint, authority);
       const normalized = createCandidateRecord(parent, candidate, checkpoint, authority);
       const key = planRevisionCandidateKey(parent.planID);
+      if (typeof storage.remove === "function")
+        await storage.remove(key);
       await writeAndVerify(storage, key, normalized, (value) => validRevisionCandidate(value, parent, authority) && value.proof === normalized.proof);
       return structuredClone(normalized);
     }),
@@ -12464,7 +12635,7 @@ async function writeAndVerify(storage, key, value, valid) {
   await storage.set(key, structuredClone(value));
   const persisted = await storage.get(key);
   if (!valid(persisted))
-    throw new Error(`La escritura durable no quedó verificable: ${key}.`);
+    throw new Error(`La escritura durable no quedó verificable: ${key}. Completa, pausa o revoca el plan antes de reintentar.`);
 }
 function samePlanRevision(value, expected, authority) {
   return (!authority || validState(value, authority)) && isRecord7(value) && value.version === 5 && value.planID === expected.planID && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof && value.phase === expected.phase;
@@ -13963,7 +14134,20 @@ function createCommitWorkflowRegistry() {
         return denyMismatch();
       }
       const expected = grant.commands[grant.cursor];
-      if (!input.valid || !expected || !sameScope(grant.scope, scope) || cwd !== grant.scope.root || input.command !== expected || !input.messageID.trim() || !input.toolCallID.trim()) {
+      const sameCommand = (left, right) => {
+        try {
+          const leftTokens = closedCommand(left);
+          const rightTokens = closedCommand(right);
+          if (leftTokens.length === rightTokens.length && leftTokens.every((token, index) => token.normalize("NFC") === rightTokens[index].normalize("NFC"))) {
+            return true;
+          }
+          const shape = (value) => value.normalize("NFC").replace(/['"]/g, "").replace(/\s+/g, " ").trim();
+          return shape(left) === shape(right);
+        } catch {
+          return false;
+        }
+      };
+      if (!input.valid || !expected || !sameScope(grant.scope, scope) || cwd !== grant.scope.root || !sameCommand(input.command, expected) || !input.messageID.trim() || !input.toolCallID.trim()) {
         return denyMismatch();
       }
       const callKey = commitShellCallKey(input.messageID, input.toolCallID);
@@ -14331,6 +14515,7 @@ function validateVerifyCommands(commands, root) {
     throw new Error("La revalidación sellada debe ejecutar status y después log.");
   }
 }
+var COMMIT_CONFIRMATION_PREFIX = /^(?:por favor|listo|ok|okay|dale|ahora|ya|perfecto|bien|gracias|genial|bueno)[,;:\s]+/;
 function explicitCommitRequest(value) {
   if (!value)
     return false;
@@ -14342,7 +14527,10 @@ function explicitCommitRequest(value) {
   const text = normalized.replace(/[.!]+$/g, "").trim();
   if (text === "/malahor-commit")
     return true;
-  const polite = text.replace(/^por favor,?\s+/, "");
+  let polite = text;
+  while (COMMIT_CONFIRMATION_PREFIX.test(polite)) {
+    polite = polite.replace(COMMIT_CONFIRMATION_PREFIX, "").trim();
+  }
   return /^(?:commit|comitea(?:\s+(?:(?:el|este)\s+)?commit|\s+(?:(?:todos?|estos?|los|mis)\s+)?cambios)?|(?:haz|crea|realiza|ejecuta|genera)\s+(?:el\s+)?commit)$/.test(polite);
 }
 function promptText(input) {
@@ -15204,6 +15392,9 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         if (detectSecretKinds(raw).length > 0)
           throw new Error("Posible secreto en el plan: no se almacena ni se muestra.");
         const actions = raw.actions?.map((item) => normalizeAction(item.action, item.resource, resolved.directory, item.key, item.dependsOn));
+        if ((actions?.length ?? 0) > 12) {
+          throw new Error("malahor_plan admite hasta 12 acciones por slice; divide el trabajo en fases y presenta un plan nuevo.");
+        }
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
         const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs19.existsSync(item.resource));
         if (newRepoDoc)

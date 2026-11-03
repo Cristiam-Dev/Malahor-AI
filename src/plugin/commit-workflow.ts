@@ -293,8 +293,26 @@ export function createCommitWorkflowRegistry(): CommitWorkflowRegistry {
         return denyMismatch();
       }
       const expected = grant.commands[grant.cursor];
+      const sameCommand = (left: string, right: string): boolean => {
+        try {
+          const leftTokens = closedCommand(left);
+          const rightTokens = closedCommand(right);
+          if (leftTokens.length === rightTokens.length
+            && leftTokens.every((token, index) => token.normalize("NFC") === rightTokens[index]!.normalize("NFC"))) {
+            return true;
+          }
+          const shape = (value: string): string => value
+            .normalize("NFC")
+            .replace(/['"]/g, "")
+            .replace(/\s+/g, " ")
+            .trim();
+          return shape(left) === shape(right);
+        } catch {
+          return false;
+        }
+      };
       if (!input.valid || !expected || !sameScope(grant.scope, scope)
-        || cwd !== grant.scope.root || input.command !== expected
+        || cwd !== grant.scope.root || !sameCommand(input.command, expected)
         || !input.messageID.trim() || !input.toolCallID.trim()) {
         return denyMismatch();
       }
@@ -675,6 +693,8 @@ function validateVerifyCommands(commands: string[], root: string): void {
   }
 }
 
+const COMMIT_CONFIRMATION_PREFIX = /^(?:por favor|listo|ok|okay|dale|ahora|ya|perfecto|bien|gracias|genial|bueno)[,;:\s]+/;
+
 function explicitCommitRequest(value: string | undefined): boolean {
   if (!value) return false;
   if (value.trimStart().startsWith(COMMIT_COMMAND_MARKER)) return true;
@@ -682,7 +702,10 @@ function explicitCommitRequest(value: string | undefined): boolean {
   if (!normalized || /[?¿]/.test(normalized) || /^(?:no|sin)\b/.test(normalized)) return false;
   const text = normalized.replace(/[.!]+$/g, "").trim();
   if (text === "/malahor-commit") return true;
-  const polite = text.replace(/^por favor,?\s+/, "");
+  let polite = text;
+  while (COMMIT_CONFIRMATION_PREFIX.test(polite)) {
+    polite = polite.replace(COMMIT_CONFIRMATION_PREFIX, "").trim();
+  }
   return /^(?:commit|comitea(?:\s+(?:(?:el|este)\s+)?commit|\s+(?:(?:todos?|estos?|los|mis)\s+)?cambios)?|(?:haz|crea|realiza|ejecuta|genera)\s+(?:el\s+)?commit)$/.test(polite);
 }
 

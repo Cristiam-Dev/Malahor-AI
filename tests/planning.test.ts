@@ -2281,6 +2281,50 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(harness.approvals).toHaveLength(0);
   });
 
+  test("malahor_plan rechaza un megplan de más de 12 acciones", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    const actions = Array.from({ length: 13 }, (_, index) => ({
+      action: "shell" as const,
+      resource: `echo ${index}`,
+    }));
+
+    await expect(harness.execute(
+      "plan",
+      { ...input(), actions },
+      call(SESSION, "malahor", "msg_megplan_rejected"),
+    )).rejects.toThrow(/12 acciones|slice/i);
+    expect(records.has(planKey(SESSION))).toBe(false);
+  });
+
+  test("malahor_plan rechaza dos ediciones sobre el mismo archivo", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+
+    await expect(harness.execute(
+      "plan",
+      {
+        ...input(),
+        actions: [
+          { action: "edit" as const, resource: "src/a.ts", key: "edit-a-1" },
+          { action: "edit" as const, resource: "src/a.ts", key: "edit-a-2" },
+        ],
+      },
+      call(SESSION, "malahor", "msg_duplicate_edit"),
+    )).rejects.toThrow(/mismo archivo|agrupa/i);
+    expect(records.has(planKey(SESSION))).toBe(false);
+  });
+
+  test("los errores de Planning indican el siguiente paso", async () => {
+    const { authorizationMessage } = await import("../src/cli/core/authorization-decision");
+
+    expect(authorizationMessage("NO_ACTIVE_PLAN")).toMatch(/crea o reanuda/i);
+    expect(authorizationMessage("NO_ACTIVE_PLAN")).toMatch(/lectura reconocida/i);
+    expect(authorizationMessage("DEPENDENCY_BLOCKED")).toMatch(/revisa el estado/i);
+    expect(authorizationMessage("ACTION_ALREADY_COMPLETED")).toMatch(/no hace falta repetirla/i);
+    expect(authorizationMessage("PLAN_NOT_RUNNING")).toMatch(/solicita la aprobación/i);
+  });
+
   test("plan_control pausa, reanuda y completa sin ampliar efectos", async () => {
     configure("ejecutar");
     const harness = await registeredTools();
@@ -2879,6 +2923,31 @@ describe("PLANNING-RECOVERY-01: candidato y transición incremental", () => {
     expect(snapshot.checkpoint).toEqual(fixture.parentCheckpoint);
     expect(snapshot.candidate).toEqual(fixture.presented);
     expect(fixture.records.get(planKey(fixture.parent.sessionID))).toEqual(fixture.parent);
+  });
+
+  test("el candidato de revisión se verifica con un storage con round-trip JSON", async () => {
+    const fixture = await revisionFixture();
+    const records = new Map<string, unknown>();
+    const jsonStorage: RevisionStorage = {
+      get: async (key) => records.get(key),
+      set: async (key, value) => { records.set(key, JSON.parse(JSON.stringify(value))); },
+      remove: async (key) => { records.delete(key); },
+    };
+    records.set(planKey(fixture.parent.sessionID), fixture.parent);
+    records.set(planRecordKey(fixture.parent.planID), fixture.parent);
+    records.set(planRevisionKey(fixture.parent.planID, fixture.parent.revision), fixture.parent);
+    records.set(planExecutionKey(fixture.parent.planID, fixture.parent.revision), fixture.parentCheckpoint);
+    const manager = await fixture.api.createPlanRevisionRecovery({
+      parent: fixture.parent,
+      checkpoint: fixture.parentCheckpoint,
+      storage: jsonStorage,
+      authority: fixture.authority,
+    });
+
+    const presented = await manager.presentCandidate(fixture.candidate);
+
+    expect(presented.candidate.revision).toBe(fixture.candidate.revision);
+    expect(presented.proof).toMatch(/^[a-f0-9]{64}$/);
   });
 
   test("el delta y carry-forward conservan solo actionID/dependencias exactos y nunca ASK o reservas", async () => {

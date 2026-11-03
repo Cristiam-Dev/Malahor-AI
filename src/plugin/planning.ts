@@ -661,6 +661,9 @@ export async function registerPlanningTools(
            item.key,
            item.dependsOn,
          ));
+         if ((actions?.length ?? 0) > 12) {
+           throw new Error("malahor_plan admite hasta 12 acciones por slice; divide el trabajo en fases y presenta un plan nuevo.");
+         }
          const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
         const newRepoDoc = actions?.find((item) => item.action === "edit"
           && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));

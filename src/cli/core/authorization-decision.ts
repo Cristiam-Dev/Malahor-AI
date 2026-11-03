@@ -136,9 +136,9 @@ export function assertAuthorization(decision: AuthorizationDecision): asserts de
 
 export function authorizationMessage(code: AuthorizationDenialCode, detail?: string): string {
   const base: Record<AuthorizationDenialCode, string> = {
-    NO_ACTIVE_PLAN: "Malahor: no hay un plan activo para esta sesión.",
+    NO_ACTIVE_PLAN: "Malahor: no hay un plan activo para esta sesión. Las lecturas read-only no lo necesitan; si el comando no es una lectura reconocida, usa read/glob/grep o crea o reanuda un plan con la acción exacta.",
     PLAN_INVALID: "Malahor: el estado del plan no es verificable.",
-    PLAN_NOT_RUNNING: "Malahor: el plan no está aprobado y en ejecución.",
+    PLAN_NOT_RUNNING: "Malahor: el plan no está aprobado y en ejecución; revisa su estado o solicita la aprobación.",
     PLAN_SCHEMA_UPGRADE_REQUIRED: "Malahor: el plan activo usa un contrato anterior; presenta y revisa una revisión V5.",
     SESSION_MISMATCH: "Malahor: el plan pertenece a otra sesión.",
     PROJECT_MISMATCH: "Malahor: el plan pertenece a otro proyecto.",
@@ -148,9 +148,9 @@ export function authorizationMessage(code: AuthorizationDenialCode, detail?: str
     ACTION_NOT_CANONICALIZABLE: "Malahor: la acción no puede representarse con el canonicalizador cerrado.",
     ACTION_SERIALIZATION_MISMATCH: "Malahor: la representación técnica no coincide con los intents firmados.",
     ACTION_REPAIR_EXHAUSTED: "Malahor: la reparación técnica equivalente ya fue consumida o dejó de ser verificable.",
-    DEPENDENCY_BLOCKED: "Malahor: la acción espera a que termine una dependencia declarada.",
-    ACTION_IN_FLIGHT: "Malahor: la acción ya tiene una llamada en curso.",
-    ACTION_ALREADY_COMPLETED: "Malahor: la acción ya quedó completada en esta revisión.",
+    DEPENDENCY_BLOCKED: "Malahor: la acción espera a una dependencia declarada. Revisa el estado del plan o reanuda cuando la dependencia termine.",
+    ACTION_IN_FLIGHT: "Malahor: la acción ya tiene una llamada en curso. No ejecutes dos ediciones del mismo archivo en paralelo; espera a que termine la primera.",
+    ACTION_ALREADY_COMPLETED: "Malahor: esta revisión ya conserva la acción completada; no hace falta repetirla. Si necesitas otro cambio en el mismo archivo, agrupa los cambios en una sola edición o presenta una revisión del plan.",
     ACTION_REMOVED: "Malahor: la acción fue retirada por una revisión posterior.",
     PLAN_CHECKPOINT_INVALID: "Malahor: el progreso firmado del plan no es verificable.",
     PLAN_CORRELATION_MISMATCH: "Malahor: la llamada no coincide con la reserva firmada de la acción.",

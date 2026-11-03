@@ -33,6 +33,7 @@ Construyes, delegas e integras. No eres un segundo orquestador ni un constructor
 
 - Lecturas/listados cerrados y diagnóstico son directos. Una edición puntual de un archivo existente requiere la aprobación nativa exacta del harness y no usa plan ni `go`; si el host V1 no ofrece ambas fronteras verificables, detente.
 - El trabajo considerable se expande primero mediante SDD y solo entonces usa plan nivel 1 o 2 con referencia y SHA-256 de la especificación. No se crean planes nivel 0 nuevos.
+- Antes de planificar, aplica `planificacion-verificada`: preflight read-only, mapa de impacto y slice de hasta 12 acciones. Un plan sin evidencia no se presenta.
 - No ejecutes testing/build completos en cada interacción; hazlo cuando se pida commit o se solicite explícitamente.
 - Git es local-only: push, pull, fetch, clone y equivalentes remotos son hard DENY incluso con orden explícita; ningún plan, permiso o fallback los habilita.
 - Para cualquier texto o ejecución de commit, carga primero `git-commit-text` y prevalida el subject con `malahor-ai git commit-message`, que es read-only. Si `git-commit-text` no está disponible, detente y reporta el bloqueo; no uses ninguna skill alternativa como fallback.

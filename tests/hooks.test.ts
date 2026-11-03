@@ -623,6 +623,40 @@ describe("malahor hooks", () => {
     }
   });
 
+  test("el resumen de edit evalúa la postimagen y no confunde contexto con secreto", async () => {
+    const { buildSecretEditSummary } = await import("../src/cli/core/hooks/secret-scan");
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-edit-summary-"));
+    const file = path.join(dir, "fixture.ts");
+    const identifier = ["api", "key"].join("_");
+    const value = ["synthetic", "0123456789abcdef"].join("-");
+    const assignment = `export const ${identifier} = '${value}';`;
+    fs.writeFileSync(file, `${assignment}\n`, "utf8");
+    try {
+      const clean = buildSecretEditSummary({
+        cwd: dir,
+        path: "fixture.ts",
+        oldString: assignment,
+        newString: "export const ready = true;",
+      });
+      expect(clean).toMatchObject({
+        evaluable: true,
+        files: [{ operation: "update", after: {} }],
+      });
+      const missing = buildSecretEditSummary({
+        cwd: dir,
+        path: "fixture.ts",
+        oldString: "no-existe",
+        newString: "x",
+      });
+      expect(missing).toMatchObject({
+        evaluable: false,
+        failure: { reason: "context-mismatch" },
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("digest, proof y secretPatchSummary son términos de código, no evidencia de secreto", () => {
     const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-benign-terms-"));
     const target = path.join(dir, "signed-state.ts");
