@@ -14147,14 +14147,18 @@ function createCommitWorkflowRegistry() {
           return false;
         }
       };
+      const callKey = commitShellCallKey(input.messageID, input.toolCallID);
+      const last = grant.lastConsumed;
+      if (input.boundary === "permission" && input.valid && sameScope(grant.scope, scope) && cwd === grant.scope.root && input.messageID.trim() && input.toolCallID.trim() && last?.callKey === callKey && sameCommand(input.command, last.command)) {
+        return { effect: "allow" };
+      }
       if (!input.valid || !expected || !sameScope(grant.scope, scope) || cwd !== grant.scope.root || !sameCommand(input.command, expected) || !input.messageID.trim() || !input.toolCallID.trim()) {
         return denyMismatch();
       }
-      const callKey = commitShellCallKey(input.messageID, input.toolCallID);
+      if (grant.consumedCallKeys.has(callKey))
+        return denyMismatch();
       let step = grant.inFlight;
       if (!step) {
-        if (grant.consumedCallKeys.has(callKey))
-          return denyMismatch();
         step = {
           index: grant.cursor,
           command: input.command,
@@ -14164,20 +14168,20 @@ function createCommitWorkflowRegistry() {
           toolSeen: false
         };
         grant.inFlight = step;
-      } else if (step.index !== grant.cursor || step.command !== input.command || step.messageID !== input.messageID || step.toolCallID !== input.toolCallID) {
+      } else if (step.index !== grant.cursor || !sameCommand(step.command, input.command) || step.messageID !== input.messageID || step.toolCallID !== input.toolCallID) {
         return denyMismatch();
       }
-      if (input.boundary === "permission")
+      if (input.boundary === "permission") {
         step.permissionSeen = true;
-      else
-        step.toolSeen = true;
-      if (step.permissionSeen && step.toolSeen) {
-        grant.consumedCallKeys.add(callKey);
-        grant.cursor += 1;
-        grant.inFlight = undefined;
-        if (grant.cursor >= grant.commands.length)
-          grants.delete(input.sessionID);
+        return { effect: "allow" };
       }
+      step.toolSeen = true;
+      grant.consumedCallKeys.add(callKey);
+      grant.lastConsumed = { command: input.command, callKey };
+      grant.cursor += 1;
+      grant.inFlight = undefined;
+      if (grant.cursor >= grant.commands.length)
+        grants.delete(input.sessionID);
       return { effect: "allow" };
     },
     invalidate

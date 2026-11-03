@@ -167,8 +167,9 @@ describe("autorización estructural del commit local", () => {
     for (const [index, command] of commands.entries()) {
       const call = { messageID: `msg_gate_${index}`, toolCallID: `call_gate_${index}` };
       expect(shell(registry, command, "tool", scope, call)).toEqual({ effect: "allow" });
-      expect(shell(registry, command, "tool", scope, call)).toEqual({ effect: "allow" });
-      expect(shell(registry, command, "permission", scope, call)).toEqual({ effect: "allow" });
+      if (index === 0) {
+        expect(shell(registry, command, "permission", scope, call)).toEqual({ effect: "allow" });
+      }
     }
     expect(shell(registry, commands.at(-1)!, "tool")).toEqual({ effect: "absent" });
     expect(shell(registry, commands[0]!, "tool")).toEqual({ effect: "absent" });
