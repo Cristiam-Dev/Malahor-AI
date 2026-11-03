@@ -2059,11 +2059,14 @@ function permissionShellCandidate(
   const metadataCommand = text(metadata.command || metadata.cmd);
   const rawCwd = metadata.workdir ?? metadata.cwd;
   const source = isRecord(input.source) ? input.source : {};
-  const command = resources.length === 1 && typeof resources[0] === "string" ? resources[0] : "";
+  // El host puede sanear `resources`; `metadata.command` conserva el comando
+  // exacto, igual que el adaptador de hooks. La comparación contra el paso del
+  // grant sigue siendo literal y cualquier diferencia se rechaza.
+  const command = metadataCommand
+    || (resources.length === 1 && typeof resources[0] === "string" ? resources[0].trim() : "");
   const messageID = text(source.messageID);
   const toolCallID = text(source.id || source.callID || source.toolCallID);
   const valid = Boolean(command)
-    && (!metadataCommand || metadataCommand === command)
     && (rawCwd === undefined || typeof rawCwd === "string")
     && source.type === "tool"
     && Boolean(messageID && toolCallID);

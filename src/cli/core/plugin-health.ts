@@ -43,6 +43,8 @@ export interface PluginStateSnapshot {
 }
 
 export function pluginHealthChecks(context: PluginHealthContext): PluginHealthCheck[] {
+  // task.classification/direct.task se añadirán cuando el wiring registre esas
+  // capacidades; no se declaran verdes sin una comprobación real.
   return [
     inspectOpenCodeSdk(context),
     inspectPluginsDir(context),
@@ -262,6 +264,16 @@ export function inspectPluginState(context: PluginHealthContext): PluginHealthCh
   if (state.host === "v2" && state.capabilities["planning.recovery"] !== true) {
     escalate("fail");
     issues.push("planning.recovery=false");
+  }
+
+  if (state.host === "v2" && state.capabilities["task.classification"] !== true) {
+    escalate("warn");
+    issues.push("task.classification=false");
+  }
+
+  if (state.host === "v2" && state.capabilities["direct.task"] !== true) {
+    escalate("warn");
+    issues.push("direct.task=false");
   }
 
   if (state.degraded.length > 0) {

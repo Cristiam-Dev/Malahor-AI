@@ -94,6 +94,8 @@ function validState(overrides: Partial<PluginStateSnapshot> = {}): PluginStateSn
       permission: true,
       "code-mode.read-only": true,
       "planning.recovery": true,
+      "task.classification": true,
+      "direct.task": true,
     },
     degraded: [],
     criticalGaps: [],
@@ -274,7 +276,7 @@ describe("estado del plugin", () => {
     const check = inspectPluginState(ctx);
 
     expect(check.status).toBe("ok");
-    expect(check.message).toContain("caps 4/4");
+    expect(check.message).toContain("caps 6/6");
   });
 
   test("criticalGaps falla en V2 y solo avisa en V1", () => {

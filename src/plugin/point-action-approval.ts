@@ -7,6 +7,11 @@ import { isProtectedDocumentationPath, parsePatchOperations } from "../cli/core/
 import { detectPayloadSecretKinds } from "../cli/core/hooks/secret-scan";
 import { classifyInfrastructurePath } from "../cli/core/infrastructure-boundary";
 
+/**
+ * Shim transitorio: la ejecución directa genérica vive en
+ * direct-task-execution.ts. Este mediador conserva la compatibilidad de la
+ * aprobación puntual de un archivo hasta completar la migración.
+ */
 export const POINT_ACTION_APPROVAL = "malahor_point_action_execute";
 
 export type PointActionMode = "advisor" | "assistant" | "executor";

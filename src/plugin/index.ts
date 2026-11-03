@@ -137,6 +137,9 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     shellRegistered: false,
     gitIntentRegistry: createGitIntentRegistry(),
   };
+  // El adaptador de commit conserva su grant exacto. La clasificación directa y
+  // el envelope genérico se registran en la fase de wiring posterior; hasta
+  // entonces no se declaran capacidades nuevas ni se habilitan mutaciones.
   const commitWorkflow = createCommitWorkflowRegistry();
   const pointActions = createPointActionMediator();
   const cleanups: Cleanup[] = [];
@@ -396,6 +399,45 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
       }
     } else {
       capabilities["commit.workflow.tool"] = false;
+    }
+    if (planningTools && approvalPort && projectAffinity && (options.resolveSessionProject || options.resolveSessionDirectory)
+      && options.permissionRegistered && registered) {
+      try {
+        const [{ createTaskClassifier, registerTaskClassificationTool }, { createDirectTaskRegistry, registerDirectTaskTool }] =
+          await Promise.all([
+            import("./task-classification"),
+            import("./direct-task-execution"),
+          ]);
+        const taskClassifier = createTaskClassifier();
+        const directTasks = createDirectTaskRegistry();
+        const classifierRegistration = await registerTaskClassificationTool(
+          planningTools as unknown as import("./task-classification").TaskClassificationTools,
+          taskClassifier,
+          resolveCommitWorkflowScope,
+        );
+        if (classifierRegistration && typeof classifierRegistration.dispose === "function") {
+          cleanups.push(() => classifierRegistration.dispose?.());
+        }
+        const directRegistration = await registerDirectTaskTool(
+          planningTools as unknown as import("./direct-task-execution").DirectTaskTools,
+          directTasks,
+          taskClassifier,
+          resolveCommitWorkflowScope,
+          approvalPort,
+        );
+        if (directRegistration && typeof directRegistration.dispose === "function") {
+          cleanups.push(() => directRegistration.dispose?.());
+        }
+        capabilities["task.classification"] = true;
+        capabilities["direct.task"] = true;
+      } catch (error) {
+        capabilities["task.classification"] = false;
+        capabilities["direct.task"] = false;
+        warn(`herramientas de clasificación directa no registradas: ${(error as Error).message}`);
+      }
+    } else {
+      capabilities["task.classification"] = false;
+      capabilities["direct.task"] = false;
     }
 
     const codeModeTools = typeof (tool as Record<string, unknown>).transform === "function"

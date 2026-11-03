@@ -396,6 +396,18 @@ export function isCommitPreparationTool(value: string): boolean {
   return PREPARE_TOOL_NAMES.has(value.trim().toLowerCase());
 }
 
+/**
+ * Fuente canónica del comando en la frontera de permiso shell. El host puede
+ * sanear `resources`; `metadata.command` conserva el comando exacto y debe
+ * prevalecer, igual que en el adaptador de hooks.
+ */
+export function commitPermissionCommand(resources: readonly unknown[], metadata: Record<string, unknown>): string {
+  const metadataCommand = typeof metadata.command === "string" ? metadata.command.trim()
+    : typeof metadata.cmd === "string" ? metadata.cmd.trim() : "";
+  if (metadataCommand) return metadataCommand;
+  return resources.length === 1 && typeof resources[0] === "string" ? resources[0].trim() : "";
+}
+
 function validatePreparation(value: unknown, projectRoot: string): {
   paths: string[];
   subject: string;

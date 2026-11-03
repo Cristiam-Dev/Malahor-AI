@@ -415,6 +415,26 @@ export function actionIntentSequenceHash(intents: readonly ActionIntentV1[]): st
   return sha256(canonical(intents.map((intent) => intent.actionID)));
 }
 
+/** Canonicaliza una mutación de tarea directa con existencia explícita. */
+export function canonicalizeDirectTaskMutation(input: {
+  project: string;
+  root: string;
+  rootRef?: string;
+  kind: "edit" | "write" | "patch";
+  path: string;
+  existence?: "must-exist" | "may-create";
+}): ActionIntentV1[] {
+  return canonicalizeActionIntent({
+    kind: "edit",
+    project: input.project,
+    root: input.root,
+    rootRef: input.rootRef ?? "project",
+    path: input.path,
+    existence: input.kind === "write" ? input.existence ?? "may-create" : input.existence ?? "must-exist",
+    constraints: { remote: false, infrastructure: false },
+  });
+}
+
 function parseClosedShell(command: string): Array<{ executable: string; argv: string[] }> {
   const segments = splitAndSequence(command);
   return segments.map((segment) => {

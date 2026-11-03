@@ -1026,6 +1026,10 @@ const KNOWN_OPENCODE_TOOLS = new Set([
   "malahor_plan_control",
   "malahor_commit_prepare",
   "commit_prepare",
+  "malahor_task_classify",
+  "task_classify",
+  "malahor_direct_prepare",
+  "direct_prepare",
   ...MALAHOR_CODE_MODE_TOOL_NAMES,
   "invalid",
 ]);

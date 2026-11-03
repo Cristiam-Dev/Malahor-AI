@@ -10,11 +10,4117 @@ var __export = (target, all) => {
       set: (newValue) => all[name] = () => newValue
     });
 };
+var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+
+// src/cli/core/git-command-policy.ts
+import { execFileSync as execFileSync2 } from "node:child_process";
+function classifyGitCommand(command, options = {}) {
+  const combined = {
+    hasGitCommand: false,
+    remote: false,
+    failClosed: false,
+    operations: [],
+    destructive: false,
+    targets: [],
+    remoteReasons: []
+  };
+  for (const nestedCommand of commandSubstitutions(command)) {
+    const nested = classifyGitCommand(nestedCommand, options);
+    if (nested.hasGitCommand)
+      nested.failClosed = true;
+    mergeClassification(combined, nested);
+  }
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellTokens(segment);
+    const executableIndexes = shellExecutableIndexes(tokens);
+    classifyNestedShell(tokens, executableIndexes, options, combined);
+    for (const index of executableIndexes) {
+      const executable = tokens[index] ?? "";
+      const remoteHelper = remoteGitExecutableReason(executable);
+      if (remoteHelper) {
+        combined.hasGitCommand = true;
+        mergeClassification(combined, remote(remoteHelper));
+        continue;
+      }
+      if (!isGitExecutable(executable))
+        continue;
+      combined.hasGitCommand = true;
+      mergeClassification(combined, classifyInvocation(tokens, index, options, [], 0));
+    }
+  }
+  return combined;
+}
+function loadGitAliases(cwd) {
+  try {
+    const output = execFileSync2("git", ["config", "--get-regexp", "^alias\\."], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const aliases = {};
+    for (const line of output.split(`
+`)) {
+      const match = /^alias\.([^\s]+)\s+([\s\S]+)$/.exec(line.trim());
+      if (match?.[1] && match[2] !== undefined)
+        aliases[match[1]] = match[2];
+    }
+    return aliases;
+  } catch {
+    return {};
+  }
+}
+function classifyNestedShell(tokens, executableIndexes, options, combined) {
+  for (const index of executableIndexes) {
+    const executable = executableName(tokens[index] ?? "");
+    let commandIndex = -1;
+    if (POSIX_SHELL_EXECUTORS.has(executable)) {
+      commandIndex = tokens.findIndex((token, candidate) => candidate > index && (token === "--command" || /^-[^-]*c[^-]*$/.test(token)));
+    } else if (WINDOWS_SHELL_EXECUTORS.has(executable)) {
+      commandIndex = tokens.findIndex((token, candidate) => candidate > index && ["/c", "/k"].includes(token.toLowerCase()));
+    } else if (POWERSHELL_EXECUTORS.has(executable)) {
+      commandIndex = tokens.findIndex((token, candidate) => candidate > index && ["-c", "-command", "-encodedcommand"].includes(token.toLowerCase()));
+    }
+    const nested = commandIndex >= 0 ? tokens[commandIndex + 1] : undefined;
+    if (nested)
+      mergeClassification(combined, classifyGitCommand(nested, options));
+  }
+}
+function classifyInvocation(tokens, gitIndex, options, aliasStack, depth) {
+  const inlineAliases = {};
+  let index = gitIndex + 1;
+  while (index < tokens.length) {
+    const token = tokens[index] ?? "";
+    if (token === "--") {
+      index += 1;
+      break;
+    }
+    if (!token.startsWith("-"))
+      break;
+    if (token === "-c") {
+      const value = tokens[index + 1] ?? "";
+      recordInlineAlias(value, inlineAliases);
+      index += 2;
+      continue;
+    }
+    if (token.startsWith("-c") && token.length > 2) {
+      recordInlineAlias(token.slice(2), inlineAliases);
+      index += 1;
+      continue;
+    }
+    if (GLOBAL_OPTIONS_WITH_VALUE.has(token) && token !== "-c") {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  const subcommand = tokens[index]?.toLowerCase();
+  if (!subcommand)
+    return local(["unknown"], false, [], false);
+  const args = tokens.slice(index + 1);
+  const aliases = { ...options.aliases ?? {}, ...inlineAliases };
+  const alias = aliases[subcommand];
+  const maxDepth = options.maxAliasDepth ?? 8;
+  if (alias !== undefined && !KNOWN_LOCAL_COMMANDS.has(subcommand) && !REMOTE_COMMANDS.has(subcommand)) {
+    if (aliasStack.includes(subcommand) || depth >= maxDepth) {
+      return remote("alias-recursivo-o-profundo", true);
+    }
+    if (alias.trimStart().startsWith("!")) {
+      return remote(`alias-shell:${subcommand}`, true);
+    }
+    const expanded = shellTokens(`git ${alias} ${args.join(" ")}`);
+    return classifyInvocation(expanded, 0, options, [...aliasStack, subcommand], depth + 1);
+  }
+  if (REMOTE_COMMANDS.has(subcommand))
+    return remote(`git-${subcommand}`);
+  if (subcommand === "archive" && args.some((arg) => arg === "--remote" || arg.startsWith("--remote="))) {
+    return remote("git-archive-remote");
+  }
+  if (subcommand === "remote")
+    return classifyRemoteCommand(args);
+  if (subcommand === "submodule")
+    return classifySubmoduleCommand(args);
+  if (subcommand === "svn" || subcommand === "p4")
+    return remote(`git-${subcommand}`, true);
+  switch (subcommand) {
+    case "add":
+      return local(["stage"], false, pathArguments(args));
+    case "commit":
+      return classifyCommit(args);
+    case "reset":
+      return local(["reset"], true, targetArguments(args, ["--pathspec-from-file"]));
+    case "rebase":
+      return local(["rebase"], true, targetArguments(args, ["--onto", "--exec", "-x"]));
+    case "cherry-pick":
+      return local(["cherry-pick"], args.some(isConflictStateFlag), targetArguments(args));
+    case "merge":
+      return local(["merge"], args.some(isConflictStateFlag), targetArguments(args, ["-m", "--message", "-S", "--gpg-sign"]));
+    case "branch":
+      return classifyBranch(args);
+    case "switch":
+      return classifySwitch(args);
+    case "checkout":
+      return classifyCheckout(args);
+    case "clean":
+      return local(["clean"], true, pathArguments(args));
+    case "restore":
+      return local(["discard"], true, pathArguments(args));
+    case "tag":
+      return classifyTagCommand(args);
+    case "notes":
+      return classifyNotesCommand(args);
+    case "reflog":
+      return classifyReflogCommand(args);
+    default:
+      if (READ_COMMANDS.has(subcommand))
+        return local(["read"], false, []);
+      if (KNOWN_LOCAL_COMMANDS.has(subcommand))
+        return unsupportedLocalMutation(args);
+      return remote(`comando-o-alias-no-resuelto:${subcommand}`, true);
+  }
+}
+function classifyRemoteCommand(args) {
+  const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+  if (!subcommand)
+    return local(["read"], false, []);
+  if (["update", "prune"].includes(subcommand))
+    return remote(`git-remote-${subcommand}`);
+  if (subcommand === "show" && !args.includes("-n") && !args.includes("--no-query")) {
+    return remote("git-remote-show");
+  }
+  if (subcommand === "set-head" && (args.includes("-a") || args.includes("--auto"))) {
+    return remote("git-remote-set-head-auto");
+  }
+  if (["add", "remove", "rename", "set-branches", "set-head", "set-url"].includes(subcommand)) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, targetArguments(args));
+}
+function classifySubmoduleCommand(args) {
+  const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+  if (["add", "update", "foreach"].includes(subcommand ?? "")) {
+    return remote(`git-submodule-${subcommand}`, true);
+  }
+  if (["absorbgitdirs", "deinit", "init", "set-branch", "set-url", "sync"].includes(subcommand ?? "")) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, targetArguments(args));
+}
+function classifyTagCommand(args) {
+  const mutatingFlag = args.some((arg) => arg === "-d" || arg === "--delete" || arg === "-f" || arg === "--force" || arg === "-a" || arg === "--annotate" || arg === "-s" || arg === "--sign" || arg === "-u" || arg === "--local-user" || arg === "--create-reflog" || arg.startsWith("--local-user="));
+  const readMode = args.some((arg) => arg === "-l" || arg === "--list" || arg === "-v" || arg === "--verify" || arg.startsWith("--contains") || arg.startsWith("--no-contains") || arg.startsWith("--points-at") || arg.startsWith("--merged") || arg.startsWith("--no-merged"));
+  const positionals = targetArguments(args, [
+    "-m",
+    "--message",
+    "-F",
+    "--file",
+    "-u",
+    "--local-user",
+    "--format",
+    "--sort",
+    "--color",
+    "--column",
+    "--contains",
+    "--no-contains",
+    "--points-at",
+    "--merged",
+    "--no-merged"
+  ]);
+  if (mutatingFlag || !readMode && positionals.length > 0)
+    return unsupportedLocalMutation(args);
+  return local(["read"], false, []);
+}
+function classifyNotesCommand(args) {
+  if (args.some((arg) => ["add", "append", "copy", "edit", "merge", "prune", "remove"].includes(arg.toLowerCase()))) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, []);
+}
+function classifyReflogCommand(args) {
+  if (args.some((arg) => ["delete", "expire", "write"].includes(arg.toLowerCase()))) {
+    return unsupportedLocalMutation(args);
+  }
+  return local(["read"], false, []);
+}
+function unsupportedLocalMutation(args) {
+  return local(["unknown"], true, targetArguments(args), true);
+}
+function classifyBranch(args) {
+  if (args.some((arg) => arg === "--delete" || arg.startsWith("--delete=")) || hasShortOption(args, "d") || hasShortOption(args, "D")) {
+    return local(["branch-delete"], true, [
+      ...targetArguments(args),
+      ...attachedOptionValues(args, ["d", "D"], ["delete"])
+    ]);
+  }
+  const targets = [...new Set([
+    ...targetArguments(args, ["-m", "-M", "--move", "-c", "-C", "--copy"]),
+    ...attachedOptionValues(args, ["m", "M", "c", "C"], ["move", "copy"])
+  ])];
+  const destructive = hasShortOption(args, "f") || hasShortOption(args, "M") || hasShortOption(args, "C") || args.includes("--force");
+  return targets.length > 0 ? local(["branch-create"], destructive, targets) : local(["read"], false, []);
+}
+function classifySwitch(args) {
+  const create = hasShortOption(args, "c") || hasShortOption(args, "C") || args.some((arg) => arg === "--create" || arg.startsWith("--create=") || arg === "--force-create" || arg.startsWith("--force-create="));
+  const destructive = hasShortOption(args, "C") || hasShortOption(args, "f") || args.some((arg) => ["--force", "--force-create", "--discard-changes"].includes(arg) || arg.startsWith("--force-create="));
+  const targets = [...new Set([
+    ...targetArguments(args, ["-c", "-C", "--create", "--force-create"]),
+    ...attachedOptionValues(args, ["c", "C"], ["create", "force-create"])
+  ])];
+  return local(create ? ["branch-create", "branch-switch"] : ["branch-switch"], destructive, targets);
+}
+function classifyCheckout(args) {
+  const create = hasShortOption(args, "b") || hasShortOption(args, "B") || args.some((arg) => arg === "--orphan" || arg.startsWith("--orphan="));
+  const discard = args.includes("--") || args.some((arg) => arg === "." || arg === "--patch") || hasShortOption(args, "p");
+  if (discard)
+    return local(["discard"], true, pathArguments(args));
+  const destructive = hasShortOption(args, "B") || hasShortOption(args, "f") || args.includes("--force");
+  const targets = [...new Set([
+    ...targetArguments(args, ["-b", "-B", "--orphan"]),
+    ...attachedOptionValues(args, ["b", "B"], ["orphan"])
+  ])];
+  return local(create ? ["branch-create", "branch-switch"] : ["branch-switch"], destructive, targets);
+}
+function classifyCommit(args) {
+  const amend = args.includes("--amend");
+  const parsed = parseCommitArguments(args);
+  const operations = [
+    ...parsed.implicitStage ? ["implicit-stage"] : [],
+    amend ? "amend" : "commit"
+  ];
+  return local(operations, amend, amend ? ["HEAD", ...parsed.targets] : parsed.targets);
+}
+function parseCommitArguments(args) {
+  let implicitStage = false;
+  const targets = [];
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      targets.push(...args.slice(index + 1));
+      implicitStage ||= targets.length > 0;
+      break;
+    }
+    if (COMMIT_IMPLICIT_LONG_OPTIONS.has(arg) || [...COMMIT_IMPLICIT_LONG_OPTIONS].some((option) => arg.startsWith(`${option}=`))) {
+      implicitStage = true;
+    }
+    if (COMMIT_LONG_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if ([...COMMIT_LONG_OPTIONS_WITH_VALUE].some((option) => arg.startsWith(`${option}=`)))
+      continue;
+    if (/^-[^-]/.test(arg)) {
+      const short = parseCommitShortOptions(arg);
+      implicitStage ||= short.implicitStage;
+      if (short.consumesNext)
+        index += 1;
+      continue;
+    }
+    if (arg.startsWith("-"))
+      continue;
+    targets.push(arg);
+    implicitStage = true;
+  }
+  return { implicitStage, targets };
+}
+function parseCommitShortOptions(arg) {
+  let implicitStage = false;
+  for (let index = 1;index < arg.length; index += 1) {
+    const option = arg[index] ?? "";
+    if (COMMIT_IMPLICIT_SHORT_OPTIONS.has(option))
+      implicitStage = true;
+    if (COMMIT_SHORT_OPTIONS_WITH_VALUE.has(option)) {
+      return { implicitStage, consumesNext: index === arg.length - 1 };
+    }
+    if (COMMIT_SHORT_OPTIONS_WITH_OPTIONAL_ATTACHED_VALUE.has(option)) {
+      return { implicitStage, consumesNext: false };
+    }
+  }
+  return { implicitStage, consumesNext: false };
+}
+function targetArguments(args, valueFlags = []) {
+  const values = [];
+  const consumes = new Set(valueFlags);
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      values.push(...args.slice(index + 1));
+      break;
+    }
+    if (consumes.has(arg)) {
+      index += 1;
+      const value = args[index];
+      if (value)
+        values.push(value);
+      continue;
+    }
+    if (!arg.startsWith("-"))
+      values.push(arg);
+  }
+  return values;
+}
+function hasShortOption(args, option) {
+  return args.some((arg) => /^-[^-]/.test(arg) && arg.slice(1).includes(option));
+}
+function attachedOptionValues(args, short, long) {
+  const values = [];
+  for (const arg of args) {
+    if (/^-[^-]/.test(arg)) {
+      for (const option of short) {
+        const index = arg.indexOf(option, 1);
+        if (index >= 1 && index < arg.length - 1) {
+          values.push(arg.slice(index + 1));
+          break;
+        }
+      }
+    }
+    for (const option of long) {
+      const prefix = `--${option}=`;
+      if (arg.startsWith(prefix) && arg.length > prefix.length)
+        values.push(arg.slice(prefix.length));
+    }
+  }
+  return values;
+}
+function pathArguments(args) {
+  const separator = args.indexOf("--");
+  if (separator >= 0)
+    return args.slice(separator + 1);
+  return args.filter((arg) => !arg.startsWith("-"));
+}
+function isConflictStateFlag(value) {
+  return ["--abort", "--continue", "--quit", "--skip"].includes(value);
+}
+function local(operations, destructive, targets, failClosed = false) {
+  return { remote: false, failClosed, operations, destructive, targets, remoteReasons: [] };
+}
+function remote(reason, failClosed = false) {
+  return {
+    remote: true,
+    failClosed,
+    operations: ["remote"],
+    destructive: false,
+    targets: [],
+    remoteReasons: [reason]
+  };
+}
+function mergeClassification(combined, current) {
+  if ("hasGitCommand" in current && current.hasGitCommand)
+    combined.hasGitCommand = true;
+  combined.remote ||= current.remote;
+  combined.failClosed ||= current.failClosed;
+  combined.destructive ||= current.destructive;
+  appendUnique(combined.operations, current.operations);
+  appendUnique(combined.targets, current.targets);
+  appendUnique(combined.remoteReasons, current.remoteReasons);
+}
+function appendUnique(target, values) {
+  for (const value of values)
+    if (!target.includes(value))
+      target.push(value);
+}
+function recordInlineAlias(value, aliases) {
+  const match = /^alias\.([^=]+)=([\s\S]*)$/i.exec(value);
+  if (match?.[1] && match[2] !== undefined)
+    aliases[match[1].toLowerCase()] = match[2];
+}
+function isGitExecutable(value) {
+  const executable = executableName(value);
+  return executable === "git" || executable === "git.exe";
+}
+function remoteGitExecutableReason(value) {
+  const executable = executableName(value).replace(/\.exe$/, "");
+  if (/^git-remote-.+/.test(executable))
+    return `helper-${executable}`;
+  if (["git-fetch-pack", "git-http-fetch", "git-http-push", "git-ls-remote", "git-send-pack"].includes(executable)) {
+    return `helper-${executable}`;
+  }
+  return;
+}
+function executableName(value) {
+  return value.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
+}
+function shellExecutableIndexes(tokens) {
+  const indexes = new Set;
+  const primary = unwrapCommandIndex(tokens, 0);
+  if (primary >= 0)
+    indexes.add(primary);
+  for (let index = 0;index < tokens.length; index += 1) {
+    if (tokens[index] !== "-exec" && tokens[index] !== "-execdir")
+      continue;
+    const nested = unwrapCommandIndex(tokens, index + 1);
+    if (nested >= 0)
+      indexes.add(nested);
+  }
+  return [...indexes].sort((left, right) => left - right);
+}
+function unwrapCommandIndex(tokens, start) {
+  let index = skipCommandAssignments(tokens, start);
+  const visited = new Set;
+  while (index >= 0 && index < tokens.length && !visited.has(index)) {
+    visited.add(index);
+    const executable = executableName(tokens[index] ?? "");
+    const nested = wrappedCommandIndex(executable, tokens, index);
+    if (nested === undefined)
+      return index;
+    if (nested < 0)
+      return -1;
+    index = skipCommandAssignments(tokens, nested);
+  }
+  return -1;
+}
+function wrappedCommandIndex(executable, tokens, index) {
+  switch (executable) {
+    case "env":
+      return firstWrapperOperand(tokens, index + 1, new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]), true);
+    case "command":
+      return commandBuiltinTarget(tokens, index + 1);
+    case "exec":
+      return firstWrapperOperand(tokens, index + 1, new Set(["-a"]));
+    case "nohup":
+      return firstWrapperOperand(tokens, index + 1, new Set);
+    case "sudo":
+    case "sudo.exe":
+      return firstWrapperOperand(tokens, index + 1, new Set([
+        "-C",
+        "--close-from",
+        "-D",
+        "--chdir",
+        "-g",
+        "--group",
+        "-h",
+        "--host",
+        "-p",
+        "--prompt",
+        "-R",
+        "--chroot",
+        "-r",
+        "--role",
+        "-T",
+        "--command-timeout",
+        "-t",
+        "--type",
+        "-U",
+        "--other-user",
+        "-u",
+        "--user"
+      ]));
+    case "xargs":
+      return firstWrapperOperand(tokens, index + 1, new Set([
+        "-a",
+        "--arg-file",
+        "-d",
+        "--delimiter",
+        "-E",
+        "-e",
+        "--eof",
+        "-I",
+        "--replace",
+        "-L",
+        "-l",
+        "--max-lines",
+        "-n",
+        "--max-args",
+        "-P",
+        "--max-procs",
+        "-s",
+        "--max-chars"
+      ]));
+    case "timeout": {
+      const duration = firstWrapperOperand(tokens, index + 1, new Set(["-k", "--kill-after", "-s", "--signal"]));
+      return duration >= 0 ? duration + 1 : -1;
+    }
+    default:
+      return;
+  }
+}
+function commandBuiltinTarget(tokens, start) {
+  for (let index = start;index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    if (token === "--")
+      return index + 1 < tokens.length ? index + 1 : -1;
+    if (token === "-v" || token === "-V")
+      return -1;
+    if (token === "-p")
+      continue;
+    return index;
+  }
+  return -1;
+}
+function firstWrapperOperand(tokens, start, optionsWithValue, skipAssignments = false) {
+  for (let index = start;index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    if (token === "--")
+      return index + 1 < tokens.length ? index + 1 : -1;
+    if (skipAssignments && isEnvironmentAssignment(token))
+      continue;
+    if (!token.startsWith("-") || token === "-")
+      return index;
+    if (optionsWithValue.has(token))
+      index += 1;
+  }
+  return -1;
+}
+function skipCommandAssignments(tokens, start) {
+  let index = start;
+  while (index < tokens.length && isEnvironmentAssignment(tokens[index] ?? ""))
+    index += 1;
+  return index;
+}
+function isEnvironmentAssignment(value) {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(value);
+}
+function commandSubstitutions(command) {
+  const substitutions = [];
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index] ?? "";
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'")
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" && quote === undefined) {
+      quote = "'";
+      continue;
+    }
+    if (character === '"') {
+      if (quote === '"')
+        quote = undefined;
+      else if (quote === undefined)
+        quote = '"';
+      continue;
+    }
+    if (character === "$" && command[index + 1] === "(") {
+      const nested = readParenthesizedSubstitution(command, index + 2);
+      if (nested) {
+        substitutions.push(nested.command);
+        index = nested.end;
+      }
+      continue;
+    }
+    if (character === "`") {
+      const nested = readBacktickSubstitution(command, index + 1);
+      if (nested) {
+        substitutions.push(nested.command);
+        index = nested.end;
+      }
+    }
+  }
+  return substitutions;
+}
+function readParenthesizedSubstitution(source, start) {
+  let depth = 1;
+  let quote;
+  let escaped = false;
+  for (let index = start;index < source.length; index += 1) {
+    const character = source[index] ?? "";
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "(")
+      depth += 1;
+    if (character !== ")")
+      continue;
+    depth -= 1;
+    if (depth === 0)
+      return { command: source.slice(start, index), end: index };
+  }
+  return;
+}
+function readBacktickSubstitution(source, start) {
+  let escaped = false;
+  for (let index = start;index < source.length; index += 1) {
+    const character = source[index] ?? "";
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "`")
+      return { command: source.slice(start, index), end: index };
+  }
+  return;
+}
+function splitShellSegments(command) {
+  const segments = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index] ?? "";
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === `
+` || character === ";" || character === "|" || character === "&") {
+      if (current.trim())
+        segments.push(current.trim());
+      current = "";
+      if ((character === "|" || character === "&") && command[index + 1] === character)
+        index += 1;
+      continue;
+    }
+    current += character;
+  }
+  if (current.trim())
+    segments.push(current.trim());
+  return segments;
+}
+function shellTokens(command) {
+  const tokens = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (current)
+        tokens.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (current)
+    tokens.push(current);
+  return tokens;
+}
+var REMOTE_COMMANDS, READ_COMMANDS, KNOWN_LOCAL_COMMANDS, GLOBAL_OPTIONS_WITH_VALUE, POSIX_SHELL_EXECUTORS, WINDOWS_SHELL_EXECUTORS, POWERSHELL_EXECUTORS, COMMIT_IMPLICIT_LONG_OPTIONS, COMMIT_IMPLICIT_SHORT_OPTIONS, COMMIT_LONG_OPTIONS_WITH_VALUE, COMMIT_SHORT_OPTIONS_WITH_VALUE, COMMIT_SHORT_OPTIONS_WITH_OPTIONAL_ATTACHED_VALUE;
+var init_git_command_policy = __esm(() => {
+  REMOTE_COMMANDS = new Set([
+    "clone",
+    "fetch",
+    "fetch-pack",
+    "http-fetch",
+    "http-push",
+    "ls-remote",
+    "pull",
+    "push",
+    "remote-ext",
+    "remote-fd",
+    "remote-ftp",
+    "remote-ftps",
+    "remote-http",
+    "remote-https",
+    "send-pack"
+  ]);
+  READ_COMMANDS = new Set([
+    "annotate",
+    "blame",
+    "cat-file",
+    "count-objects",
+    "describe",
+    "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "difftool",
+    "for-each-ref",
+    "fsck",
+    "grep",
+    "help",
+    "log",
+    "ls-files",
+    "merge-base",
+    "name-rev",
+    "notes",
+    "range-diff",
+    "reflog",
+    "rev-list",
+    "rev-parse",
+    "shortlog",
+    "show",
+    "show-branch",
+    "show-ref",
+    "status",
+    "tag",
+    "verify-commit",
+    "verify-tag",
+    "version",
+    "whatchanged"
+  ]);
+  KNOWN_LOCAL_COMMANDS = new Set([
+    ...READ_COMMANDS,
+    "add",
+    "am",
+    "apply",
+    "archive",
+    "bisect",
+    "branch",
+    "bundle",
+    "checkout",
+    "cherry",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "commit-tree",
+    "config",
+    "fast-export",
+    "fast-import",
+    "filter-branch",
+    "format-patch",
+    "gc",
+    "hash-object",
+    "index-pack",
+    "init",
+    "interpret-trailers",
+    "maintenance",
+    "merge",
+    "merge-file",
+    "merge-index",
+    "merge-tree",
+    "mergetool",
+    "mktag",
+    "mktree",
+    "mv",
+    "pack-objects",
+    "prune",
+    "prune-packed",
+    "read-tree",
+    "rebase",
+    "replace",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "show-index",
+    "sparse-checkout",
+    "stash",
+    "stripspace",
+    "submodule",
+    "switch",
+    "symbolic-ref",
+    "unpack-file",
+    "unpack-objects",
+    "update-index",
+    "update-ref",
+    "var",
+    "worktree",
+    "write-tree"
+  ]);
+  GLOBAL_OPTIONS_WITH_VALUE = new Set([
+    "-C",
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree"
+  ]);
+  POSIX_SHELL_EXECUTORS = new Set(["bash", "dash", "fish", "ksh", "sh", "zsh"]);
+  WINDOWS_SHELL_EXECUTORS = new Set(["cmd", "cmd.exe"]);
+  POWERSHELL_EXECUTORS = new Set(["powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
+  COMMIT_IMPLICIT_LONG_OPTIONS = new Set([
+    "--all",
+    "--include",
+    "--interactive",
+    "--only",
+    "--patch",
+    "--pathspec-from-file"
+  ]);
+  COMMIT_IMPLICIT_SHORT_OPTIONS = new Set(["a", "i", "o", "p"]);
+  COMMIT_LONG_OPTIONS_WITH_VALUE = new Set([
+    "--message",
+    "--file",
+    "--reuse-message",
+    "--reedit-message",
+    "--template",
+    "--author",
+    "--date",
+    "--cleanup",
+    "--fixup",
+    "--squash",
+    "--trailer",
+    "--pathspec-from-file"
+  ]);
+  COMMIT_SHORT_OPTIONS_WITH_VALUE = new Set(["m", "F", "C", "c", "t"]);
+  COMMIT_SHORT_OPTIONS_WITH_OPTIONAL_ATTACHED_VALUE = new Set(["S", "u"]);
+});
+
+// src/cli/core/infrastructure-boundary.ts
+import fs9 from "node:fs";
+import path12 from "node:path";
+function classifyInfrastructurePath(projectRoot, targetPath) {
+  for (const relativePath of relativeCandidates(projectRoot, targetPath)) {
+    const classification = classifyRelativePath(relativePath);
+    if (classification.protected)
+      return { ...classification, relativePath };
+  }
+  const markerScoped = classifyMarkerScopedPath(projectRoot, targetPath);
+  if (markerScoped.protected)
+    return markerScoped;
+  return { protected: false };
+}
+function classifyInfrastructureCommand(command) {
+  for (const segment of commandSegments(command)) {
+    const classification = classifyCommandSegment(segment);
+    if (classification.protected)
+      return classification;
+  }
+  return { protected: false };
+}
+function classifyRelativePath(relativePath) {
+  const normalized = normalizeRelative(relativePath);
+  if (!normalized)
+    return { protected: false };
+  if (CI_DIRECTORIES.some((directory) => normalized === directory || normalized.startsWith(`${directory}/`))) {
+    return protectedMatch("ci-cd", "directorio de automatizacion CI/CD");
+  }
+  const segments = normalized.split("/");
+  const first = segments[0] ?? "";
+  const base = segments.at(-1) ?? "";
+  const directorySurface = INFRASTRUCTURE_DIRECTORIES.get(first);
+  if (directorySurface)
+    return protectedMatch(directorySurface, `directorio raiz ${first}`);
+  if (CI_FILES.some((pattern) => pattern.test(base))) {
+    return protectedMatch("ci-cd", `definicion CI/CD ${base}`);
+  }
+  if (segments.length === 1 && /^template\.(?:ya?ml|json)$/.test(base)) {
+    return protectedMatch("iac", `plantilla declarativa ${base}`);
+  }
+  if (IAC_FILES.some((pattern) => pattern.test(base))) {
+    return protectedMatch("iac", `infraestructura como codigo ${base}`);
+  }
+  if (DEPLOYMENT_FILES.some((pattern) => pattern.test(base))) {
+    return protectedMatch("deployment", `configuracion de despliegue ${base}`);
+  }
+  if (RELEASE_FILES.some((pattern) => pattern.test(normalized) || pattern.test(base))) {
+    return protectedMatch("release", `configuracion de publicacion ${normalized}`);
+  }
+  if ((segments.length === 1 || segments.length === 2 && segments[0] === "scripts") && DEPLOYMENT_SCRIPT.test(base)) {
+    return protectedMatch("deployment", `script operativo ${normalized}`);
+  }
+  return { protected: false };
+}
+function classifyCommandSegment(segment) {
+  const normalized = segment.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized)
+    return { protected: false };
+  const dryRun = /(?:^|\s)--dry-run(?:=(?:true|client|server))?(?:\s|$)/.test(normalized);
+  if (isDirectPublish(normalized) && !dryRun)
+    return protectedMatch("release", "publicacion de paquete o artefacto");
+  if (isCiOrReleaseTrigger(normalized))
+    return protectedMatch("ci-cd", "disparo o modificacion de workflow/release");
+  if (isContainerPublish(normalized))
+    return protectedMatch("release", "publicacion de imagen o chart");
+  if (isTerraformMutation(normalized))
+    return protectedMatch("iac", "operacion mutante de Terraform/OpenTofu");
+  if (isPulumiMutation(normalized))
+    return protectedMatch("iac", "operacion mutante de Pulumi");
+  if (isKubectlMutation(normalized) && !dryRun)
+    return protectedMatch("deployment", "operacion mutante de kubectl");
+  if (isHelmMutation(normalized) && !dryRun)
+    return protectedMatch("deployment", "operacion mutante de Helm");
+  if (isCloudDeployment(normalized))
+    return protectedMatch("deployment", "operacion de despliegue cloud");
+  if (isDeploymentTask(normalized) && !(dryRun && isDirectPublish(normalized))) {
+    return protectedMatch("deployment", "tarea o script de deploy/release/publish");
+  }
+  return { protected: false };
+}
+function isDirectPublish(command) {
+  return /\b(?:npm|pnpm|bun)\b[^;&|]*\bpublish\b/.test(command) || /\byarn\b[^;&|]*\bpublish\b/.test(command) || /\bsemantic-release\b/.test(command) || /\bchangeset\s+publish\b/.test(command) || /\bcargo\s+publish\b/.test(command) || /\bmvn(?:w)?\b[^;&|]*\bdeploy\b/.test(command) || /\bgradle(?:w)?\b[^;&|]*\bpublish\b/.test(command) || /\bdotnet\s+nuget\s+push\b/.test(command) || /\btwine\s+upload\b/.test(command) || /\bgem\s+push\b/.test(command);
+}
+function isCiOrReleaseTrigger(command) {
+  return /\bgh\b[^;&|]*\bworkflow\s+run\b/.test(command) || /\bgh\b[^;&|]*\brun\s+rerun\b/.test(command) || /\bgh\b[^;&|]*\brelease\s+(?:create|upload|edit|delete)\b/.test(command) || /\bglab\b[^;&|]*\b(?:ci\s+run|pipeline\s+(?:run|retry|cancel))\b/.test(command);
+}
+function isContainerPublish(command) {
+  return /\b(?:docker|podman)\b[^;&|]*\bpush\b/.test(command) || /\bdocker\b[^;&|]*\bbuildx\s+build\b[^;&|]*\s--push(?:\s|$)/.test(command) || /\bhelm\b[^;&|]*\bpush\b/.test(command);
+}
+function isTerraformMutation(command) {
+  if (!/\b(?:terraform|tofu)\b/.test(command))
+    return false;
+  if (/\bfmt\b/.test(command))
+    return !/(?:^|\s)-(?:check|-check)(?:\s|$)/.test(command);
+  if (/\binit\b/.test(command)) {
+    return /(?:^|\s)-(?:upgrade|-upgrade|migrate-state|-migrate-state|reconfigure|-reconfigure)(?:\s|$)/.test(command);
+  }
+  return /\b(?:apply|destroy|import|taint|untaint|force-unlock)\b/.test(command) || /\bstate\s+(?:mv|rm|push|replace-provider)\b/.test(command) || /\bworkspace\s+(?:new|delete)\b/.test(command);
+}
+function isPulumiMutation(command) {
+  return /\bpulumi\b[^;&|]*\b(?:up|destroy|import|refresh|cancel)\b/.test(command) || /\bpulumi\b[^;&|]*\bstate\s+(?:delete|move|repair|unprotect)\b/.test(command);
+}
+function isKubectlMutation(command) {
+  return /\bkubectl\b[^;&|]*\b(?:apply|create|delete|replace|patch|edit|set|scale|rollout|annotate|label|taint|drain|cordon|uncordon|expose|autoscale|exec|cp)\b/.test(command);
+}
+function isHelmMutation(command) {
+  return /\bhelm\b[^;&|]*\b(?:install|upgrade|uninstall|rollback)\b/.test(command);
+}
+function isCloudDeployment(command) {
+  return /\baws\b[^;&|]*\bcloudformation\s+(?:deploy|create-stack|update-stack|delete-stack|create-change-set|execute-change-set)\b/.test(command) || /\baz\b[^;&|]*\bdeployment\b[^;&|]*\b(?:create|delete)\b/.test(command) || /\bgcloud\b[^;&|]*\b(?:run\s+deploy|app\s+deploy|functions\s+deploy|deploy\s+releases\s+create)\b/.test(command) || /\b(?:firebase|vercel|netlify|fly|flyctl|railway|serverless|sls|sam|cdk)\b[^;&|]*\b(?:deploy|remove|destroy|up|promote|rollback|publish)\b/.test(command) || /\bheroku\b[^;&|]*\b(?:container:(?:push|release)|releases:rollback)\b/.test(command);
+}
+function isDeploymentTask(command) {
+  return /\b(?:npm|pnpm|yarn|bun)\b[^;&|]*\b(?:run\s+)?(?:deploy|release|publish)(?::[a-z0-9._-]+)?\b/.test(command) || /\b(?:make|just|task)\s+(?:deploy|release|publish)(?::[a-z0-9._-]+)?\b/.test(command) || /(?:^|\s)(?:\.\/)?(?:scripts\/)?(?:deploy|release|publish)(?:[._-][^\s;&|]+)?(?:\s|$)/.test(command);
+}
+function commandSegments(command) {
+  return command.split(/(?:&&|\|\||[;|\n])/).map((segment) => segment.trim()).filter(Boolean);
+}
+function protectedMatch(surface, evidence) {
+  return { protected: true, surface, evidence };
+}
+function relativeCandidates(projectRoot, targetPath) {
+  const lexicalRoot = path12.resolve(projectRoot);
+  const lexicalTarget = path12.resolve(targetPath);
+  const canonicalRoot = canonicalPlannedPath(lexicalRoot);
+  const canonicalTarget = canonicalPlannedPath(lexicalTarget);
+  const candidates = [
+    relativeInside(lexicalRoot, lexicalTarget),
+    relativeInside(canonicalRoot, canonicalTarget)
+  ].filter((value) => value !== undefined);
+  return [...new Set(candidates)];
+}
+function classifyMarkerScopedPath(projectRoot, targetPath) {
+  const pairs = [
+    [path12.resolve(projectRoot), path12.resolve(targetPath)],
+    [canonicalPlannedPath(projectRoot), canonicalPlannedPath(targetPath)]
+  ];
+  for (const [root, target] of pairs) {
+    if (relativeInside(root, target) === undefined)
+      continue;
+    let current = fs9.existsSync(target) && fs9.statSync(target).isDirectory() ? target : path12.dirname(target);
+    while (relativeInside(root, current) !== undefined) {
+      if (fileExistsAny(current, ["Chart.yaml", "Chart.yml"])) {
+        return { ...protectedMatch("deployment", "archivo dentro de un chart Helm"), relativePath: normalizeRelative(path12.relative(root, target)) };
+      }
+      if (fileExistsAny(current, ["Pulumi.yaml", "Pulumi.yml"])) {
+        return { ...protectedMatch("iac", "archivo dentro de un proyecto Pulumi"), relativePath: normalizeRelative(path12.relative(root, target)) };
+      }
+      if (fs9.existsSync(path12.join(current, "cdk.json"))) {
+        const relative = normalizeRelative(path12.relative(current, target));
+        const first = relative.split("/")[0] ?? "";
+        if (["bin", "lib", "src", "stacks"].includes(first)) {
+          return { ...protectedMatch("iac", "codigo de infraestructura AWS CDK"), relativePath: normalizeRelative(path12.relative(root, target)) };
+        }
+      }
+      if (current === root)
+        break;
+      const parent = path12.dirname(current);
+      if (parent === current)
+        break;
+      current = parent;
+    }
+  }
+  return { protected: false };
+}
+function fileExistsAny(directory, names) {
+  return names.some((name) => {
+    try {
+      return fs9.statSync(path12.join(directory, name)).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+function relativeInside(root, target) {
+  const relative = path12.relative(root, target);
+  if (relative === "")
+    return "";
+  if (relative.startsWith("..") || path12.isAbsolute(relative))
+    return;
+  return relative;
+}
+function canonicalPlannedPath(value) {
+  const resolved = path12.resolve(value);
+  let current = resolved;
+  const suffix = [];
+  while (!fs9.existsSync(current)) {
+    const parent = path12.dirname(current);
+    if (parent === current)
+      break;
+    suffix.unshift(path12.basename(current));
+    current = parent;
+  }
+  try {
+    return path12.resolve(fs9.realpathSync(current), ...suffix);
+  } catch {
+    return resolved;
+  }
+}
+function normalizeRelative(value) {
+  return value.split(path12.sep).join("/").replace(/^\.\//, "").toLowerCase();
+}
+var CI_DIRECTORIES, INFRASTRUCTURE_DIRECTORIES, CI_FILES, IAC_FILES, DEPLOYMENT_FILES, RELEASE_FILES, DEPLOYMENT_SCRIPT;
+var init_infrastructure_boundary = __esm(() => {
+  CI_DIRECTORIES = [
+    ".github/workflows",
+    ".github/actions",
+    ".gitlab/ci",
+    ".circleci",
+    ".buildkite",
+    ".azure-pipelines",
+    ".drone",
+    ".tekton",
+    "tekton"
+  ];
+  INFRASTRUCTURE_DIRECTORIES = new Map([
+    ["infra", "iac"],
+    ["infrastructure", "iac"],
+    ["terraform", "iac"],
+    ["tofu", "iac"],
+    ["pulumi", "iac"],
+    ["cloudformation", "iac"],
+    ["cdk", "iac"],
+    ["deploy", "deployment"],
+    ["deployment", "deployment"],
+    ["k8s", "deployment"],
+    ["kubernetes", "deployment"],
+    ["helm", "deployment"],
+    ["charts", "deployment"],
+    ["argocd", "deployment"],
+    [".argocd", "deployment"],
+    ["flux", "deployment"],
+    [".flux", "deployment"]
+  ]);
+  CI_FILES = [
+    /^\.gitlab-ci\.ya?ml$/,
+    /^azure-pipelines(?:[._-].*)?\.ya?ml$/,
+    /^jenkinsfile(?:\..*)?$/,
+    /^bitbucket-pipelines\.ya?ml$/,
+    /^\.drone\.ya?ml$/,
+    /^\.travis\.ya?ml$/,
+    /^cloudbuild(?:[._-].*)?\.ya?ml$/,
+    /^appveyor\.ya?ml$/
+  ];
+  IAC_FILES = [
+    /\.tf(?:\.json)?$/,
+    /\.tfvars(?:\.json)?$/,
+    /\.bicep$/,
+    /^\.terraform\.lock\.hcl$/,
+    /^pulumi(?:\..+)?\.ya?ml$/,
+    /^cdk\.json$/,
+    /^samconfig\.toml$/
+  ];
+  DEPLOYMENT_FILES = [
+    /^chart\.ya?ml$/,
+    /^kustomization\.ya?ml$/,
+    /^skaffold\.ya?ml$/,
+    /^tiltfile$/,
+    /^serverless\.ya?ml$/,
+    /^helmfile\.ya?ml$/,
+    /^values(?:[._-].*)?\.ya?ml$/,
+    /^dockerfile(?:\..*)?$/,
+    /^containerfile(?:\..*)?$/,
+    /^(?:docker-)?compose(?:[._-].*)?\.ya?ml$/,
+    /^vercel\.json$/,
+    /^netlify\.toml$/,
+    /^fly\.toml$/,
+    /^firebase\.json$/,
+    /^railway\.(?:json|toml)$/,
+    /^appspec\.ya?ml$/,
+    /^render\.ya?ml$/
+  ];
+  RELEASE_FILES = [
+    /^\.npmrc$/,
+    /^\.releaserc(?:\..*)?$/,
+    /^release\.config\.[a-z0-9]+$/,
+    /^\.changeset\/config\.json$/
+  ];
+  DEPLOYMENT_SCRIPT = /^(?:deploy|release|publish)(?:[._-].*)?\.(?:sh|bash|zsh|ps1|cmd|bat|js|mjs|cjs|ts|py|rb)$/;
+});
+
+// src/cli/core/documentation-boundary.ts
+import path13 from "node:path";
+function classifyDocumentationPath(projectRoot, targetPath) {
+  const root = path13.resolve(projectRoot);
+  const absolute = path13.resolve(root, targetPath);
+  const relative = path13.relative(root, absolute);
+  if (relative === "" || relative.startsWith("..") || path13.isAbsolute(relative))
+    return { protected: false };
+  const portable = relative.split(path13.sep).join("/");
+  const segments = portable.split("/");
+  const basename = segments.at(-1) ?? "";
+  const extension = path13.extname(basename).toLowerCase();
+  if (!MARKDOWN_EXTENSIONS.has(extension))
+    return { protected: false, relativePath: portable };
+  const stem = basename.slice(0, -extension.length);
+  if (PUBLIC_DOCUMENT_STEMS.test(stem)) {
+    return { protected: false, relativePath: portable, reason: "README/licencia/gobernanza publica permitida" };
+  }
+  const directories = segments.slice(0, -1).map((segment) => segment.toLowerCase());
+  if (ALLOWED_TOP_LEVEL_DIRECTORIES.has(directories[0] ?? "") || directories.some((segment) => ALLOWED_NESTED_DIRECTORIES.has(segment))) {
+    return { protected: false, relativePath: portable, reason: "asset gestionado, ejemplo o fixture permitido" };
+  }
+  return { protected: true, relativePath: portable, reason: "Markdown bloqueado por defecto fuera de la allowlist publica" };
+}
+function isProtectedDocumentationPath(projectRoot, targetPath) {
+  return classifyDocumentationPath(projectRoot, targetPath).protected;
+}
+function parsePatchOperations(patchText) {
+  const operations = [];
+  let pendingUpdate;
+  const flushUpdate = () => {
+    if (pendingUpdate)
+      operations.push({ kind: "update", path: pendingUpdate });
+    pendingUpdate = undefined;
+  };
+  for (const line of patchText.split(/\r?\n/)) {
+    let match = line.match(/^\*\*\* Add File: (.+)$/);
+    if (match) {
+      flushUpdate();
+      operations.push({ kind: "add", path: match[1].trim() });
+      continue;
+    }
+    match = line.match(/^\*\*\* Delete File: (.+)$/);
+    if (match) {
+      flushUpdate();
+      operations.push({ kind: "delete", path: match[1].trim() });
+      continue;
+    }
+    match = line.match(/^\*\*\* Update File: (.+)$/);
+    if (match) {
+      flushUpdate();
+      pendingUpdate = match[1].trim();
+      continue;
+    }
+    match = line.match(/^\*\*\* Move to: (.+)$/);
+    if (match && pendingUpdate) {
+      operations.push({ kind: "move-out", path: pendingUpdate });
+      operations.push({ kind: "move-in", path: match[1].trim() });
+      pendingUpdate = undefined;
+    }
+  }
+  flushUpdate();
+  return operations;
+}
+function isRemovalOperation(kind) {
+  return kind === "delete" || kind === "move-out";
+}
+var MARKDOWN_EXTENSIONS, ALLOWED_TOP_LEVEL_DIRECTORIES, ALLOWED_NESTED_DIRECTORIES, PUBLIC_DOCUMENT_STEMS;
+var init_documentation_boundary = __esm(() => {
+  MARKDOWN_EXTENSIONS = new Set([".md", ".mdx", ".markdown", ".adoc", ".rst"]);
+  ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
+    "assets",
+    "examples",
+    "example",
+    "fixtures",
+    "fixture",
+    "test",
+    "tests",
+    "__tests__",
+    ".github"
+  ]);
+  ALLOWED_NESTED_DIRECTORIES = new Set([
+    "fixtures",
+    "fixture",
+    "__fixtures__",
+    "examples",
+    "example",
+    "__examples__",
+    "__tests__",
+    "__snapshots__"
+  ]);
+  PUBLIC_DOCUMENT_STEMS = /^(?:readme|license|licence|notice|changelog|contributing|security|support|governance|code[-_]of[-_]conduct|third[-_]party[-_]notices|agents|claude)(?:[._-][a-z0-9-]+)*$/i;
+});
+
+// src/cli/core/git-commit-message.ts
+function isValidCommitSubject(subject) {
+  if (!subject || subject.includes(`
+`) || subject.includes("\r"))
+    return false;
+  if ([...subject].length > MAX_COMMIT_SUBJECT_LENGTH)
+    return false;
+  const match = COMMIT_SUBJECT_PATTERN.exec(subject);
+  if (!match)
+    return false;
+  return isEmojiGrapheme(match[1] ?? "");
+}
+function isEmojiGrapheme(value) {
+  if (!value || /\s/u.test(value))
+    return false;
+  const graphemes = [...GRAPHEME_SEGMENTER.segment(value)];
+  if (graphemes.length !== 1 || graphemes[0]?.segment !== value)
+    return false;
+  return /\p{Extended_Pictographic}/u.test(value) || /^(?:\p{Regional_Indicator}){2}$/u.test(value) || /^[#*0-9]\uFE0F?\u20E3$/u.test(value);
+}
+var COMMIT_TYPES, MAX_COMMIT_SUBJECT_LENGTH = 82, COMMIT_TYPE_PATTERN, SCOPE_SEGMENT, COMMIT_SUBJECT_PATTERN, GRAPHEME_SEGMENTER;
+var init_git_commit_message = __esm(() => {
+  COMMIT_TYPES = [
+    "feat",
+    "fix",
+    "docs",
+    "style",
+    "refactor",
+    "perf",
+    "test",
+    "build",
+    "ci",
+    "chore",
+    "revert",
+    "security"
+  ];
+  COMMIT_TYPE_PATTERN = COMMIT_TYPES.join("|");
+  SCOPE_SEGMENT = String.raw`[\p{L}\p{N}][\p{L}\p{M}\p{N}]*`;
+  COMMIT_SUBJECT_PATTERN = new RegExp(String.raw`^(\S+) (${COMMIT_TYPE_PATTERN})(?:\((${SCOPE_SEGMENT}(?:-${SCOPE_SEGMENT})*)\))?(!)?: (\S(?:.*\S)?)$`, "u");
+  GRAPHEME_SEGMENTER = new Intl.Segmenter("es", { granularity: "grapheme" });
+});
+
+// src/cli/core/hooks/secret-scan.ts
+import fs10 from "node:fs";
+import path14 from "node:path";
+import { createHash as createHash5 } from "node:crypto";
+function detectFileSecretCounts(content, filePath) {
+  const counts = countPatterns(content, FILE_PATTERNS);
+  if (filePath && /^\.env(\.|$)/.test(path14.basename(filePath)))
+    counts["env-file"] = 1;
+  return counts;
+}
+function detectFileSecretFindings(content, filePath, displayPath = path14.basename(filePath)) {
+  const findings = [];
+  const lines = content.split(/\r?\n/);
+  const starts = [0];
+  for (let index = 0;index < content.length; index += 1) {
+    if (content[index] === `
+`)
+      starts.push(index + 1);
+  }
+  const lineAt = (offset) => {
+    let low = 0;
+    let high = starts.length;
+    while (low + 1 < high) {
+      const middle = low + high >>> 1;
+      if (starts[middle] <= offset)
+        low = middle;
+      else
+        high = middle;
+    }
+    return low;
+  };
+  const matched = FILE_PATTERNS.flatMap((pattern) => {
+    const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
+    return [...content.matchAll(new RegExp(pattern.source, flags))].map((match) => ({ pattern, match, startLine: lineAt(match.index ?? 0) }));
+  }).sort((a, b) => (a.match.index ?? 0) - (b.match.index ?? 0));
+  for (const item of matched.slice(0, MAX_EXPORTED_FINDINGS)) {
+    const index = item.startLine;
+    const line = lines[index] ?? "";
+    const match = item.match;
+    const onOneLine = !match[0].includes(`
+`) && !match[0].includes("\r");
+    const localMatch = onOneLine ? Object.assign([...match], {
+      index: (match.index ?? 0) - starts[index],
+      input: line
+    }) : undefined;
+    const lineFindingCount = matched.filter((other) => other.startLine === index).length;
+    const remediation = item.pattern.kind === "credential-assignment" ? localMatch && line.includes(match[0]) ? buildSyntheticFixtureRemediation(line, filePath, displayPath, index + 1, localMatch, lineFindingCount) : removalRemediation(displayPath, index + 1, "unsupported-syntax") : undefined;
+    findings.push({
+      kind: item.pattern.kind,
+      path: displayPath,
+      line: index + 1,
+      ...remediation ? { remediation } : {}
+    });
+  }
+  if (/^\.env(\.|$)/.test(path14.basename(filePath)) && !findings.some((finding) => finding.kind === "env-file")) {
+    findings.push({ kind: "env-file", path: displayPath, line: 1 });
+  }
+  return findings;
+}
+function detectPayloadSecretKinds(content) {
+  return secretKinds(countPatterns(content, PAYLOAD_PATTERNS));
+}
+function redactPayloadSecrets(content) {
+  const kinds = new Set;
+  let value = content.replace(PRIVATE_KEY_BLOCK, () => {
+    kinds.add("private-key");
+    return "<redacted:private-key>";
+  });
+  value = value.replace(PRIVATE_KEY_HEADER, () => {
+    kinds.add("private-key");
+    return "<redacted:private-key>";
+  });
+  value = value.replace(AWS_ACCESS_KEY, () => {
+    kinds.add("aws-access-key");
+    return "<redacted:aws-access-key>";
+  });
+  value = value.replace(BEARER_TOKEN, () => {
+    kinds.add("bearer-token");
+    return "Bearer <redacted:bearer-token>";
+  });
+  value = value.replace(CREDENTIAL_ASSIGNMENT, (_match, name, operator, quote) => {
+    kinds.add("credential-assignment");
+    return `${name}${operator}${quote}<redacted:credential-assignment>${quote}`;
+  });
+  return { value, kinds: SECRET_KINDS.filter((kind) => kinds.has(kind)) };
+}
+function isPotentialSecretPath(target) {
+  const normalized = target.replaceAll("\\", "/");
+  const base = path14.basename(normalized);
+  if (base === ".env.example")
+    return false;
+  return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
+}
+function secretKinds(counts) {
+  return SECRET_KINDS.filter((kind) => (counts[kind] ?? 0) > 0);
+}
+function buildSecretPatchSummary(patchText, cwd, binding) {
+  const parsed = parsePatchSections(patchText);
+  const root = path14.resolve(cwd);
+  const patchHash = digest(patchText);
+  const fail = (reason, code = "PATCH_NOT_EVALUABLE", section, safePath, hunk) => {
+    const failure = {
+      code,
+      reason,
+      ...section ? { operation: section.operation } : {},
+      ...safePath ? { path: safePath } : {},
+      ...hunk ? { hunk } : {}
+    };
+    return brandedSummary(false, [], { root, binding, patchHash, prestate: [] }, failure);
+  };
+  if (parsed.failure)
+    return fail(parsed.failure, parsed.failure === "file-unavailable" ? "SECURITY_CONTROL_UNAVAILABLE" : "PATCH_NOT_EVALUABLE");
+  if (parsed.sections.length === 0 || parsed.sections.length > MAX_PATCH_FILES)
+    return fail("invalid-structure");
+  const seen = new Set;
+  const files = [];
+  const prestate = [];
+  for (const section of parsed.sections) {
+    const absolute = path14.resolve(root, section.path);
+    if (!section.path || path14.isAbsolute(section.path) || /[\\\u0000-\u001f\u007f]/.test(section.path) || !isWithin2(absolute, root) || absolute === root)
+      return fail("invalid-path", "PATCH_NOT_EVALUABLE", section);
+    const relative = path14.relative(root, absolute).split(path14.sep).join("/");
+    if (seen.has(absolute))
+      return fail("duplicate-target", "PATCH_NOT_EVALUABLE", section, relative);
+    seen.add(absolute);
+    if (!pathComponentsAreRegular(root, absolute))
+      return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
+    if (section.operation === "add") {
+      if (lstatIfExists(absolute) !== null)
+        return fail("file-unavailable", "PATCH_NOT_EVALUABLE", section, relative);
+      const added = section.added.join(`
+`);
+      if (Buffer.byteLength(added) > MAX_SCANNED_FILE_BYTES)
+        return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
+      files.push({
+        path: relative,
+        operation: section.operation,
+        before: {},
+        after: detectFileSecretCounts(added, absolute)
+      });
+      prestate.push({ absolute, hash: null });
+      continue;
+    }
+    const current = readRegularTextFile(absolute);
+    if (current === null)
+      return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
+    const before = detectFileSecretCounts(current.content, absolute);
+    let after = {};
+    if (section.operation === "update") {
+      const simulated = simulateHunks(current.content, section.hunks);
+      if (!simulated.ok)
+        return fail(simulated.reason, "PATCH_NOT_EVALUABLE", section, relative, simulated.hunk);
+      if (Buffer.byteLength(simulated.content) > MAX_SCANNED_FILE_BYTES) {
+        return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
+      }
+      after = detectFileSecretCounts(simulated.content, absolute);
+    }
+    files.push({ path: relative, operation: section.operation, before, after });
+    prestate.push({ absolute, hash: current.hash });
+  }
+  return brandedSummary(true, files, { root, binding, patchHash, prestate });
+}
+function parseSecretPatchSummary(value) {
+  if (typeof value !== "object" || value === null || !PATCH_EVIDENCE.has(value) || value[SECRET_PATCH_SUMMARY_BRAND] !== true)
+    return null;
+  const record = objectValue(value);
+  const evidence = PATCH_EVIDENCE.get(value);
+  if (!evidence || digest(JSON.stringify(value)) !== evidence.summaryHash)
+    return null;
+  if (!record || record.version !== 1 || typeof record.evaluable !== "boolean" || !Array.isArray(record.files) || record.files.length > MAX_PATCH_FILES || record.evaluable && record.files.length === 0)
+    return null;
+  const seen = new Set;
+  const files = [];
+  for (const item of record.files) {
+    const file = objectValue(item);
+    if (!file || typeof file.path !== "string" || !file.path.trim() || file.path.length > 4096 || !["add", "update", "delete"].includes(String(file.operation)))
+      return null;
+    if (seen.has(file.path))
+      return null;
+    seen.add(file.path);
+    const before = parseSecretCounts(file.before);
+    const after = parseSecretCounts(file.after);
+    if (!before || !after)
+      return null;
+    files.push({
+      path: file.path,
+      operation: file.operation,
+      before,
+      after
+    });
+  }
+  const failure = objectValue(record.failure);
+  return {
+    version: 1,
+    evaluable: record.evaluable,
+    files,
+    ...failure && typeof failure.code === "string" && typeof failure.reason === "string" ? { failure } : {}
+  };
+}
+function revalidateSecretPatchSummary(value, cwd, binding) {
+  const summary = parseSecretPatchSummary(value);
+  const evidence = PATCH_EVIDENCE.get(value);
+  if (!summary?.evaluable || !evidence || evidence.root !== path14.resolve(cwd))
+    return false;
+  if (JSON.stringify(evidence.binding ?? null) !== JSON.stringify(binding ?? null))
+    return false;
+  for (const item of evidence.prestate) {
+    if (!pathComponentsAreRegular(evidence.root, item.absolute))
+      return false;
+    if (item.hash === null) {
+      if (lstatIfExists(item.absolute) !== null)
+        return false;
+    } else if (readRegularTextFile(item.absolute)?.hash !== item.hash)
+      return false;
+  }
+  return true;
+}
+function countPatterns(content, patterns) {
+  const counts = {};
+  for (const pattern of patterns) {
+    const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
+    const count = [...content.matchAll(new RegExp(pattern.source, flags))].length;
+    if (count > 0)
+      counts[pattern.kind] = count;
+  }
+  return counts;
+}
+function parsePatchSections(patchText) {
+  const sections = [];
+  if (Buffer.byteLength(patchText) > MAX_SCANNED_FILE_BYTES)
+    return { sections, failure: "file-unavailable" };
+  const lines = patchText.split(/\r?\n/);
+  if (lines.at(-1) === "")
+    lines.pop();
+  if (lines.shift() !== "*** Begin Patch" || lines.pop() !== "*** End Patch") {
+    return { sections, failure: "invalid-structure" };
+  }
+  let current;
+  let hunk;
+  for (const line of lines) {
+    let match = line.match(/^\*\*\* (Add|Update|Delete) File: (.+)$/);
+    if (match) {
+      if (current)
+        sections.push(current);
+      current = {
+        operation: match[1].toLowerCase(),
+        path: match[2].trim(),
+        added: [],
+        hunks: []
+      };
+      hunk = undefined;
+      if (!current.path)
+        return { sections, failure: "invalid-structure" };
+      continue;
+    }
+    if (!current)
+      return { sections, failure: "invalid-structure" };
+    if (line.startsWith("***"))
+      return { sections, failure: "unsupported-operation" };
+    if (current.operation === "delete")
+      return { sections, failure: "invalid-structure" };
+    if (current.operation === "add") {
+      if (!line.startsWith("+"))
+        return { sections, failure: "invalid-structure" };
+      current.added.push(line.slice(1));
+      continue;
+    }
+    if (line === "@@" || line.startsWith("@@ ")) {
+      hunk = { before: [], after: [] };
+      current.hunks.push(hunk);
+      continue;
+    }
+    if (!hunk)
+      return { sections, failure: "invalid-structure" };
+    if (line.startsWith("+"))
+      hunk.after.push(line.slice(1));
+    else if (line.startsWith("-"))
+      hunk.before.push(line.slice(1));
+    else if (line.startsWith(" ")) {
+      hunk.before.push(line.slice(1));
+      hunk.after.push(line.slice(1));
+    } else
+      return { sections, failure: "invalid-structure" };
+  }
+  if (current)
+    sections.push(current);
+  if (sections.some((section) => section.operation === "update" && (section.hunks.length === 0 || section.hunks.some((item) => item.before.length === 0)))) {
+    return { sections, failure: "invalid-structure" };
+  }
+  return { sections };
+}
+function readRegularTextFile(filePath) {
+  let fd;
+  try {
+    fd = fs10.openSync(filePath, fs10.constants.O_RDONLY | fs10.constants.O_NOFOLLOW);
+    const before = fs10.fstatSync(fd);
+    if (!before.isFile() || before.size > MAX_SCANNED_FILE_BYTES)
+      return null;
+    const bytes = fs10.readFileSync(fd);
+    const after = fs10.fstatSync(fd);
+    const byPath = fs10.lstatSync(filePath);
+    if (!byPath.isFile() || before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs || before.size !== after.size || before.dev !== byPath.dev || before.ino !== byPath.ino || bytes.length > MAX_SCANNED_FILE_BYTES)
+      return null;
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (content.includes("\x00") || content.includes("\r"))
+      return null;
+    return { content, hash: digest(bytes) };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined)
+      fs10.closeSync(fd);
+  }
+}
+function simulateHunks(content, hunks) {
+  const lines = content.split(`
+`);
+  let cursor = 0;
+  for (let index = 0;index < hunks.length; index += 1) {
+    const hunk = hunks[index];
+    const matches = [];
+    for (let offset = cursor;offset <= lines.length - hunk.before.length; offset += 1) {
+      if (hunk.before.every((line, position) => lines[offset + position] === line))
+        matches.push(offset);
+      if (matches.length > 1)
+        break;
+    }
+    if (matches.length !== 1)
+      return { ok: false, reason: matches.length ? "ambiguous-context" : "context-mismatch", hunk: index + 1 };
+    const at = matches[0];
+    lines.splice(at, hunk.before.length, ...hunk.after);
+    cursor = at + hunk.after.length;
+  }
+  return { ok: true, content: lines.join(`
+`) };
+}
+function pathComponentsAreRegular(root, target) {
+  try {
+    if (!fs10.lstatSync(root).isDirectory())
+      return false;
+    if (fs10.realpathSync(root) !== root)
+      return false;
+    let directory = root;
+    const components = path14.relative(root, path14.dirname(target)).split(path14.sep).filter(Boolean);
+    for (const component of components) {
+      directory = path14.join(directory, component);
+      if (!fs10.lstatSync(directory).isDirectory())
+        return false;
+    }
+    const targetStat = lstatIfExists(target);
+    return targetStat === null || targetStat.isFile();
+  } catch {
+    return false;
+  }
+}
+function lstatIfExists(target) {
+  try {
+    return fs10.lstatSync(target);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return null;
+    throw error;
+  }
+}
+function digest(value) {
+  return createHash5("sha256").update(value).digest("hex");
+}
+function parseSecretCounts(value) {
+  const record = objectValue(value);
+  if (!record)
+    return null;
+  const counts = {};
+  for (const [kind, count] of Object.entries(record)) {
+    if (!SECRET_KIND_SET.has(kind) || typeof count !== "number" || !Number.isSafeInteger(count) || count < 0 || count > MAX_FINDINGS_PER_KIND)
+      return null;
+    if (count > 0)
+      counts[kind] = count;
+  }
+  return counts;
+}
+function containsOtherPayloadSecret(before, replacement) {
+  const withoutMarker = before.replaceAll("[VALOR SINTETICO OCULTO]", "x");
+  return detectPayloadSecretKinds(withoutMarker).length > 0 || detectPayloadSecretKinds(replacement).length > 0;
+}
+function buildSyntheticFixtureRemediation(line, filePath, displayPath, lineNumber, match, lineFindingCount) {
+  if (!isSyntheticFixturePath(filePath)) {
+    return removalRemediation(displayPath, lineNumber, "unsupported-file-type");
+  }
+  if (line.length > MAX_REMEDIATION_LINE_CHARS) {
+    return removalRemediation(displayPath, lineNumber, "line-too-long");
+  }
+  if (lineFindingCount !== 1) {
+    return removalRemediation(displayPath, lineNumber, "multiple-findings");
+  }
+  const detectedValue = match[4];
+  if (typeof detectedValue !== "string" || !SYNTHETIC_VALUE_PATTERN.test(detectedValue)) {
+    return removalRemediation(displayPath, lineNumber, "value-not-demonstrably-synthetic");
+  }
+  const direct = DIRECT_SYNTHETIC_ASSIGNMENT.exec(line);
+  if (direct) {
+    const [, prefix = "", credentialName = "", operator = "", quote = "", , suffix = ""] = direct;
+    const before = `${prefix}${credentialName}${operator}${quote}[VALOR SINTETICO OCULTO]${quote}${suffix}`;
+    const replacement = `${prefix}${credentialName}${operator}${SYNTHETIC_VALUE_EXPRESSION}${suffix}`;
+    if (containsOtherPayloadSecret(before, replacement)) {
+      return removalRemediation(displayPath, lineNumber, "multiple-findings");
+    }
+    return replacementRemediation({
+      path: displayPath,
+      line: lineNumber,
+      anchor: credentialName,
+      before,
+      replacement
+    });
+  }
+  const declaration = SERIALIZED_DECLARATION.exec(line);
+  if (declaration) {
+    const [, prefix = "", variableName = "", outerQuote = "", serialized = "", suffix = ""] = declaration;
+    const assignment = SERIALIZED_SYNTHETIC_ASSIGNMENT.exec(serialized);
+    if (assignment) {
+      const [, credentialName = "", operator = "", innerQuote = ""] = assignment;
+      const credentialExpression = credentialNameExpression(credentialName);
+      if (credentialExpression) {
+        const replacementExpression = [
+          credentialExpression,
+          JSON.stringify(`${operator}${innerQuote}`),
+          SYNTHETIC_VALUE_EXPRESSION,
+          JSON.stringify(innerQuote)
+        ].join(", ");
+        const before = `${prefix}${outerQuote}${credentialName}${operator}${innerQuote}[VALOR SINTETICO OCULTO]${innerQuote}${outerQuote}${suffix}`;
+        const replacement = `${prefix}[${replacementExpression}].join("")${suffix}`;
+        if (containsOtherPayloadSecret(before, replacement)) {
+          return removalRemediation(displayPath, lineNumber, "multiple-findings");
+        }
+        return replacementRemediation({
+          path: displayPath,
+          line: lineNumber,
+          anchor: variableName,
+          before,
+          replacement
+        });
+      }
+    }
+  }
+  return buildComplexStringRemediation(line, filePath, displayPath, lineNumber, match) ?? removalRemediation(displayPath, lineNumber, "unsupported-syntax");
+}
+function buildComplexStringRemediation(line, filePath, displayPath, lineNumber, match) {
+  if (/\.[cm]?[jt]sx$/i.test(path14.basename(filePath)))
+    return;
+  const matchStart = match.index;
+  const credentialName = match[1];
+  const operator = match[2];
+  const innerQuote = match[3];
+  const detectedValue = match[4];
+  if (matchStart === undefined || !credentialName || operator === undefined || !innerQuote || !detectedValue) {
+    return;
+  }
+  const matchEnd = matchStart + match[0].length;
+  const literal = scanSourceStringLiterals(line).find((item) => item.contentStart <= matchStart && item.contentEnd >= matchEnd);
+  if (!literal || literal.interpolated || !isExpressionStringContext(line, literal))
+    return;
+  const leading = decodeStringFragment(line.slice(literal.contentStart, matchStart), literal.quote);
+  const trailing = decodeStringFragment(line.slice(matchEnd, literal.contentEnd), literal.quote);
+  const credentialExpression = credentialNameExpression(credentialName);
+  const before = sanitizedLineReference(line, match, detectedValue);
+  if (leading === undefined || trailing === undefined || !credentialExpression || !before)
+    return;
+  const expression = [
+    JSON.stringify(leading),
+    credentialExpression,
+    JSON.stringify(`${operator}${innerQuote}`),
+    SYNTHETIC_VALUE_EXPRESSION,
+    JSON.stringify(`${innerQuote}${trailing}`)
+  ].join(", ");
+  const replacement = `${line.slice(0, literal.start)}[${expression}].join("")${line.slice(literal.end)}`;
+  if (before.includes(detectedValue) || replacement.includes(detectedValue) || containsOtherPayloadSecret(before, replacement))
+    return;
+  return replacementRemediation({
+    path: displayPath,
+    line: lineNumber,
+    anchor: sourceAnchor(line.slice(0, literal.start), credentialName),
+    before,
+    replacement
+  });
+}
+function scanSourceStringLiterals(line) {
+  const literals = [];
+  let index = 0;
+  while (index < line.length) {
+    if (line[index] === "/" && line[index + 1] === "/")
+      break;
+    const quote = line[index];
+    if (quote !== '"' && quote !== "'" && quote !== "`") {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    let interpolated = false;
+    index += 1;
+    while (index < line.length) {
+      const current = line[index];
+      if (current === "\\") {
+        index += 2;
+        continue;
+      }
+      if (quote === "`" && current === "$" && line[index + 1] === "{")
+        interpolated = true;
+      if (current === quote) {
+        literals.push({
+          start,
+          contentStart: start + 1,
+          contentEnd: index,
+          end: index + 1,
+          quote,
+          interpolated
+        });
+        index += 1;
+        break;
+      }
+      index += 1;
+    }
+    if (index >= line.length && line[index - 1] !== quote)
+      return [];
+  }
+  return literals;
+}
+function isExpressionStringContext(line, literal) {
+  const before = line.slice(0, literal.start).trimEnd();
+  const after = line.slice(literal.end).trimStart();
+  if (!before || /^(?:\/\/|\/\*|\*)/.test(before.trimStart()))
+    return false;
+  if (/\b(?:import|interface|enum|type)\b/.test(before))
+    return false;
+  if (after.startsWith(":"))
+    return false;
+  return ["=", "(", "[", ",", ":"].includes(before.at(-1) ?? "");
+}
+function decodeStringFragment(raw, quote) {
+  let output = "";
+  for (let index = 0;index < raw.length; index += 1) {
+    const current = raw[index] ?? "";
+    if (quote === "`" && current === "$" && raw[index + 1] === "{")
+      return;
+    if (current !== "\\") {
+      if (current === quote)
+        return;
+      output += current;
+      continue;
+    }
+    const escaped = raw[++index];
+    if (escaped === undefined)
+      return;
+    const simple = {
+      "\\": "\\",
+      '"': '"',
+      "'": "'",
+      "`": "`",
+      n: `
+`,
+      r: "\r",
+      t: "\t",
+      b: "\b",
+      f: "\f",
+      v: "\v",
+      0: "\x00"
+    };
+    if (escaped in simple) {
+      output += simple[escaped];
+      continue;
+    }
+    if (escaped === "x") {
+      const value = decodeHexEscape(raw.slice(index + 1, index + 3), 2);
+      if (value === undefined)
+        return;
+      output += value;
+      index += 2;
+      continue;
+    }
+    if (escaped === "u") {
+      const value = decodeUnicodeEscape(raw, index + 1);
+      if (!value)
+        return;
+      output += value.character;
+      index = value.end;
+      continue;
+    }
+    return;
+  }
+  return output;
+}
+function decodeHexEscape(raw, length) {
+  if (raw.length !== length || !new RegExp(`^[0-9A-Fa-f]{${length}}$`).test(raw))
+    return;
+  return String.fromCodePoint(Number.parseInt(raw, 16));
+}
+function decodeUnicodeEscape(raw, start) {
+  if (raw[start] === "{") {
+    const close = raw.indexOf("}", start + 1);
+    if (close < 0)
+      return;
+    const digits2 = raw.slice(start + 1, close);
+    if (!/^[0-9A-Fa-f]{1,6}$/.test(digits2))
+      return;
+    const codePoint = Number.parseInt(digits2, 16);
+    if (codePoint > 1114111)
+      return;
+    return { character: String.fromCodePoint(codePoint), end: close };
+  }
+  const digits = raw.slice(start, start + 4);
+  const character = decodeHexEscape(digits, 4);
+  return character === undefined ? undefined : { character, end: start + 3 };
+}
+function sanitizedLineReference(line, match, detectedValue) {
+  const matchStart = match.index;
+  const credentialName = match[1];
+  const operator = match[2];
+  const innerQuote = match[3];
+  if (matchStart === undefined || !credentialName || operator === undefined || !innerQuote)
+    return;
+  const valueStart = matchStart + credentialName.length + operator.length + innerQuote.length;
+  const valueEnd = valueStart + detectedValue.length;
+  if (line.slice(valueStart, valueEnd) !== detectedValue)
+    return;
+  return `${line.slice(0, valueStart)}[VALOR SINTETICO OCULTO]${line.slice(valueEnd)}`;
+}
+function sourceAnchor(prefix, fallback) {
+  return prefix.match(/([A-Za-z_$][A-Za-z0-9_$]{0,127})\s*[:=]?\s*$/)?.[1] ?? fallback;
+}
+function removalRemediation(displayPath, lineNumber, reason) {
+  return {
+    version: 1,
+    kind: "remove-secret",
+    reason,
+    path: displayPath,
+    startLine: lineNumber,
+    endLine: lineNumber,
+    finding: "credential-assignment",
+    revalidate: true
+  };
+}
+function replacementRemediation(input) {
+  return {
+    version: 1,
+    kind: "replace-block",
+    reason: "synthetic-test-fixture",
+    path: input.path,
+    startLine: input.line,
+    endLine: input.line,
+    anchor: input.anchor,
+    before: [input.before],
+    replacement: [input.replacement],
+    revalidate: true
+  };
+}
+function credentialNameExpression(value) {
+  const separator = value.includes("_") ? "_" : value.includes("-") ? "-" : "";
+  let parts = separator ? value.split(separator) : credentialCamelParts(value);
+  parts = parts.filter(Boolean);
+  if (parts.length < 2 || parts.join(separator) !== value)
+    return;
+  return `[${parts.map((part) => JSON.stringify(part)).join(", ")}].join(${JSON.stringify(separator)})`;
+}
+function credentialCamelParts(value) {
+  const normalized = value.toLowerCase();
+  if (normalized === "apikey")
+    return [value.slice(0, 3), value.slice(3)];
+  if (normalized === "accesstoken")
+    return [value.slice(0, 6), value.slice(6)];
+  if (normalized === "secretkey")
+    return [value.slice(0, 6), value.slice(6)];
+  if (normalized === "password")
+    return [value.slice(0, 4), value.slice(4)];
+  return [];
+}
+function isSyntheticFixturePath(filePath) {
+  const normalized = filePath.replaceAll("\\", "/");
+  const basename = path14.basename(normalized);
+  if (!/\.[cm]?[jt]sx?$/i.test(basename))
+    return false;
+  return /\/(?:tests?|__tests__|fixtures?)(?:\/|$)/i.test(normalized) || /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(basename);
+}
+function brandedSummary(evaluable, files, evidence, failure) {
+  const summary = { version: 1, evaluable, files, ...failure ? { failure } : {} };
+  Object.defineProperty(summary, SECRET_PATCH_SUMMARY_BRAND, { value: true, enumerable: false });
+  PATCH_EVIDENCE.set(summary, { ...evidence, summaryHash: digest(JSON.stringify(summary)) });
+  return summary;
+}
+function isWithin2(value, root) {
+  const relative = path14.relative(root, value);
+  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
+}
+function objectValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+var SECRET_KINDS, PRIVATE_KEY_SOURCE, CREDENTIAL_NAME_SOURCE = "api[_-]?key|access[_-]?token|secret[_-]?key|password", CREDENTIAL_ASSIGNMENT_SOURCE, FILE_PATTERNS, PAYLOAD_PATTERNS, PRIVATE_KEY_BLOCK, PRIVATE_KEY_HEADER, AWS_ACCESS_KEY, BEARER_TOKEN, CREDENTIAL_ASSIGNMENT, SECRET_KIND_SET, SECRET_PATCH_SUMMARY_BRAND, PATCH_EVIDENCE, MAX_SCANNED_FILE_BYTES, MAX_PATCH_FILES = 100, MAX_FINDINGS_PER_KIND = 1e6, MAX_EXPORTED_FINDINGS = 100, MAX_REMEDIATION_LINE_CHARS = 500, SYNTHETIC_VALUE_EXPRESSION = '["synthetic", "fixture", "credential"].join("-")', SYNTHETIC_VALUE_PATTERN, DIRECT_SYNTHETIC_ASSIGNMENT, SERIALIZED_DECLARATION, SERIALIZED_SYNTHETIC_ASSIGNMENT;
+var init_secret_scan = __esm(() => {
+  SECRET_KINDS = [
+    "private-key",
+    "aws-access-key",
+    "credential-assignment",
+    "bearer-token",
+    "env-file"
+  ];
+  PRIVATE_KEY_SOURCE = ["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" ");
+  CREDENTIAL_ASSIGNMENT_SOURCE = `(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])([^\\r\\n"']{16,})\\3`;
+  FILE_PATTERNS = [
+    { kind: "private-key", source: PRIVATE_KEY_SOURCE },
+    { kind: "aws-access-key", source: "\\b(AKIA|ASIA)[A-Z0-9]{16}\\b" },
+    {
+      kind: "credential-assignment",
+      source: CREDENTIAL_ASSIGNMENT_SOURCE,
+      flags: "i"
+    },
+    { kind: "bearer-token", source: "\\bBearer\\s+[A-Za-z0-9._~+/=-]{20,}" }
+  ];
+  PAYLOAD_PATTERNS = FILE_PATTERNS;
+  PRIVATE_KEY_BLOCK = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g;
+  PRIVATE_KEY_HEADER = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g;
+  AWS_ACCESS_KEY = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g;
+  BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g;
+  CREDENTIAL_ASSIGNMENT = new RegExp(CREDENTIAL_ASSIGNMENT_SOURCE, "gi");
+  SECRET_KIND_SET = new Set(SECRET_KINDS);
+  SECRET_PATCH_SUMMARY_BRAND = Symbol("malahor.secret-patch-summary");
+  PATCH_EVIDENCE = new WeakMap;
+  MAX_SCANNED_FILE_BYTES = 512 * 1024;
+  SYNTHETIC_VALUE_PATTERN = /^synthetic[-_][A-Za-z0-9._-]{8,80}$/i;
+  DIRECT_SYNTHETIC_ASSIGNMENT = new RegExp(`^(\\s*(?:(?:export\\s+)?(?:const|let)\\s+)?)(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\4([,;]?\\s*)$`, "i");
+  SERIALIZED_DECLARATION = /^(\s*(?:(?:export\s+)?(?:const|let))\s+([A-Za-z_$][A-Za-z0-9_$]{0,127})\s*=\s*)(["'`])(.+)\3(;?\s*)$/;
+  SERIALIZED_SYNTHETIC_ASSIGNMENT = new RegExp(`^(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\3$`, "i");
+});
+
+// src/cli/core/action-intent.ts
+import { createHash as createHash8 } from "node:crypto";
+import fs14 from "node:fs";
+import path18 from "node:path";
+function canonicalizeActionIntent(input) {
+  const kind = input.kind;
+  if (kind !== "edit" && kind !== "shell" && kind !== "subagent") {
+    throw canonicalizationError("Tipo de acción no soportado por ActionIntentV1.");
+  }
+  const project = requiredText(input.project, "Proyecto no evaluable.", 256);
+  const root = canonicalRoot(requiredText(input.root, "Raíz de acción no evaluable.", 8192));
+  const rootRef = requiredText(input.rootRef ?? "project", "Referencia de raíz no evaluable.", 256);
+  const rootDigest = sha2562(root);
+  const constraints = normalizeConstraints(input.constraints);
+  if (kind === "edit") {
+    const target = requiredText(input.path, "Ruta de edición no evaluable.", 8192);
+    const existence = input.existence === "may-create" ? "may-create" : input.existence === "must-exist" || input.existence === undefined ? "must-exist" : undefined;
+    if (!existence)
+      throw canonicalizationError("Contrato de existencia no evaluable.");
+    const resource = filesystemResource(target, root, "write", existence);
+    return [sealIntent({
+      schema: 1,
+      canonicalizer: ACTION_INTENT_CANONICALIZER,
+      kind,
+      effect: "write",
+      project,
+      rootRef,
+      rootDigest,
+      resources: [resource],
+      constraints
+    })];
+  }
+  if (kind === "subagent") {
+    const agent = input.agent;
+    if (agent !== "malahor-diagnostico" && agent !== "malahor-testing") {
+      throw canonicalizationError("El especialista no está gestionado por Malahor.");
+    }
+    return [sealIntent({
+      schema: 1,
+      canonicalizer: ACTION_INTENT_CANONICALIZER,
+      kind,
+      effect: "delegate",
+      project,
+      rootRef,
+      rootDigest,
+      resources: [],
+      delegate: { agent },
+      constraints
+    })];
+  }
+  const command = requiredText(input.command, "Comando shell no evaluable.", 16384);
+  const cwd = canonicalPathInsideRoot(typeof input.cwd === "string" && input.cwd.trim() ? input.cwd : root, root, "El cwd queda fuera de la raíz autorizada.");
+  if (input.network !== undefined && input.network !== "forbidden") {
+    throw canonicalizationError("ActionIntentV1 no autoriza red.");
+  }
+  const filesystem = normalizeFilesystem(input.filesystem, root);
+  const resources = filesystemResources(filesystem, root);
+  const environment = normalizeEnvironment(input.environment);
+  const segments = parseClosedShell(command);
+  return segments.map(({ executable, argv }) => sealIntent({
+    schema: 1,
+    canonicalizer: ACTION_INTENT_CANONICALIZER,
+    kind,
+    effect: "execute",
+    project,
+    rootRef,
+    rootDigest,
+    resources,
+    command: { executable, argv, cwd, composition: "single" },
+    filesystem,
+    network: "forbidden",
+    environment,
+    constraints
+  }));
+}
+function canonicalizePlannedAction(action, context) {
+  const base = {
+    project: context.project,
+    root: context.root,
+    rootRef: context.rootRef ?? "project",
+    constraints: { remote: false, infrastructure: false }
+  };
+  if (action.action === "edit") {
+    return canonicalizeActionIntent({
+      ...base,
+      kind: "edit",
+      path: action.resource,
+      existence: pathExistsWithoutFollowingSymlink(action.resource, context.root) ? "must-exist" : "may-create"
+    });
+  }
+  if (action.action === "shell") {
+    return canonicalizeActionIntent({
+      ...base,
+      kind: "shell",
+      command: action.resource,
+      cwd: context.cwd ?? context.root,
+      filesystem: {
+        readRoots: [context.root],
+        writePaths: [],
+        createPaths: [],
+        sandboxWriteRoots: context.sandboxWriteRoots ?? []
+      },
+      network: "forbidden",
+      environment: []
+    });
+  }
+  if (action.action === "subagent") {
+    return canonicalizeActionIntent({ ...base, kind: "subagent", agent: action.resource });
+  }
+  throw canonicalizationError("Acción de plan no soportada por ActionIntentV1.");
+}
+function deriveActionIntentRepair(planned, actual, context) {
+  if (planned.action !== "shell" || actual.action !== "shell")
+    return;
+  try {
+    const root = canonicalRoot(context.root);
+    const plannedCwd = context.plannedCwd ?? root;
+    const plannedIntents = canonicalizePlannedAction(planned, { ...context, root, cwd: plannedCwd });
+    const actualIntents = canonicalizePlannedAction(actual, {
+      ...context,
+      root,
+      cwd: context.cwd ?? plannedCwd
+    });
+    if (plannedIntents.length !== 1 || actualIntents.length !== 1)
+      return;
+    const source = plannedIntents[0];
+    const repaired = actualIntents[0];
+    if (source.actionID === repaired.actionID || !sameRepairEnvelope(source, repaired))
+      return;
+    const plannedTargets = gitStageTargets(source);
+    const actualTargets = gitStageTargets(repaired);
+    if (!plannedTargets || !actualTargets)
+      return;
+    if (!hasLiteralStageDirectory(plannedTargets, root, source.command.cwd))
+      return;
+    const plannedManifest = stageManifest(plannedTargets, root, source.command.cwd, true);
+    const manifest = stageManifest(actualTargets, root, repaired.command.cwd, false);
+    if (plannedManifest.length === 0 || manifest.length === 0 || !subset(manifest, plannedManifest))
+      return;
+    const relation = sameTextSequence(manifest, plannedManifest) ? "equal" : "narrower";
+    const manifestHash = hashReference(canonical(manifest));
+    const repairedInputHash = hashReference(canonical({
+      kind: "git-stage-manifest",
+      sourceActionID: source.actionID,
+      repairedActionID: repaired.actionID,
+      relation,
+      manifestHash
+    }));
+    return {
+      schema: 1,
+      kind: "git-stage-manifest",
+      sourceActionID: source.actionID,
+      repairedActionID: repaired.actionID,
+      relation,
+      manifest,
+      manifestHash,
+      repairedInputHash
+    };
+  } catch {
+    return;
+  }
+}
+function validActionIntentRepair(value, rootValue) {
+  if (!isRecord5(value) || value.schema !== 1 || value.kind !== "git-stage-manifest" || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID) || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID) || value.sourceActionID === value.repairedActionID || value.relation !== "equal" && value.relation !== "narrower" || !Array.isArray(value.manifest) || value.manifest.length === 0 || value.manifest.length > 512 || value.manifest.some((item) => typeof item !== "string") || typeof value.manifestHash !== "string" || typeof value.repairedInputHash !== "string")
+    return false;
+  try {
+    const root = canonicalRoot(rootValue);
+    const manifest = value.manifest;
+    if (!sameTextSequence(manifest, [...new Set(manifest)].sort(compareText)))
+      return false;
+    if (!sameTextSequence(manifest, stageManifest(manifest, root, root, false)))
+      return false;
+    const manifestHash = hashReference(canonical(manifest));
+    if (value.manifestHash !== manifestHash)
+      return false;
+    const repairedInputHash = hashReference(canonical({
+      kind: value.kind,
+      sourceActionID: value.sourceActionID,
+      repairedActionID: value.repairedActionID,
+      relation: value.relation,
+      manifestHash
+    }));
+    return value.repairedInputHash === repairedInputHash;
+  } catch {
+    return false;
+  }
+}
+function compatibilityActionIntents(actions, project) {
+  const rootDigest = sha2562(`unresolved:${project}`);
+  return actions.flatMap((action) => {
+    const base = {
+      schema: 1,
+      canonicalizer: ACTION_INTENT_CANONICALIZER,
+      project,
+      rootRef: "planning:unresolved",
+      rootDigest,
+      constraints: { remote: false, infrastructure: false, protectedOperation: "runtime-recanonicalization" }
+    };
+    if (action.action === "edit") {
+      return [sealIntent({
+        ...base,
+        kind: "edit",
+        effect: "write",
+        resources: [{
+          kind: "filesystem",
+          canonicalPath: path18.resolve(action.resource),
+          relativePath: action.resource,
+          access: "write",
+          existence: "may-create"
+        }]
+      })];
+    }
+    if (action.action === "subagent") {
+      if (action.resource !== "malahor-diagnostico" && action.resource !== "malahor-testing") {
+        throw canonicalizationError("El especialista no está gestionado por Malahor.");
+      }
+      return [sealIntent({
+        ...base,
+        kind: "subagent",
+        effect: "delegate",
+        resources: [],
+        delegate: { agent: action.resource }
+      })];
+    }
+    if (action.action !== "shell")
+      throw canonicalizationError("Acción de plan no soportada.");
+    return [sealIntent({
+      ...base,
+      kind: "shell",
+      effect: "execute",
+      resources: [],
+      command: {
+        executable: "planning-exact",
+        argv: [action.resource],
+        cwd: "planning:unresolved",
+        composition: "single"
+      },
+      filesystem: { readRoots: [], writePaths: [], createPaths: [], sandboxWriteRoots: [] },
+      network: "forbidden",
+      environment: []
+    })];
+  });
+}
+function sameActionIntentSequence(left, right) {
+  return left.length === right.length && left.every((intent, index) => intent.actionID === right[index]?.actionID);
+}
+function validActionIntentV1(value) {
+  if (!isRecord5(value) || value.schema !== 1 || value.canonicalizer !== ACTION_INTENT_CANONICALIZER || typeof value.actionID !== "string" || !/^[a-f0-9]{64}$/.test(value.actionID) || !["edit", "shell", "subagent"].includes(String(value.kind)) || !["write", "execute", "delegate"].includes(String(value.effect)) || typeof value.project !== "string" || !value.project || typeof value.rootRef !== "string" || !value.rootRef || typeof value.rootDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.rootDigest) || !Array.isArray(value.resources) || !value.resources.every(validFilesystemResource) || !validConstraints(value.constraints))
+    return false;
+  const common = ["schema", "canonicalizer", "actionID", "kind", "effect", "project", "rootRef", "rootDigest", "resources", "constraints"];
+  if (value.kind === "edit" && (value.effect !== "write" || value.resources.length !== 1 || !hasOnlyKeys(value, common)))
+    return false;
+  if (value.kind === "subagent" && (value.effect !== "delegate" || !isRecord5(value.delegate) || !hasOnlyKeys(value, [...common, "delegate"]) || !hasOnlyKeys(value.delegate, ["agent"]) || !["malahor-diagnostico", "malahor-testing"].includes(String(value.delegate.agent))))
+    return false;
+  if (value.kind === "shell" && (value.effect !== "execute" || !validCommand(value.command) || value.network !== "forbidden" || !validFilesystem(value.filesystem) || !Array.isArray(value.environment) || !value.environment.every(validEnvironment) || !hasOnlyKeys(value, [...common, "command", "filesystem", "network", "environment"])))
+    return false;
+  const { actionID: _actionID, ...unsigned } = value;
+  return sha2562(canonical(unsigned)) === value.actionID;
+}
+function canonicalizeDirectTaskMutation(input) {
+  return canonicalizeActionIntent({
+    kind: "edit",
+    project: input.project,
+    root: input.root,
+    rootRef: input.rootRef ?? "project",
+    path: input.path,
+    existence: input.kind === "write" ? input.existence ?? "may-create" : input.existence ?? "must-exist",
+    constraints: { remote: false, infrastructure: false }
+  });
+}
+function parseClosedShell(command) {
+  const segments = splitAndSequence(command);
+  return segments.map((segment) => {
+    const words = shellWords(segment);
+    if (words.length === 0)
+      throw canonicalizationError("Segmento shell vacío.");
+    const [executable, ...argv] = words;
+    if (!executable || /^[A-Za-z_][A-Za-z0-9_]*=/.test(executable)) {
+      throw canonicalizationError("ActionIntentV1 no admite asignaciones shell inline.");
+    }
+    const basename = path18.basename(executable).toLowerCase();
+    if (basename === "eval" || ["sh", "bash", "zsh", "dash", "fish", "cmd", "powershell", "pwsh"].includes(basename) && argv.some((item) => item === "-c" || item === "/c" || item === "-command")) {
+      throw canonicalizationError("ActionIntentV1 no admite shells anidados ni eval.");
+    }
+    return { executable, argv };
+  });
+}
+function splitAndSequence(command) {
+  const segments = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index];
+    const next = command[index + 1];
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === "&" && next === "&") {
+      if (!current.trim())
+        throw canonicalizationError("Secuencia shell incompleta.");
+      segments.push(current.trim());
+      current = "";
+      index += 1;
+      continue;
+    }
+    if (character === "&" || character === "|" || character === ";" || character === "<" || character === ">" || character === `
+` || character === "\r" || character === "`" || character === "$" || character === "*" || character === "?" || character === "[") {
+      throw canonicalizationError("Operador o expansión shell fuera del subconjunto cerrado.");
+    }
+    current += character;
+  }
+  if (escaped || quote || !current.trim())
+    throw canonicalizationError("Comando shell incompleto o con quoting inválido.");
+  segments.push(current.trim());
+  return segments;
+}
+function shellWords(segment) {
+  const words = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  let started = false;
+  for (let index = 0;index < segment.length; index += 1) {
+    const character = segment[index];
+    if (escaped) {
+      current += character;
+      started = true;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      started = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      if (started) {
+        words.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += character;
+    started = true;
+  }
+  if (escaped || quote)
+    throw canonicalizationError("Token shell incompleto.");
+  if (started)
+    words.push(current);
+  return words;
+}
+function normalizeFilesystem(value, root) {
+  const record = value === undefined ? {} : value;
+  if (!isRecord5(record))
+    throw canonicalizationError("Footprint de filesystem no evaluable.");
+  return {
+    readRoots: normalizedPathList(record.readRoots ?? [root], root, true),
+    writePaths: normalizedPathList(record.writePaths ?? [], root, true),
+    createPaths: normalizedPathList(record.createPaths ?? [], root, true),
+    sandboxWriteRoots: normalizedPathList(record.sandboxWriteRoots ?? [], root, false)
+  };
+}
+function normalizedPathList(value, root, confined) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw canonicalizationError("Lista de paths no evaluable.");
+  }
+  return [...new Set(value.map((item) => confined ? canonicalPathInsideRoot(item, root, "Recurso fuera de la raíz autorizada.") : canonicalLoosePath(item, root)))].sort(compareText);
+}
+function filesystemResources(filesystem, root) {
+  const resources = [];
+  for (const target of filesystem.readRoots) {
+    resources.push(resourceFromCanonical(target, root, "read", "must-exist"));
+  }
+  for (const target of filesystem.writePaths) {
+    resources.push(resourceFromCanonical(target, root, "write", "must-exist"));
+  }
+  for (const target of filesystem.createPaths) {
+    resources.push(resourceFromCanonical(target, root, "write", "may-create"));
+  }
+  for (const target of filesystem.sandboxWriteRoots) {
+    resources.push({
+      kind: "filesystem",
+      canonicalPath: target,
+      relativePath: path18.relative(root, target) || ".",
+      access: "write",
+      existence: "may-create",
+      sandbox: true
+    });
+  }
+  return resources.sort((left, right) => compareText(`${left.access}\x00${left.canonicalPath}\x00${left.existence}`, `${right.access}\x00${right.canonicalPath}\x00${right.existence}`));
+}
+function filesystemResource(target, root, access, existence) {
+  const canonicalPath = canonicalPathInsideRoot(target, root, "Recurso fuera de la raíz autorizada.");
+  if (existence === "must-exist" && !fs14.existsSync(canonicalPath)) {
+    throw canonicalizationError("El recurso declarado como existente no existe.");
+  }
+  return resourceFromCanonical(canonicalPath, root, access, existence);
+}
+function resourceFromCanonical(canonicalPath, root, access, existence) {
+  return {
+    kind: "filesystem",
+    canonicalPath,
+    relativePath: portableRelative(root, canonicalPath),
+    access,
+    existence
+  };
+}
+function canonicalRoot(value) {
+  const resolved = path18.resolve(value);
+  try {
+    const stat = fs14.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isDirectory())
+      throw new Error("not-directory");
+    return fs14.realpathSync(resolved);
+  } catch (error) {
+    if (error instanceof ActionIntentError)
+      throw error;
+    throw canonicalizationError("La raíz física no es un directorio regular evaluable.");
+  }
+}
+function canonicalPathInsideRoot(target, root, message) {
+  const resolved = path18.resolve(root, target);
+  if (!inside2(resolved, root))
+    throw resourceScopeError(message);
+  const canonical = canonicalExistingOrFuturePath(resolved);
+  if (!inside2(canonical, root))
+    throw resourceScopeError(message);
+  return canonical;
+}
+function canonicalExistingOrFuturePath(target) {
+  if (fs14.existsSync(target))
+    return fs14.realpathSync(target);
+  const suffix = [];
+  let cursor = target;
+  while (!fs14.existsSync(cursor)) {
+    const parent = path18.dirname(cursor);
+    if (parent === cursor)
+      throw canonicalizationError("No se pudo resolver el ancestro físico del recurso.");
+    suffix.unshift(path18.basename(cursor));
+    cursor = parent;
+  }
+  const stat = fs14.lstatSync(cursor);
+  if (stat.isSymbolicLink())
+    throw resourceScopeError("El recurso atraviesa un enlace simbólico no evaluable.");
+  return path18.join(fs14.realpathSync(cursor), ...suffix);
+}
+function canonicalLoosePath(target, root) {
+  return canonicalExistingOrFuturePath(path18.resolve(root, target));
+}
+function pathExistsWithoutFollowingSymlink(target, root) {
+  const resolved = path18.resolve(root, target);
+  try {
+    const stat = fs14.lstatSync(resolved);
+    return !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function normalizeEnvironment(value) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value))
+    throw canonicalizationError("Entorno de acción no evaluable.");
+  const output = value.map((item) => {
+    if (!isRecord5(item) || typeof item.key !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.key) || item.source !== "host-managed" && item.source !== "literal-nonsecret" || item.valueDigest !== undefined && (typeof item.valueDigest !== "string" || !/^[a-f0-9]{64}$/.test(item.valueDigest))) {
+      throw canonicalizationError("Variable de entorno no evaluable.");
+    }
+    return {
+      key: item.key,
+      source: item.source,
+      ...typeof item.valueDigest === "string" ? { valueDigest: item.valueDigest } : {}
+    };
+  });
+  const keys = output.map((item) => item.key);
+  if (new Set(keys).size !== keys.length)
+    throw canonicalizationError("Variables de entorno duplicadas.");
+  return output.sort((left, right) => compareText(left.key, right.key));
+}
+function normalizeConstraints(value) {
+  const record = value === undefined ? {} : value;
+  if (!isRecord5(record) || record.remote !== undefined && record.remote !== false || record.infrastructure !== undefined && record.infrastructure !== false || record.protectedOperation !== undefined && (typeof record.protectedOperation !== "string" || !record.protectedOperation.trim() || record.protectedOperation.length > 256)) {
+    throw canonicalizationError("Restricciones de acción no evaluables.");
+  }
+  return {
+    remote: false,
+    infrastructure: false,
+    ...typeof record.protectedOperation === "string" ? { protectedOperation: record.protectedOperation.trim() } : {}
+  };
+}
+function sealIntent(value) {
+  return { ...value, actionID: sha2562(canonical(value)) };
+}
+function validFilesystemResource(value) {
+  return isRecord5(value) && value.kind === "filesystem" && typeof value.canonicalPath === "string" && typeof value.relativePath === "string" && (value.access === "read" || value.access === "write") && (value.existence === "must-exist" || value.existence === "may-create") && (value.sandbox === undefined || typeof value.sandbox === "boolean") && hasOnlyKeys(value, value.sandbox === undefined ? ["kind", "canonicalPath", "relativePath", "access", "existence"] : ["kind", "canonicalPath", "relativePath", "access", "existence", "sandbox"]);
+}
+function validCommand(value) {
+  return isRecord5(value) && typeof value.executable === "string" && value.executable.length > 0 && Array.isArray(value.argv) && value.argv.every((item) => typeof item === "string") && typeof value.cwd === "string" && value.cwd.length > 0 && (value.composition === "single" || value.composition === "and-sequence") && hasOnlyKeys(value, ["executable", "argv", "cwd", "composition"]);
+}
+function validFilesystem(value) {
+  return isRecord5(value) && [value.readRoots, value.writePaths, value.createPaths, value.sandboxWriteRoots].every((item) => Array.isArray(item) && item.every((entry) => typeof entry === "string")) && hasOnlyKeys(value, ["readRoots", "writePaths", "createPaths", "sandboxWriteRoots"]);
+}
+function validEnvironment(value) {
+  return isRecord5(value) && typeof value.key === "string" && (value.source === "host-managed" || value.source === "literal-nonsecret") && (value.valueDigest === undefined || typeof value.valueDigest === "string" && /^[a-f0-9]{64}$/.test(value.valueDigest)) && hasOnlyKeys(value, value.valueDigest === undefined ? ["key", "source"] : ["key", "source", "valueDigest"]);
+}
+function validConstraints(value) {
+  return isRecord5(value) && value.remote === false && value.infrastructure === false && (value.protectedOperation === undefined || typeof value.protectedOperation === "string") && hasOnlyKeys(value, value.protectedOperation === undefined ? ["remote", "infrastructure"] : ["remote", "infrastructure", "protectedOperation"]);
+}
+function hasOnlyKeys(value, keys) {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+function portableRelative(root, target) {
+  const relative = path18.relative(root, target) || ".";
+  return relative.split(path18.sep).join("/");
+}
+function sameRepairEnvelope(left, right) {
+  if (!left.command || !right.command)
+    return false;
+  return left.kind === "shell" && right.kind === "shell" && left.effect === right.effect && left.project === right.project && left.rootRef === right.rootRef && left.rootDigest === right.rootDigest && left.command.executable === "git" && right.command.executable === "git" && left.command.cwd === right.command.cwd && left.command.composition === "single" && right.command.composition === "single" && canonical(left.resources) === canonical(right.resources) && canonical(left.filesystem) === canonical(right.filesystem) && canonical(left.environment) === canonical(right.environment) && left.network === "forbidden" && right.network === "forbidden" && canonical(left.constraints) === canonical(right.constraints);
+}
+function gitStageTargets(intent) {
+  const argv = intent.command?.argv;
+  if (!argv || argv.length < 3 || argv[0] !== "add" || argv[1] !== "--")
+    return;
+  const targets = argv.slice(2);
+  if (targets.some((target) => !safeLiteralStageTarget(target)))
+    return;
+  return targets;
+}
+function safeLiteralStageTarget(value) {
+  if (value.length === 0 || value.length > 4096 || path18.isAbsolute(value) || value.startsWith(":"))
+    return false;
+  if (value.includes("\x00") || value.includes("\r") || value.includes(`
+`))
+    return false;
+  for (const marker of ["*", "?", "[", "]", "{", "}"]) {
+    if (value.includes(marker))
+      return false;
+  }
+  return value.split(/[\\/]/u).every((part) => part !== "" && part !== "." && part !== ".." && part.toLowerCase() !== ".git");
+}
+function hasLiteralStageDirectory(targets, root, cwd) {
+  return targets.some((target) => {
+    const resolved = path18.resolve(cwd, target);
+    if (!inside2(resolved, root))
+      throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+    assertNoSymlinkTraversal(resolved, root);
+    const stat = fs14.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isDirectory())
+      return false;
+    const canonicalTarget = fs14.realpathSync(resolved);
+    return canonicalTarget !== root && path18.basename(canonicalTarget).toLowerCase() !== ".git";
+  });
+}
+function stageManifest(targets, root, cwd, allowDirectories) {
+  const found = new Set;
+  const traversal = { nodes: 0 };
+  for (const target of targets) {
+    if (!safeLiteralStageTarget(target))
+      throw canonicalizationError("Target de stage no literal.");
+    const resolved = path18.resolve(cwd, target);
+    if (!inside2(resolved, root))
+      throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+    collectStageTarget(resolved, root, allowDirectories, found, traversal, 0);
+    if (found.size > 512)
+      throw canonicalizationError("Manifest de stage fuera de límite.");
+  }
+  const manifest = [...found].sort(compareText);
+  const size = manifest.reduce((total, item) => total + item.length, 0);
+  if (size > 16384)
+    throw canonicalizationError("Manifest de stage fuera de límite.");
+  return manifest;
+}
+function collectStageTarget(target, root, allowDirectories, found, traversal, depth) {
+  traversal.nodes += 1;
+  if (traversal.nodes > 1024 || depth > 128)
+    throw canonicalizationError("Recorrido de stage fuera de límite.");
+  assertNoSymlinkTraversal(target, root);
+  const stat = fs14.lstatSync(target);
+  if (stat.isSymbolicLink())
+    throw resourceScopeError("Stage mediante symlink no permitido.");
+  const canonicalTarget = fs14.realpathSync(target);
+  if (!inside2(canonicalTarget, root))
+    throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+  if (stat.isFile()) {
+    if (stat.nlink > 1)
+      throw resourceScopeError("Stage mediante hardlink no permitido.");
+    const relativePath = portableRelative(root, canonicalTarget);
+    if (!found.has(relativePath) && found.size >= 512) {
+      throw canonicalizationError("Manifest de stage fuera de límite.");
+    }
+    found.add(relativePath);
+    return;
+  }
+  if (!stat.isDirectory() || !allowDirectories || canonicalTarget === root || path18.basename(canonicalTarget).toLowerCase() === ".git") {
+    throw canonicalizationError("El manifest reparado exige archivos exactos.");
+  }
+  const entries = fs14.readdirSync(canonicalTarget, { withFileTypes: true }).sort((left, right) => compareText(left.name, right.name));
+  for (const entry of entries) {
+    if (entry.name.toLowerCase() === ".git")
+      throw canonicalizationError("El manifest no atraviesa metadata Git.");
+    collectStageTarget(path18.join(canonicalTarget, entry.name), root, true, found, traversal, depth + 1);
+  }
+}
+function assertNoSymlinkTraversal(target, root) {
+  const relative = path18.relative(root, target);
+  if (relative === "")
+    return;
+  if (relative.startsWith("..") || path18.isAbsolute(relative)) {
+    throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
+  }
+  let cursor = root;
+  for (const part of relative.split(path18.sep)) {
+    cursor = path18.join(cursor, part);
+    if (fs14.lstatSync(cursor).isSymbolicLink()) {
+      throw resourceScopeError("Stage mediante symlink no permitido.");
+    }
+  }
+}
+function subset(values, allowed) {
+  const scope = new Set(allowed);
+  return values.every((value) => scope.has(value));
+}
+function sameTextSequence(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+function inside2(target, root) {
+  const relative = path18.relative(path18.resolve(root), path18.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
+}
+function requiredText(value, message, max) {
+  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000\r\n]/u.test(value)) {
+    throw canonicalizationError(message);
+  }
+  return value.trim();
+}
+function canonicalizationError(message) {
+  return new ActionIntentError("ACTION_NOT_CANONICALIZABLE", message);
+}
+function resourceScopeError(message) {
+  return new ActionIntentError("RESOURCE_OUTSIDE_SCOPE", message);
+}
+function sha2562(value) {
+  return createHash8("sha256").update(value).digest("hex");
+}
+function hashReference(value) {
+  return `sha256:${sha2562(value)}`;
+}
+function canonical(value) {
+  if (Array.isArray(value))
+    return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText(left, right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function isRecord5(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var ACTION_INTENT_CANONICALIZER = "action-intent-v1", ActionIntentError;
+var init_action_intent = __esm(() => {
+  ActionIntentError = class ActionIntentError extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.name = "ActionIntentError";
+      this.code = code;
+    }
+  };
+});
+
+// src/cli/core/read-only-shell-policy.ts
+import fs15 from "node:fs";
+import path19 from "node:path";
+function classifyReadOnlyShellCommand(command, projectRoot, options = {}) {
+  const workingDirectory = options.workingDirectory ?? projectRoot;
+  if (!safeProjectDirectory(workingDirectory, projectRoot))
+    return denied("directorio-fuera-del-proyecto");
+  const segments = splitReadOnlySegments(command);
+  if (!segments)
+    return denied("sintaxis-shell-no-admitida");
+  for (const segment of segments) {
+    const tokens = shellTokens3(segment);
+    if (!tokens || tokens.length === 0 || !segmentIsReadOnly(tokens, segment, projectRoot, workingDirectory, options.git ?? {})) {
+      return denied("segmento-no-verificable");
+    }
+  }
+  return { readOnly: true };
+}
+function segmentIsReadOnly(tokens, segment, projectRoot, workingDirectory, gitOptions) {
+  const executable = tokens[0] ?? "";
+  if (!/^[A-Za-z0-9_+.[\]-]+$/.test(executable))
+    return false;
+  switch (executable.toLowerCase()) {
+    case "git":
+    case "git.exe":
+      return gitIsReadOnly(tokens, segment, projectRoot, workingDirectory, gitOptions);
+    case "sha256sum":
+      return hashIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "cmp":
+      return cmpIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "rg":
+      return ripgrepIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "test":
+      return testIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
+    case "pwd":
+      return tokens.slice(1).every((token) => token === "-L" || token === "-P");
+    case "malahor-ai":
+    case "malahor-ai.exe":
+      return malahorCommitMessageIsReadOnly(tokens.slice(1));
+    default:
+      return false;
+  }
+}
+function malahorCommitMessageIsReadOnly(args) {
+  if (args[0] !== "git" || args[1] !== "commit-message")
+    return false;
+  const seen = new Set;
+  for (let index = 2;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (COMMIT_MESSAGE_FLAGS.has(arg)) {
+      if (seen.has(arg))
+        return false;
+      seen.add(arg);
+      continue;
+    }
+    if (COMMIT_MESSAGE_OPTIONS.has(arg)) {
+      if (seen.has(arg))
+        return false;
+      const value = args[index + 1];
+      if (!value || value.startsWith("--") || value.includes("\x00"))
+        return false;
+      if (arg === "--type" && !COMMIT_MESSAGE_TYPES.has(value))
+        return false;
+      seen.add(arg);
+      index += 1;
+      continue;
+    }
+    if (!arg || arg.startsWith("-") || arg.includes("\x00"))
+      return false;
+  }
+  return true;
+}
+function gitIsReadOnly(tokens, segment, projectRoot, workingDirectory, options) {
+  let index = 1;
+  while (index < tokens.length && tokens[index]?.startsWith("-")) {
+    const option = tokens[index] ?? "";
+    if (!SAFE_GIT_GLOBAL_OPTIONS.has(option))
+      return false;
+    index += 1;
+  }
+  const subcommand = tokens[index]?.toLowerCase();
+  if (!subcommand || !SAFE_GIT_COMMANDS.has(subcommand))
+    return false;
+  if (!closedGitArguments(subcommand, tokens.slice(index + 1), projectRoot, workingDirectory))
+    return false;
+  const classification = classifyGitCommand(segment, options);
+  return classification.hasGitCommand && !classification.remote && !classification.failClosed && !classification.destructive && classification.operations.length > 0 && classification.operations.every((operation) => operation === "read");
+}
+function closedGitArguments(subcommand, args, projectRoot, workingDirectory) {
+  switch (subcommand) {
+    case "status":
+      return parseGitArguments(args, GIT_STATUS_FLAGS, new Set, projectRoot, workingDirectory, "paths", [
+        /^--porcelain(?:=v[12])?$/,
+        /^--untracked-files(?:=(?:no|normal|all))?$/,
+        /^--ignored(?:=(?:traditional|matching|no))?$/,
+        /^--ignore-submodules(?:=(?:none|untracked|dirty|all))?$/,
+        /^--column(?:=[a-z,]+)?$/,
+        /^--find-renames(?:=\d+%?)?$/
+      ]);
+    case "diff":
+      return parseGitArguments(args, GIT_DIFF_FLAGS, GIT_NUMERIC_OPTIONS, projectRoot, workingDirectory, "refs", [
+        /^-U\d+$/,
+        /^--unified=\d+$/,
+        /^--abbrev=\d+$/,
+        /^--color(?:=(?:always|never|auto))?$/,
+        /^--word-diff(?:=(?:plain|color|porcelain|none))?$/,
+        /^--find-renames(?:=\d+%?)?$/,
+        /^--diff-filter=[ACDMRTUXB*]+$/i
+      ]);
+    case "log":
+    case "show":
+      return parseGitArguments(args, GIT_HISTORY_FLAGS, new Set([...GIT_FORMAT_OPTIONS, ...GIT_NUMERIC_OPTIONS]), projectRoot, workingDirectory, "refs", [
+        /^-\d+$/,
+        /^--max-count=\d+$/,
+        /^--abbrev=\d+$/,
+        /^--color(?:=(?:always|never|auto))?$/,
+        /^--format=.+$/,
+        /^--pretty=.+$/,
+        /^--date=.+$/,
+        /^--author=.+$/,
+        /^--committer=.+$/,
+        /^--grep=.+$/
+      ]);
+    case "ls-files":
+      return parseGitArguments(args, GIT_LS_FILES_FLAGS, new Set(["--format", "--with-tree"]), projectRoot, workingDirectory, "paths", [
+        /^--format=.+$/,
+        /^--with-tree=.+$/
+      ]);
+    case "rev-parse":
+      return parseGitArguments(args, GIT_REV_PARSE_FLAGS, new Set, projectRoot, workingDirectory, "refs", [
+        /^--short=\d+$/,
+        /^--abbrev-ref=(?:strict|loose)$/,
+        /^--path-format=(?:absolute|relative)$/,
+        /^--show-object-format(?:=(?:storage|input|output))?$/
+      ]);
+    default:
+      return false;
+  }
+}
+function parseGitArguments(args, flags, optionsWithValue, projectRoot, workingDirectory, positionals, optionPatterns) {
+  let pathsOnly = false;
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      pathsOnly = true;
+      continue;
+    }
+    if (!pathsOnly && flags.has(arg))
+      continue;
+    if (!pathsOnly && optionPatterns.some((pattern) => pattern.test(arg)))
+      continue;
+    if (!pathsOnly && optionsWithValue.has(arg)) {
+      const value = args[index + 1];
+      if (!value || value === "--" || !safeGitOptionValue(arg, value))
+        return false;
+      index += 1;
+      continue;
+    }
+    if (!pathsOnly && arg.startsWith("-"))
+      return false;
+    if (pathsOnly || positionals === "paths") {
+      if (!safeProjectPath(arg, projectRoot, workingDirectory, false, true))
+        return false;
+      continue;
+    }
+    if (!safeGitOperand(arg))
+      return false;
+  }
+  return true;
+}
+function safeGitOptionValue(option, value) {
+  if (GIT_NUMERIC_OPTIONS.has(option))
+    return /^\d+$/.test(value);
+  return !value.includes("\x00");
+}
+function safeGitOperand(value) {
+  return value.length > 0 && !value.includes("\x00") && !path19.isAbsolute(value) && !/^[A-Za-z]:[\\/]/.test(value) && !value.startsWith("~") && !/(^|[\\/:])\.\.(?:[\\/:]|$)/.test(value);
+}
+function hashIsReadOnly(args, projectRoot, workingDirectory) {
+  const paths = [];
+  for (const arg of args) {
+    if (["-b", "--binary", "-t", "--text", "--tag", "-z", "--zero", "--"].includes(arg))
+      continue;
+    if (arg.startsWith("-"))
+      return false;
+    paths.push(arg);
+  }
+  return paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, true));
+}
+function cmpIsReadOnly(args, projectRoot, workingDirectory) {
+  const paths = [];
+  for (const arg of args) {
+    if (["-s", "--silent", "--quiet", "-l", "--verbose", "--"].includes(arg))
+      continue;
+    if (arg.startsWith("-"))
+      return false;
+    paths.push(arg);
+  }
+  return paths.length === 2 && paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, true));
+}
+function ripgrepIsReadOnly(args, projectRoot, workingDirectory) {
+  const positionals = [];
+  let patternFromOption = false;
+  let filesMode = false;
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      positionals.push(...args.slice(index + 1));
+      break;
+    }
+    if (arg === "-e" || arg === "--regexp") {
+      if (!args[index + 1])
+        return false;
+      patternFromOption = true;
+      index += 1;
+      continue;
+    }
+    if (RG_OPTIONS_WITH_VALUE.has(arg)) {
+      if (!args[index + 1])
+        return false;
+      index += 1;
+      continue;
+    }
+    if (RG_FLAGS.has(arg)) {
+      filesMode ||= arg === "--files";
+      continue;
+    }
+    if (arg.startsWith("-"))
+      return false;
+    positionals.push(arg);
+  }
+  if (filesMode)
+    return positionals.every((value) => safeProjectPath(value, projectRoot, workingDirectory, false));
+  if (!patternFromOption && positionals.length === 0)
+    return false;
+  const paths = patternFromOption ? positionals : positionals.slice(1);
+  return paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, false));
+}
+function testIsReadOnly(args, projectRoot, workingDirectory) {
+  const normalized = args[0] === "!" ? args.slice(1) : args;
+  if (normalized.length === 2 && TEST_PATH_OPERATORS.has(normalized[0] ?? "")) {
+    return safeProjectPath(normalized[1] ?? "", projectRoot, workingDirectory, false);
+  }
+  if (normalized.length === 3 && ["-ef", "-nt", "-ot"].includes(normalized[1] ?? "")) {
+    return safeProjectPath(normalized[0] ?? "", projectRoot, workingDirectory, true) && safeProjectPath(normalized[2] ?? "", projectRoot, workingDirectory, true);
+  }
+  return false;
+}
+function safeProjectPath(value, projectRoot, workingDirectory, mustExist, allowGitPathspec = false) {
+  if (!value || value === "-" || value.startsWith("~") || value.includes("\x00"))
+    return false;
+  if (!allowGitPathspec && /[*?[\]{}]/.test(value))
+    return false;
+  try {
+    const root = fs15.realpathSync(path19.resolve(projectRoot));
+    const directory = fs15.realpathSync(path19.resolve(workingDirectory));
+    if (!inside3(directory, root))
+      return false;
+    const target = path19.resolve(directory, value);
+    if (!inside3(target, root))
+      return false;
+    if (fs15.existsSync(target))
+      return inside3(fs15.realpathSync(target), root);
+    if (mustExist)
+      return false;
+    let parent = path19.dirname(target);
+    while (!fs15.existsSync(parent)) {
+      const next = path19.dirname(parent);
+      if (next === parent)
+        return false;
+      parent = next;
+    }
+    return inside3(fs15.realpathSync(parent), root);
+  } catch {
+    return false;
+  }
+}
+function safeProjectDirectory(value, projectRoot) {
+  try {
+    const root = fs15.realpathSync(path19.resolve(projectRoot));
+    const directory = fs15.realpathSync(path19.resolve(value));
+    return fs15.statSync(directory).isDirectory() && inside3(directory, root);
+  } catch {
+    return false;
+  }
+}
+function inside3(target, root) {
+  const relative = path19.relative(path19.resolve(root), path19.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path19.isAbsolute(relative);
+}
+function splitReadOnlySegments(command) {
+  const segments = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  for (let index = 0;index < command.length; index += 1) {
+    const character = command[index] ?? "";
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (quote === '"' && (character === "$" || character === "`"))
+        return;
+      current += character;
+      if (character === quote)
+        quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (["$", "`", ">", "<", ";", `
+`, "\r", "(", ")", "{", "}"].includes(character))
+      return;
+    if (character === "&" || character === "|") {
+      const doubled = command[index + 1] === character;
+      if (character === "&" && !doubled)
+        return;
+      if (!current.trim())
+        return;
+      segments.push(current.trim());
+      current = "";
+      if (doubled)
+        index += 1;
+      continue;
+    }
+    current += character;
+  }
+  if (escaped || quote || !current.trim())
+    return;
+  segments.push(current.trim());
+  return segments;
+}
+function shellTokens3(command) {
+  const tokens = [];
+  let current = "";
+  let tokenStarted = false;
+  let quote;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      tokenStarted = true;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      tokenStarted = true;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote)
+        quote = undefined;
+      else
+        current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      tokenStarted = true;
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (tokenStarted)
+        tokens.push(current);
+      current = "";
+      tokenStarted = false;
+      continue;
+    }
+    current += character;
+    tokenStarted = true;
+  }
+  if (escaped || quote)
+    return;
+  if (tokenStarted)
+    tokens.push(current);
+  return tokens;
+}
+function denied(reason) {
+  return { readOnly: false, reason };
+}
+var SAFE_GIT_COMMANDS, SAFE_GIT_GLOBAL_OPTIONS, GIT_STATUS_FLAGS, GIT_DIFF_FLAGS, GIT_HISTORY_FLAGS, GIT_LS_FILES_FLAGS, GIT_REV_PARSE_FLAGS, GIT_FORMAT_OPTIONS, GIT_NUMERIC_OPTIONS, RG_FLAGS, RG_OPTIONS_WITH_VALUE, TEST_PATH_OPERATORS, COMMIT_MESSAGE_FLAGS, COMMIT_MESSAGE_OPTIONS, COMMIT_MESSAGE_TYPES;
+var init_read_only_shell_policy = __esm(() => {
+  init_git_command_policy();
+  init_git_commit_message();
+  SAFE_GIT_COMMANDS = new Set([
+    "diff",
+    "log",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "status"
+  ]);
+  SAFE_GIT_GLOBAL_OPTIONS = new Set([
+    "--no-pager",
+    "--no-optional-locks",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs"
+  ]);
+  GIT_STATUS_FLAGS = new Set([
+    "-s",
+    "--short",
+    "-b",
+    "--branch",
+    "--show-stash",
+    "--long",
+    "-v",
+    "-vv",
+    "-z",
+    "--null",
+    "--no-renames",
+    "--renames",
+    "--ahead-behind",
+    "--no-ahead-behind"
+  ]);
+  GIT_DIFF_FLAGS = new Set([
+    "-p",
+    "--patch",
+    "-s",
+    "--no-patch",
+    "--raw",
+    "--patch-with-raw",
+    "--stat",
+    "--numstat",
+    "--shortstat",
+    "--compact-summary",
+    "--summary",
+    "--name-only",
+    "--name-status",
+    "--check",
+    "--cached",
+    "--staged",
+    "--quiet",
+    "--exit-code",
+    "--binary",
+    "--full-index",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--submodule",
+    "--ignore-submodules",
+    "--no-color"
+  ]);
+  GIT_HISTORY_FLAGS = new Set([
+    "--oneline",
+    "--stat",
+    "--numstat",
+    "--shortstat",
+    "--summary",
+    "--name-only",
+    "--name-status",
+    "--no-patch",
+    "-s",
+    "--patch",
+    "-p",
+    "--graph",
+    "--decorate",
+    "--no-decorate",
+    "--first-parent",
+    "--merges",
+    "--no-merges",
+    "--reverse",
+    "--date-order",
+    "--author-date-order",
+    "--topo-order",
+    "--full-history",
+    "--simplify-merges",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-color"
+  ]);
+  GIT_LS_FILES_FLAGS = new Set([
+    "-c",
+    "--cached",
+    "-d",
+    "--deleted",
+    "-m",
+    "--modified",
+    "-o",
+    "--others",
+    "-i",
+    "--ignored",
+    "-s",
+    "--stage",
+    "-u",
+    "--unmerged",
+    "-k",
+    "--killed",
+    "--directory",
+    "--no-empty-directory",
+    "--exclude-standard",
+    "--full-name",
+    "--recurse-submodules",
+    "--error-unmatch",
+    "--deduplicate",
+    "-z",
+    "--debug",
+    "--eol"
+  ]);
+  GIT_REV_PARSE_FLAGS = new Set([
+    "--verify",
+    "--quiet",
+    "-q",
+    "--short",
+    "--abbrev-ref",
+    "--symbolic",
+    "--symbolic-full-name",
+    "--show-toplevel",
+    "--show-prefix",
+    "--show-cdup",
+    "--show-superproject-working-tree",
+    "--git-dir",
+    "--absolute-git-dir",
+    "--is-inside-git-dir",
+    "--is-inside-work-tree",
+    "--is-bare-repository",
+    "--is-shallow-repository",
+    "--show-object-format",
+    "--sq",
+    "--revs-only",
+    "--no-revs",
+    "--flags",
+    "--no-flags",
+    "--default"
+  ]);
+  GIT_FORMAT_OPTIONS = new Set([
+    "--format",
+    "--pretty",
+    "--date",
+    "--author",
+    "--committer",
+    "--grep"
+  ]);
+  GIT_NUMERIC_OPTIONS = new Set([
+    "-n",
+    "--max-count",
+    "-U",
+    "--unified",
+    "--abbrev"
+  ]);
+  RG_FLAGS = new Set([
+    "-n",
+    "--line-number",
+    "-i",
+    "--ignore-case",
+    "-S",
+    "--smart-case",
+    "-F",
+    "--fixed-strings",
+    "-l",
+    "--files-with-matches",
+    "--files",
+    "--hidden",
+    "--no-ignore",
+    "--stats",
+    "-c",
+    "--count",
+    "--count-matches",
+    "--json",
+    "--no-messages",
+    "--pcre2"
+  ]);
+  RG_OPTIONS_WITH_VALUE = new Set([
+    "-g",
+    "--glob",
+    "-t",
+    "--type",
+    "-T",
+    "--type-not",
+    "-m",
+    "--max-count",
+    "-A",
+    "--after-context",
+    "-B",
+    "--before-context",
+    "-C",
+    "--context",
+    "--max-depth"
+  ]);
+  TEST_PATH_OPERATORS = new Set([
+    "-e",
+    "-f",
+    "-d",
+    "-r",
+    "-w",
+    "-x",
+    "-s",
+    "-L",
+    "-h",
+    "-b",
+    "-c",
+    "-p",
+    "-S"
+  ]);
+  COMMIT_MESSAGE_FLAGS = new Set(["--breaking", "--json"]);
+  COMMIT_MESSAGE_OPTIONS = new Set(["--type", "--scope", "--icon", "--message", "--profile", "--project"]);
+  COMMIT_MESSAGE_TYPES = new Set(COMMIT_TYPES);
+});
+
+// src/cli/core/task-classification.ts
+import { createHash as createHash18 } from "node:crypto";
+function parseTaskAssessment(value3) {
+  const record5 = exactRecord4(value3, [
+    "schema",
+    "understood",
+    "requestedEffect",
+    "userRequestedPlanning",
+    "symptomOrCauseUnknown",
+    "signals",
+    "closure",
+    "proof",
+    "previousDecisionRef"
+  ], "Evaluación de tarea inválida.");
+  if (record5.schema !== TASK_CLASSIFICATION_SCHEMA) {
+    throw invalid5("La versión de la evaluación de tarea no es válida.");
+  }
+  if (typeof record5.understood !== "boolean" || typeof record5.userRequestedPlanning !== "boolean" || typeof record5.symptomOrCauseUnknown !== "boolean") {
+    throw invalid5("Los indicadores de comprensión de la tarea no son válidos.");
+  }
+  if (typeof record5.requestedEffect !== "string" || !REQUESTED_EFFECTS.has(record5.requestedEffect)) {
+    throw invalid5("El efecto solicitado no es válido.");
+  }
+  const signals = parseSignals(record5.signals);
+  const closure = parseClosure(record5.closure);
+  const proof = parseProof(record5.proof, record5.understood === true);
+  const previousDecisionRef = optionalText(record5.previousDecisionRef, MAX_PREVIOUS_REF, "previousDecisionRef");
+  if (previousDecisionRef !== undefined && !/^[a-f0-9]{64}$/.test(previousDecisionRef)) {
+    throw invalid5("previousDecisionRef no es un digest válido.");
+  }
+  const assessment = {
+    schema: TASK_CLASSIFICATION_SCHEMA,
+    understood: record5.understood,
+    requestedEffect: record5.requestedEffect,
+    userRequestedPlanning: record5.userRequestedPlanning,
+    symptomOrCauseUnknown: record5.symptomOrCauseUnknown,
+    signals,
+    closure,
+    proof,
+    ...previousDecisionRef ? { previousDecisionRef } : {}
+  };
+  const serialized = JSON.stringify(assessment);
+  if (detectPayloadSecretKinds(serialized).length > 0) {
+    throw invalid5("La evaluación de tarea contiene material sensible.");
+  }
+  return assessment;
+}
+function deriveTaskDecision(assessment, context3) {
+  const reasonCodes = [];
+  let route;
+  if (!assessment.understood) {
+    route = "clarify";
+    reasonCodes.push("not-understood");
+  } else if (assessment.userRequestedPlanning) {
+    route = "sdd";
+    reasonCodes.push("user-requested-planning");
+  } else if (assessment.requestedEffect === "none" && !assessment.symptomOrCauseUnknown) {
+    route = "inspect";
+    reasonCodes.push("no-effect");
+  } else if (assessment.symptomOrCauseUnknown) {
+    route = "diagnose";
+    reasonCodes.push("cause-unknown");
+  } else if (assessment.closure.openDecisionCount > 0 || assessment.closure.action === "unknown" || assessment.closure.targets === "unknown" || assessment.closure.verification !== "objective" || assessment.closure.discovery === "open") {
+    route = "sdd";
+    reasonCodes.push(assessment.closure.openDecisionCount > 0 ? "open-decisions" : "closure-incomplete", ...assessment.closure.action === "unknown" ? ["unknown-action"] : [], ...assessment.closure.targets === "unknown" ? ["unknown-targets"] : [], ...assessment.closure.verification !== "objective" ? ["non-objective-verification"] : [], ...assessment.closure.discovery === "open" ? ["open-discovery"] : []);
+  } else if (assessment.closure.discovery === "bounded-read-only" || assessment.closure.action === "discoverable" || assessment.closure.targets === "discoverable") {
+    route = "recognize";
+    reasonCodes.push("bounded-discovery");
+  } else {
+    route = "direct";
+    reasonCodes.push("closed-direct");
+  }
+  const riskGate = assessment.signals.reversibility === "high" || assessment.signals.scope === "high" ? "policy-evaluation-required" : "none";
+  if (riskGate !== "none")
+    reasonCodes.push("risk-gate");
+  const decision = {
+    schema: TASK_DECISION_SCHEMA,
+    route,
+    reasonCodes: [...new Set(reasonCodes)],
+    riskGate
+  };
+  return {
+    ...decision,
+    decisionRef: sha2564(JSON.stringify({
+      schema: TASK_CLASSIFICATION_SCHEMA,
+      context: normalizeContext(context3),
+      assessment: normalizeAssessment(assessment),
+      decision
+    }))
+  };
+}
+function parseSignals(value3) {
+  const record5 = exactRecord4(value3, [
+    "specification",
+    "discovery",
+    "scope",
+    "openDecisions",
+    "reversibility",
+    "verifiability"
+  ], "Las señales de tarea son inválidas.");
+  const keys4 = ["specification", "discovery", "scope", "openDecisions", "reversibility", "verifiability"];
+  for (const key of keys4) {
+    if (typeof record5[key] !== "string" || !SIGNAL_LEVELS.has(record5[key])) {
+      throw invalid5(`La señal ${key} no es válida.`);
+    }
+  }
+  return Object.fromEntries(keys4.map((key) => [key, record5[key]]));
+}
+function parseClosure(value3) {
+  const record5 = exactRecord4(value3, [
+    "action",
+    "targets",
+    "verification",
+    "discovery",
+    "openDecisionCount"
+  ], "El cierre de tarea es inválido.");
+  if (typeof record5.action !== "string" || !CLOSURE_ACTION.has(record5.action) || typeof record5.targets !== "string" || !CLOSURE_TARGETS.has(record5.targets) || typeof record5.verification !== "string" || !CLOSURE_VERIFICATION.has(record5.verification) || typeof record5.discovery !== "string" || !CLOSURE_DISCOVERY.has(record5.discovery) || !Number.isSafeInteger(record5.openDecisionCount) || record5.openDecisionCount < 0 || record5.openDecisionCount > MAX_OPEN_DECISIONS) {
+    throw invalid5("El cierre de tarea no cumple el contrato cerrado.");
+  }
+  return {
+    action: record5.action,
+    targets: record5.targets,
+    verification: record5.verification,
+    discovery: record5.discovery,
+    openDecisionCount: record5.openDecisionCount
+  };
+}
+function parseProof(value3, requireContent) {
+  const record5 = exactRecord4(value3, ["effect", "targets", "verification"], "La prueba de cierre es inválida.");
+  return {
+    effect: proofText(record5.effect, "effect", requireContent),
+    targets: proofText(record5.targets, "targets", requireContent),
+    verification: proofText(record5.verification, "verification", requireContent)
+  };
+}
+function proofText(value3, field, requireContent) {
+  if (typeof value3 !== "string" || value3.length > MAX_TEXT || /[\u0000\r\n]/.test(value3)) {
+    throw invalid5(`La prueba de cierre (${field}) no es válida.`);
+  }
+  const trimmed = value3.trim();
+  if (requireContent && !trimmed)
+    throw invalid5(`La prueba de cierre (${field}) está vacía.`);
+  const normalized = trimmed.toLocaleLowerCase("es");
+  if (PLACEHOLDERS.some((placeholder) => normalized === placeholder || normalized.includes(` ${placeholder} `) || normalized.startsWith(`${placeholder} `) || normalized.endsWith(` ${placeholder}`))) {
+    throw invalid5(`La prueba de cierre (${field}) contiene un placeholder.`);
+  }
+  return trimmed;
+}
+function optionalText(value3, max5, field) {
+  if (value3 === undefined)
+    return;
+  if (typeof value3 !== "string" || value3.length > max5 || /[\u0000\r\n]/.test(value3)) {
+    throw invalid5(`${field} no es válido.`);
+  }
+  return value3.trim() || undefined;
+}
+function normalizeContext(context3) {
+  return {
+    sessionID: context3.sessionID,
+    messageID: context3.messageID,
+    project: context3.project,
+    root: context3.root,
+    mode: context3.mode,
+    policyRevision: context3.policyRevision
+  };
+}
+function normalizeAssessment(assessment) {
+  return {
+    schema: assessment.schema,
+    understood: assessment.understood,
+    requestedEffect: assessment.requestedEffect,
+    userRequestedPlanning: assessment.userRequestedPlanning,
+    symptomOrCauseUnknown: assessment.symptomOrCauseUnknown,
+    signals: { ...assessment.signals },
+    closure: { ...assessment.closure },
+    proof: { ...assessment.proof },
+    ...assessment.previousDecisionRef ? { previousDecisionRef: assessment.previousDecisionRef } : {}
+  };
+}
+function exactRecord4(value3, keys4, message) {
+  if (typeof value3 !== "object" || value3 === null || Array.isArray(value3))
+    throw invalid5(message);
+  const record5 = value3;
+  const allowed = new Set(keys4);
+  if (Object.keys(record5).some((key) => !allowed.has(key)) || keys4.filter((key) => key !== "previousDecisionRef").some((key) => !(key in record5))) {
+    throw invalid5(message);
+  }
+  return record5;
+}
+function invalid5(message) {
+  return new TaskClassificationError("TASK_ASSESSMENT_INVALID", message);
+}
+function sha2564(value3) {
+  return createHash18("sha256").update(value3).digest("hex");
+}
+var TASK_CLASSIFICATION_SCHEMA = 1, TASK_DECISION_SCHEMA = 1, SIGNAL_LEVELS, REQUESTED_EFFECTS, CLOSURE_ACTION, CLOSURE_TARGETS, CLOSURE_VERIFICATION, CLOSURE_DISCOVERY, PLACEHOLDERS, MAX_TEXT = 2000, MAX_OPEN_DECISIONS = 64, MAX_PREVIOUS_REF = 256, TaskClassificationError;
+var init_task_classification = __esm(() => {
+  init_secret_scan();
+  SIGNAL_LEVELS = new Set(["low", "medium", "high", "unknown"]);
+  REQUESTED_EFFECTS = new Set(["none", "mutation", "unknown"]);
+  CLOSURE_ACTION = new Set(["known", "discoverable", "unknown"]);
+  CLOSURE_TARGETS = new Set(["known", "discoverable", "unknown"]);
+  CLOSURE_VERIFICATION = new Set(["objective", "judgment", "unknown"]);
+  CLOSURE_DISCOVERY = new Set(["none", "bounded-read-only", "open"]);
+  PLACEHOLDERS = [
+    "lo necesario",
+    "los archivos relacionados",
+    "el archivo relacionado",
+    "mejorarlo",
+    "mejorar esto",
+    "tbd",
+    "todo",
+    "pendiente",
+    "algo",
+    "lo que haga falta"
+  ];
+  TaskClassificationError = class TaskClassificationError extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.name = "TaskClassificationError";
+      this.code = code;
+    }
+  };
+});
+
+// src/plugin/task-classification.ts
+var exports_task_classification = {};
+__export(exports_task_classification, {
+  registerTaskClassificationTool: () => registerTaskClassificationTool,
+  createTaskClassifier: () => createTaskClassifier
+});
+function createTaskClassifier() {
+  const decisions = new Map;
+  return {
+    classify(value3, scope3, call) {
+      if (call.agent !== "malahor" || call.sessionID !== scope3.sessionID) {
+        throw new TaskClassificationError("TASK_ROUTE_MISMATCH", "Solo el primario puede clasificar su propia sesión.");
+      }
+      const assessment = parseTaskAssessment(value3);
+      const context3 = {
+        sessionID: scope3.sessionID,
+        messageID: call.messageID,
+        project: scope3.project,
+        root: scope3.root,
+        mode: scope3.mode,
+        policyRevision: scope3.policyRevision
+      };
+      const decision = deriveTaskDecision(assessment, context3);
+      decisions.set(scope3.sessionID, {
+        decision,
+        scope: normalizeScope3(scope3),
+        messageID: call.messageID
+      });
+      return decision;
+    },
+    current(sessionID, route) {
+      const record5 = decisions.get(sessionID);
+      if (!record5 || route !== undefined && record5.decision.route !== route)
+        return;
+      return structuredClone(record5);
+    },
+    requireRoute(sessionID, route, scope3) {
+      const record5 = decisions.get(sessionID);
+      if (!record5) {
+        throw new TaskClassificationError("TASK_DECISION_STALE", "No hay una clasificación vigente para esta sesión.");
+      }
+      if (!sameScope3(record5.scope, scope3) || record5.decision.route !== route) {
+        throw new TaskClassificationError("TASK_ROUTE_MISMATCH", "La clasificación no autoriza esta ruta en el scope actual.");
+      }
+      return structuredClone(record5.decision);
+    },
+    invalidate(sessionID) {
+      decisions.delete(sessionID);
+    }
+  };
+}
+async function registerTaskClassificationTool(tools, classifier, resolveScope) {
+  return tools.transform((editor) => {
+    editor.namespace({ name: "malahor", description: "Clasificación read-only de tareas" });
+    editor.add({
+      name: "task_classify",
+      description: "Clasifica una tarea por cierre y consecuencias y deriva una ruta; no autoriza ninguna tool.",
+      input: TASK_ASSESSMENT_INPUT_SCHEMA,
+      options: { namespace: "malahor", codemode: false },
+      execute: async (value3, call) => {
+        const scope3 = await resolveScope(call.sessionID);
+        if (!scope3)
+          throw new Error("Proyecto o sesión no evaluable para clasificar la tarea.");
+        const decision = classifier.classify(value3, scope3, call);
+        return {
+          content: `Ruta: ${decision.route}. Razones: ${decision.reasonCodes.join(", ") || "ninguna"}.`,
+          metadata: {
+            kind: "malahor.task.decision",
+            version: 1,
+            route: decision.route,
+            reasonCodes: decision.reasonCodes,
+            riskGate: decision.riskGate,
+            decisionRef: decision.decisionRef
+          }
+        };
+      }
+    });
+  });
+}
+function normalizeScope3(scope3) {
+  return {
+    sessionID: scope3.sessionID,
+    project: scope3.project,
+    policyRevision: scope3.policyRevision,
+    mode: scope3.mode,
+    root: scope3.root
+  };
+}
+function sameScope3(left2, right) {
+  return left2.sessionID === right.sessionID && left2.project === right.project && left2.policyRevision === right.policyRevision && left2.mode === right.mode && left2.root === right.root;
+}
+var TASK_ASSESSMENT_INPUT_SCHEMA;
+var init_task_classification2 = __esm(() => {
+  init_task_classification();
+  TASK_ASSESSMENT_INPUT_SCHEMA = {
+    type: "object",
+    properties: {
+      schema: { type: "number", enum: [1] },
+      understood: { type: "boolean" },
+      requestedEffect: { type: "string", enum: ["none", "mutation", "unknown"] },
+      userRequestedPlanning: { type: "boolean" },
+      symptomOrCauseUnknown: { type: "boolean" },
+      signals: {
+        type: "object",
+        properties: {
+          specification: { type: "string", enum: ["low", "medium", "high", "unknown"] },
+          discovery: { type: "string", enum: ["low", "medium", "high", "unknown"] },
+          scope: { type: "string", enum: ["low", "medium", "high", "unknown"] },
+          openDecisions: { type: "string", enum: ["low", "medium", "high", "unknown"] },
+          reversibility: { type: "string", enum: ["low", "medium", "high", "unknown"] },
+          verifiability: { type: "string", enum: ["low", "medium", "high", "unknown"] }
+        },
+        required: ["specification", "discovery", "scope", "openDecisions", "reversibility", "verifiability"],
+        additionalProperties: false
+      },
+      closure: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["known", "discoverable", "unknown"] },
+          targets: { type: "string", enum: ["known", "discoverable", "unknown"] },
+          verification: { type: "string", enum: ["objective", "judgment", "unknown"] },
+          discovery: { type: "string", enum: ["none", "bounded-read-only", "open"] },
+          openDecisionCount: { type: "number", minimum: 0, maximum: 64 }
+        },
+        required: ["action", "targets", "verification", "discovery", "openDecisionCount"],
+        additionalProperties: false
+      },
+      proof: {
+        type: "object",
+        properties: {
+          effect: { type: "string" },
+          targets: { type: "string" },
+          verification: { type: "string" }
+        },
+        required: ["effect", "targets", "verification"],
+        additionalProperties: false
+      },
+      previousDecisionRef: { type: "string" }
+    },
+    required: ["schema", "understood", "requestedEffect", "userRequestedPlanning", "symptomOrCauseUnknown", "signals", "closure", "proof"],
+    additionalProperties: false
+  };
+});
+
+// src/plugin/direct-task-execution.ts
+var exports_direct_task_execution = {};
+__export(exports_direct_task_execution, {
+  registerDirectTaskTool: () => registerDirectTaskTool,
+  createDirectTaskRegistry: () => createDirectTaskRegistry,
+  DIRECT_TASK_APPROVAL: () => DIRECT_TASK_APPROVAL,
+  DIRECT_GRANT_MISMATCH: () => DIRECT_GRANT_MISMATCH
+});
+import { createHash as createHash19 } from "node:crypto";
+import fs21 from "node:fs";
+import path27 from "node:path";
+function createDirectTaskRegistry() {
+  const grants = new Map;
+  const completed = new Map;
+  const invalidate = (sessionID) => {
+    grants.delete(sessionID);
+    completed.delete(sessionID);
+  };
+  return {
+    async prepare(input, call, scopeValue, decision, approval, resolveScope) {
+      if (call.agent !== "malahor" || call.sessionID !== scopeValue.sessionID) {
+        throw new Error("Solo el primario puede preparar su propia tarea directa.");
+      }
+      const scope3 = normalizeScope4(scopeValue);
+      if (scope3.mode === "advisor")
+        throw new Error("El asesor no ejecuta tareas directas.");
+      if (decision.schema !== 1 || decision.route !== "direct") {
+        throw new Error("La decisión de clasificación no autoriza ejecución directa.");
+      }
+      const parsed = parsePreparation(input);
+      if (parsed.decisionRef !== decision.decisionRef) {
+        throw new Error("La decisión de clasificación no coincide con la preparación.");
+      }
+      const envelope = compileEnvelope(parsed, scope3);
+      grants.delete(scope3.sessionID);
+      await approval.assert({
+        sessionID: call.sessionID,
+        agent: call.agent,
+        source: { type: "tool", messageID: call.messageID, id: call.id },
+        action: DIRECT_TASK_APPROVAL,
+        resources: [envelope.decisionRef, envelope.proof, ...envelope.actions.map((action) => action.relativePath)],
+        save: []
+      });
+      const freshScope = await resolveScope();
+      if (!freshScope || !sameScope4(scope3, normalizeScope4(freshScope))) {
+        throw new Error("El proyecto, modo o política cambió durante la aprobación directa.");
+      }
+      const fresh = compileEnvelope(parsed, normalizeScope4(freshScope));
+      if (fresh.proof !== envelope.proof) {
+        throw new Error("La tarea directa cambió durante la aprobación nativa.");
+      }
+      grants.set(scope3.sessionID, { scope: scope3, envelope: fresh, cursor: 0 });
+      return { envelope: fresh, actions: fresh.actions.length };
+    },
+    authorizeTool(input) {
+      const scope3 = normalizeScope4(input.scope);
+      const callKey2 = `${input.messageID}\x00${input.toolCallID}`;
+      if (completed.get(scope3.sessionID)?.has(callKey2)) {
+        return { effect: "deny", code: DIRECT_GRANT_MISMATCH };
+      }
+      const grant = grants.get(scope3.sessionID);
+      if (!grant)
+        return { effect: "absent" };
+      if (!sameScope4(grant.scope, scope3)) {
+        invalidate(scope3.sessionID);
+        return { effect: "deny", code: DIRECT_GRANT_MISMATCH };
+      }
+      const expected = grant.envelope.actions[grant.cursor];
+      if (!expected) {
+        invalidate(scope3.sessionID);
+        return { effect: "absent" };
+      }
+      const candidate = candidateForTool2(input.tool, input.value);
+      if (!candidate || candidate.kind !== expected.kind || candidate.relativePath !== expected.relativePath || candidate.payloadDigest !== expected.payloadDigest) {
+        invalidate(scope3.sessionID);
+        return { effect: "deny", code: DIRECT_GRANT_MISMATCH };
+      }
+      if (!input.messageID.trim() || !input.toolCallID.trim()) {
+        invalidate(scope3.sessionID);
+        return { effect: "deny", code: DIRECT_GRANT_MISMATCH };
+      }
+      const step2 = grant.inFlight;
+      if (!step2) {
+        grant.inFlight = {
+          index: grant.cursor,
+          callKey: callKey2,
+          toolSeen: input.boundary === "tool",
+          permissionSeen: input.boundary === "permission"
+        };
+      } else if (step2.index !== grant.cursor || step2.callKey !== callKey2) {
+        invalidate(scope3.sessionID);
+        return { effect: "deny", code: DIRECT_GRANT_MISMATCH };
+      } else if (input.boundary === "tool") {
+        step2.toolSeen = true;
+      } else {
+        step2.permissionSeen = true;
+      }
+      const current2 = grant.inFlight;
+      if (current2?.toolSeen && current2.permissionSeen) {
+        grant.cursor += 1;
+        grant.inFlight = undefined;
+        if (grant.cursor >= grant.envelope.actions.length) {
+          completed.set(scope3.sessionID, new Set([callKey2]));
+          grants.delete(scope3.sessionID);
+        }
+      }
+      return { effect: "allow" };
+    },
+    invalidate
+  };
+}
+async function registerDirectTaskTool(tools, registry, classifier, resolveScope, approval) {
+  return tools.transform((editor) => {
+    editor.namespace({ name: "malahor", description: "Ejecución directa aprobada por envelope" });
+    editor.add({
+      name: "direct_prepare",
+      description: "Prepara una mutación directa cerrada, solicita aprobación nativa y emite un grant exacto.",
+      input: DIRECT_TASK_INPUT_SCHEMA,
+      options: { namespace: "malahor", codemode: false },
+      execute: async (value3, call) => {
+        const scope3 = await resolveScope(call.sessionID);
+        if (!scope3)
+          throw new Error("Proyecto o sesión no evaluable para la tarea directa.");
+        const record5 = classifier.current(call.sessionID, "direct");
+        if (!record5)
+          throw new Error("No hay una decisión directa vigente para esta sesión.");
+        const result4 = await registry.prepare(value3, call, scope3, record5.decision, approval, () => resolveScope(call.sessionID));
+        return {
+          content: `Tarea directa preparada con ${result4.actions} acción(es); la aprobación cubre solo este envelope.`,
+          metadata: {
+            kind: "malahor.direct.task",
+            version: 1,
+            decisionRef: result4.envelope.decisionRef,
+            proof: result4.envelope.proof,
+            actions: result4.actions
+          }
+        };
+      }
+    });
+  });
+}
+function parsePreparation(value3) {
+  const record5 = exactRecord5(value3, ["decisionRef", "summary", "mutations", "verification"], "Preparación directa inválida.");
+  const decisionRef = text3(record5.decisionRef, "decisionRef");
+  if (!/^[a-f0-9]{64}$/.test(decisionRef))
+    throw new Error("decisionRef inválido.");
+  const summary = text3(record5.summary, "summary");
+  if (summary.length > 1000 || /[\u0000\r\n]/.test(summary))
+    throw new Error("summary inválido.");
+  if (!Array.isArray(record5.mutations) || record5.mutations.length === 0 || record5.mutations.length > MAX_ACTIONS) {
+    throw new Error("La tarea directa requiere mutaciones acotadas.");
+  }
+  if (!Array.isArray(record5.verification) || record5.verification.length > MAX_VERIFICATIONS) {
+    throw new Error("La verificación directa es inválida.");
+  }
+  const serialized = JSON.stringify(value3);
+  const jsonCredential = /"(?:api[_-]?key|access[_-]?token|secret[_-]?key|password)"\s*:\s*"[^"\r\n]{16,}"/i.test(serialized);
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PAYLOAD_BYTES || detectPayloadSecretKinds(serialized).length > 0 || jsonCredential) {
+    throw new Error("La preparación directa contiene material sensible o excesivo.");
+  }
+  const mutations = record5.mutations.map((item) => parseMutation(item));
+  const verification = record5.verification.map((item) => parseVerification(item));
+  return { decisionRef, summary, mutations, verification };
+}
+function parseMutation(value3) {
+  const record5 = exactRecord5(value3, ["kind", "path", "existence", "payload"], "Mutación directa inválida.");
+  const kind = record5.kind;
+  if (kind !== "edit" && kind !== "write" && kind !== "patch")
+    throw new Error("Tipo de mutación directa inválido.");
+  const target = text3(record5.path, "path");
+  if (!target || path27.isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target) || target.startsWith("~") || /[*?\[\]{}]/.test(target))
+    throw new Error("Ruta de mutación directa inválida.");
+  const existence = record5.existence === "may-create" ? "may-create" : record5.existence === "must-exist" || record5.existence === undefined ? "must-exist" : undefined;
+  if (!existence)
+    throw new Error("Contrato de existencia inválido.");
+  if (kind !== "write" && existence === "may-create")
+    throw new Error("Solo write puede crear archivos.");
+  const payload = recordValue6(record5.payload);
+  if (!payload)
+    throw new Error("Payload de mutación directa inválido.");
+  if (kind === "patch") {
+    const patchText = typeof payload.patchText === "string" ? payload.patchText : undefined;
+    if (!patchText)
+      throw new Error("El patch directo requiere patchText.");
+    const operations = parsePatchOperations(patchText);
+    if (operations.length !== 1 || operations[0]?.kind !== "update" || operations[0].path !== target) {
+      throw new Error("El patch directo debe actualizar exactamente el target declarado.");
+    }
+  }
+  return { kind, path: target, existence, payload };
+}
+function parseVerification(value3) {
+  const record5 = exactRecord5(value3, ["kind", "argv", "cwd"], "Verificación directa inválida.");
+  if (record5.kind !== "shell" || !Array.isArray(record5.argv) || record5.argv.length === 0 || record5.argv.length > 32 || record5.argv.some((item) => typeof item !== "string" || !item.trim() || item.length > 2000 || /[\u0000\r\n]/.test(item))) {
+    throw new Error("La verificación directa debe ser un argv shell cerrado.");
+  }
+  const cwd = record5.cwd === undefined ? undefined : text3(record5.cwd, "cwd");
+  return { kind: "shell", argv: [...record5.argv], ...cwd ? { cwd } : {} };
+}
+function compileEnvelope(input, scope3) {
+  const root = path27.resolve(scope3.root);
+  const actions = [];
+  for (const mutation of input.mutations) {
+    const absolute = path27.resolve(root, mutation.path);
+    if (!inside8(absolute, root) || absolute === root)
+      throw new Error(`Ruta de mutación fuera de la raíz: ${mutation.path}.`);
+    if (isProtectedDocumentationPath(root, absolute) || classifyInfrastructurePath(root, absolute).protected) {
+      throw new Error(`La tarea directa no cubre documentación protegida ni infraestructura: ${mutation.path}.`);
+    }
+    const exists2 = existsRegular(absolute);
+    if (mutation.existence === "must-exist" && !exists2) {
+      throw new Error(`La ruta debe existir y ser regular: ${mutation.path}.`);
+    }
+    if (mutation.kind === "write" && exists2) {
+      throw new Error(`write directo no sobrescribe archivos existentes: ${mutation.path}.`);
+    }
+    if (exists2 && !isRegular(absolute))
+      throw new Error(`La ruta no es un archivo regular: ${mutation.path}.`);
+    const relativePath = path27.relative(root, absolute).split(path27.sep).join("/");
+    const existence = mutation.existence ?? "must-exist";
+    const intent = canonicalizeDirectTaskMutation({
+      project: scope3.project,
+      root,
+      kind: mutation.kind,
+      path: relativePath,
+      existence
+    })[0];
+    if (!intent)
+      throw new Error("La mutación directa no pudo canonicalizarse.");
+    const payloadDigest = sha2565(JSON.stringify(mutation.payload));
+    actions.push({
+      actionID: sha2565(JSON.stringify({ decisionRef: input.decisionRef, kind: mutation.kind, relativePath, payloadDigest })),
+      kind: mutation.kind,
+      relativePath,
+      existence,
+      payloadDigest
+    });
+  }
+  const verification = input.verification.map((item) => {
+    const cwd = item.cwd ? path27.resolve(root, item.cwd) : root;
+    if (!inside8(cwd, root))
+      throw new Error("El cwd de verificación queda fuera de la raíz.");
+    const command = item.argv.join(" ");
+    if (!classifyReadOnlyShellCommand(command, root, { workingDirectory: cwd }).readOnly) {
+      throw new Error("La verificación directa debe ser read-only y reconocida.");
+    }
+    return { argv: [...item.argv], cwd };
+  });
+  const unsigned = {
+    schema: 1,
+    kind: "malahor.direct-task",
+    decisionRef: input.decisionRef,
+    project: scope3.project,
+    policyRevision: scope3.policyRevision,
+    mode: scope3.mode,
+    rootDigest: sha2565(root),
+    summary: input.summary,
+    actions,
+    verification
+  };
+  return { ...unsigned, proof: sha2565(JSON.stringify(unsigned)) };
+}
+function candidateForTool2(tool, value3) {
+  if (!["edit", "write", "patch"].includes(tool))
+    return;
+  const record5 = recordValue6(value3);
+  if (!record5)
+    return;
+  const rawPath = tool === "patch" ? parsePatchOperations(typeof record5.patchText === "string" ? record5.patchText : "")[0]?.path : record5.path ?? record5.filePath;
+  if (typeof rawPath !== "string" || !rawPath.trim())
+    return;
+  const normalized = path27.normalize(rawPath).split(path27.sep).join("/");
+  if (normalized.startsWith("../") || normalized === "..")
+    return;
+  return {
+    kind: tool,
+    relativePath: normalized,
+    payloadDigest: sha2565(JSON.stringify(value3))
+  };
+}
+function normalizeScope4(scope3) {
+  return {
+    sessionID: scope3.sessionID,
+    project: scope3.project,
+    policyRevision: scope3.policyRevision,
+    mode: scope3.mode,
+    root: path27.resolve(scope3.root)
+  };
+}
+function sameScope4(left2, right) {
+  return left2.sessionID === right.sessionID && left2.project === right.project && left2.policyRevision === right.policyRevision && left2.mode === right.mode && left2.root === right.root;
+}
+function exactRecord5(value3, keys4, message) {
+  if (typeof value3 !== "object" || value3 === null || Array.isArray(value3))
+    throw new Error(message);
+  const record5 = value3;
+  const allowed = new Set(keys4);
+  if (Object.keys(record5).some((key) => !allowed.has(key)) || keys4.some((key) => !(key in record5) && key !== "existence" && key !== "cwd")) {
+    throw new Error(message);
+  }
+  return record5;
+}
+function recordValue6(value3) {
+  return typeof value3 === "object" && value3 !== null && !Array.isArray(value3) ? value3 : undefined;
+}
+function text3(value3, field) {
+  if (typeof value3 !== "string" || !value3.trim() || value3.length > 8192 || /[\u0000\r\n]/.test(value3)) {
+    throw new Error(`${field} inválido.`);
+  }
+  return value3.trim();
+}
+function existsRegular(target) {
+  try {
+    return fs21.lstatSync(target).isFile();
+  } catch {
+    return false;
+  }
+}
+function isRegular(target) {
+  try {
+    const stat = fs21.lstatSync(target);
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function inside8(target, root) {
+  const relative = path27.relative(root, target);
+  return relative === "" || !relative.startsWith("..") && !path27.isAbsolute(relative);
+}
+function sha2565(value3) {
+  return createHash19("sha256").update(value3).digest("hex");
+}
+var DIRECT_TASK_APPROVAL = "malahor_direct_task_execute", DIRECT_GRANT_MISMATCH = "DIRECT_GRANT_MISMATCH", MAX_ACTIONS = 32, MAX_VERIFICATIONS = 16, MAX_PAYLOAD_BYTES, DIRECT_TASK_INPUT_SCHEMA;
+var init_direct_task_execution = __esm(() => {
+  init_action_intent();
+  init_documentation_boundary();
+  init_secret_scan();
+  init_infrastructure_boundary();
+  init_read_only_shell_policy();
+  MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
+  DIRECT_TASK_INPUT_SCHEMA = {
+    type: "object",
+    properties: {
+      decisionRef: { type: "string" },
+      summary: { type: "string" },
+      mutations: {
+        type: "array",
+        minItems: 1,
+        maxItems: 32,
+        items: {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["edit", "write", "patch"] },
+            path: { type: "string" },
+            existence: { type: "string", enum: ["must-exist", "may-create"] },
+            payload: { type: "object" }
+          },
+          required: ["kind", "path", "payload"],
+          additionalProperties: false
+        }
+      },
+      verification: {
+        type: "array",
+        maxItems: 16,
+        items: {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["shell"] },
+            argv: { type: "array", minItems: 1, maxItems: 32, items: { type: "string" } },
+            cwd: { type: "string" }
+          },
+          required: ["kind", "argv"],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ["decisionRef", "summary", "mutations", "verification"],
+    additionalProperties: false
+  };
+});
 
 // src/plugin/index.ts
-import fs21 from "node:fs";
+import fs22 from "node:fs";
 import os2 from "node:os";
-import path27 from "node:path";
+import path28 from "node:path";
 import { isMainThread, workerData as workerData2 } from "node:worker_threads";
 
 // src/cli/core/paths.ts
@@ -2360,892 +6466,8 @@ function secureChmod2(target, mode) {
   }
 }
 
-// src/cli/core/git-command-policy.ts
-import { execFileSync as execFileSync2 } from "node:child_process";
-var REMOTE_COMMANDS = new Set([
-  "clone",
-  "fetch",
-  "fetch-pack",
-  "http-fetch",
-  "http-push",
-  "ls-remote",
-  "pull",
-  "push",
-  "remote-ext",
-  "remote-fd",
-  "remote-ftp",
-  "remote-ftps",
-  "remote-http",
-  "remote-https",
-  "send-pack"
-]);
-var READ_COMMANDS = new Set([
-  "annotate",
-  "blame",
-  "cat-file",
-  "count-objects",
-  "describe",
-  "diff",
-  "diff-files",
-  "diff-index",
-  "diff-tree",
-  "difftool",
-  "for-each-ref",
-  "fsck",
-  "grep",
-  "help",
-  "log",
-  "ls-files",
-  "merge-base",
-  "name-rev",
-  "notes",
-  "range-diff",
-  "reflog",
-  "rev-list",
-  "rev-parse",
-  "shortlog",
-  "show",
-  "show-branch",
-  "show-ref",
-  "status",
-  "tag",
-  "verify-commit",
-  "verify-tag",
-  "version",
-  "whatchanged"
-]);
-var KNOWN_LOCAL_COMMANDS = new Set([
-  ...READ_COMMANDS,
-  "add",
-  "am",
-  "apply",
-  "archive",
-  "bisect",
-  "branch",
-  "bundle",
-  "checkout",
-  "cherry",
-  "cherry-pick",
-  "clean",
-  "commit",
-  "commit-tree",
-  "config",
-  "fast-export",
-  "fast-import",
-  "filter-branch",
-  "format-patch",
-  "gc",
-  "hash-object",
-  "index-pack",
-  "init",
-  "interpret-trailers",
-  "maintenance",
-  "merge",
-  "merge-file",
-  "merge-index",
-  "merge-tree",
-  "mergetool",
-  "mktag",
-  "mktree",
-  "mv",
-  "pack-objects",
-  "prune",
-  "prune-packed",
-  "read-tree",
-  "rebase",
-  "replace",
-  "reset",
-  "restore",
-  "revert",
-  "rm",
-  "show-index",
-  "sparse-checkout",
-  "stash",
-  "stripspace",
-  "submodule",
-  "switch",
-  "symbolic-ref",
-  "unpack-file",
-  "unpack-objects",
-  "update-index",
-  "update-ref",
-  "var",
-  "worktree",
-  "write-tree"
-]);
-var GLOBAL_OPTIONS_WITH_VALUE = new Set([
-  "-C",
-  "-c",
-  "--config-env",
-  "--exec-path",
-  "--git-dir",
-  "--namespace",
-  "--super-prefix",
-  "--work-tree"
-]);
-var POSIX_SHELL_EXECUTORS = new Set(["bash", "dash", "fish", "ksh", "sh", "zsh"]);
-var WINDOWS_SHELL_EXECUTORS = new Set(["cmd", "cmd.exe"]);
-var POWERSHELL_EXECUTORS = new Set(["powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
-function classifyGitCommand(command, options = {}) {
-  const combined = {
-    hasGitCommand: false,
-    remote: false,
-    failClosed: false,
-    operations: [],
-    destructive: false,
-    targets: [],
-    remoteReasons: []
-  };
-  for (const nestedCommand of commandSubstitutions(command)) {
-    const nested = classifyGitCommand(nestedCommand, options);
-    if (nested.hasGitCommand)
-      nested.failClosed = true;
-    mergeClassification(combined, nested);
-  }
-  for (const segment of splitShellSegments(command)) {
-    const tokens = shellTokens(segment);
-    const executableIndexes = shellExecutableIndexes(tokens);
-    classifyNestedShell(tokens, executableIndexes, options, combined);
-    for (const index of executableIndexes) {
-      const executable = tokens[index] ?? "";
-      const remoteHelper = remoteGitExecutableReason(executable);
-      if (remoteHelper) {
-        combined.hasGitCommand = true;
-        mergeClassification(combined, remote(remoteHelper));
-        continue;
-      }
-      if (!isGitExecutable(executable))
-        continue;
-      combined.hasGitCommand = true;
-      mergeClassification(combined, classifyInvocation(tokens, index, options, [], 0));
-    }
-  }
-  return combined;
-}
-function loadGitAliases(cwd) {
-  try {
-    const output = execFileSync2("git", ["config", "--get-regexp", "^alias\\."], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-    const aliases = {};
-    for (const line of output.split(`
-`)) {
-      const match = /^alias\.([^\s]+)\s+([\s\S]+)$/.exec(line.trim());
-      if (match?.[1] && match[2] !== undefined)
-        aliases[match[1]] = match[2];
-    }
-    return aliases;
-  } catch {
-    return {};
-  }
-}
-function classifyNestedShell(tokens, executableIndexes, options, combined) {
-  for (const index of executableIndexes) {
-    const executable = executableName(tokens[index] ?? "");
-    let commandIndex = -1;
-    if (POSIX_SHELL_EXECUTORS.has(executable)) {
-      commandIndex = tokens.findIndex((token, candidate) => candidate > index && (token === "--command" || /^-[^-]*c[^-]*$/.test(token)));
-    } else if (WINDOWS_SHELL_EXECUTORS.has(executable)) {
-      commandIndex = tokens.findIndex((token, candidate) => candidate > index && ["/c", "/k"].includes(token.toLowerCase()));
-    } else if (POWERSHELL_EXECUTORS.has(executable)) {
-      commandIndex = tokens.findIndex((token, candidate) => candidate > index && ["-c", "-command", "-encodedcommand"].includes(token.toLowerCase()));
-    }
-    const nested = commandIndex >= 0 ? tokens[commandIndex + 1] : undefined;
-    if (nested)
-      mergeClassification(combined, classifyGitCommand(nested, options));
-  }
-}
-function classifyInvocation(tokens, gitIndex, options, aliasStack, depth) {
-  const inlineAliases = {};
-  let index = gitIndex + 1;
-  while (index < tokens.length) {
-    const token = tokens[index] ?? "";
-    if (token === "--") {
-      index += 1;
-      break;
-    }
-    if (!token.startsWith("-"))
-      break;
-    if (token === "-c") {
-      const value = tokens[index + 1] ?? "";
-      recordInlineAlias(value, inlineAliases);
-      index += 2;
-      continue;
-    }
-    if (token.startsWith("-c") && token.length > 2) {
-      recordInlineAlias(token.slice(2), inlineAliases);
-      index += 1;
-      continue;
-    }
-    if (GLOBAL_OPTIONS_WITH_VALUE.has(token) && token !== "-c") {
-      index += 2;
-      continue;
-    }
-    index += 1;
-  }
-  const subcommand = tokens[index]?.toLowerCase();
-  if (!subcommand)
-    return local(["unknown"], false, [], false);
-  const args = tokens.slice(index + 1);
-  const aliases = { ...options.aliases ?? {}, ...inlineAliases };
-  const alias = aliases[subcommand];
-  const maxDepth = options.maxAliasDepth ?? 8;
-  if (alias !== undefined && !KNOWN_LOCAL_COMMANDS.has(subcommand) && !REMOTE_COMMANDS.has(subcommand)) {
-    if (aliasStack.includes(subcommand) || depth >= maxDepth) {
-      return remote("alias-recursivo-o-profundo", true);
-    }
-    if (alias.trimStart().startsWith("!")) {
-      return remote(`alias-shell:${subcommand}`, true);
-    }
-    const expanded = shellTokens(`git ${alias} ${args.join(" ")}`);
-    return classifyInvocation(expanded, 0, options, [...aliasStack, subcommand], depth + 1);
-  }
-  if (REMOTE_COMMANDS.has(subcommand))
-    return remote(`git-${subcommand}`);
-  if (subcommand === "archive" && args.some((arg) => arg === "--remote" || arg.startsWith("--remote="))) {
-    return remote("git-archive-remote");
-  }
-  if (subcommand === "remote")
-    return classifyRemoteCommand(args);
-  if (subcommand === "submodule")
-    return classifySubmoduleCommand(args);
-  if (subcommand === "svn" || subcommand === "p4")
-    return remote(`git-${subcommand}`, true);
-  switch (subcommand) {
-    case "add":
-      return local(["stage"], false, pathArguments(args));
-    case "commit":
-      return classifyCommit(args);
-    case "reset":
-      return local(["reset"], true, targetArguments(args, ["--pathspec-from-file"]));
-    case "rebase":
-      return local(["rebase"], true, targetArguments(args, ["--onto", "--exec", "-x"]));
-    case "cherry-pick":
-      return local(["cherry-pick"], args.some(isConflictStateFlag), targetArguments(args));
-    case "merge":
-      return local(["merge"], args.some(isConflictStateFlag), targetArguments(args, ["-m", "--message", "-S", "--gpg-sign"]));
-    case "branch":
-      return classifyBranch(args);
-    case "switch":
-      return classifySwitch(args);
-    case "checkout":
-      return classifyCheckout(args);
-    case "clean":
-      return local(["clean"], true, pathArguments(args));
-    case "restore":
-      return local(["discard"], true, pathArguments(args));
-    case "tag":
-      return classifyTagCommand(args);
-    case "notes":
-      return classifyNotesCommand(args);
-    case "reflog":
-      return classifyReflogCommand(args);
-    default:
-      if (READ_COMMANDS.has(subcommand))
-        return local(["read"], false, []);
-      if (KNOWN_LOCAL_COMMANDS.has(subcommand))
-        return unsupportedLocalMutation(args);
-      return remote(`comando-o-alias-no-resuelto:${subcommand}`, true);
-  }
-}
-function classifyRemoteCommand(args) {
-  const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
-  if (!subcommand)
-    return local(["read"], false, []);
-  if (["update", "prune"].includes(subcommand))
-    return remote(`git-remote-${subcommand}`);
-  if (subcommand === "show" && !args.includes("-n") && !args.includes("--no-query")) {
-    return remote("git-remote-show");
-  }
-  if (subcommand === "set-head" && (args.includes("-a") || args.includes("--auto"))) {
-    return remote("git-remote-set-head-auto");
-  }
-  if (["add", "remove", "rename", "set-branches", "set-head", "set-url"].includes(subcommand)) {
-    return unsupportedLocalMutation(args);
-  }
-  return local(["read"], false, targetArguments(args));
-}
-function classifySubmoduleCommand(args) {
-  const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
-  if (["add", "update", "foreach"].includes(subcommand ?? "")) {
-    return remote(`git-submodule-${subcommand}`, true);
-  }
-  if (["absorbgitdirs", "deinit", "init", "set-branch", "set-url", "sync"].includes(subcommand ?? "")) {
-    return unsupportedLocalMutation(args);
-  }
-  return local(["read"], false, targetArguments(args));
-}
-function classifyTagCommand(args) {
-  const mutatingFlag = args.some((arg) => arg === "-d" || arg === "--delete" || arg === "-f" || arg === "--force" || arg === "-a" || arg === "--annotate" || arg === "-s" || arg === "--sign" || arg === "-u" || arg === "--local-user" || arg === "--create-reflog" || arg.startsWith("--local-user="));
-  const readMode = args.some((arg) => arg === "-l" || arg === "--list" || arg === "-v" || arg === "--verify" || arg.startsWith("--contains") || arg.startsWith("--no-contains") || arg.startsWith("--points-at") || arg.startsWith("--merged") || arg.startsWith("--no-merged"));
-  const positionals = targetArguments(args, [
-    "-m",
-    "--message",
-    "-F",
-    "--file",
-    "-u",
-    "--local-user",
-    "--format",
-    "--sort",
-    "--color",
-    "--column",
-    "--contains",
-    "--no-contains",
-    "--points-at",
-    "--merged",
-    "--no-merged"
-  ]);
-  if (mutatingFlag || !readMode && positionals.length > 0)
-    return unsupportedLocalMutation(args);
-  return local(["read"], false, []);
-}
-function classifyNotesCommand(args) {
-  if (args.some((arg) => ["add", "append", "copy", "edit", "merge", "prune", "remove"].includes(arg.toLowerCase()))) {
-    return unsupportedLocalMutation(args);
-  }
-  return local(["read"], false, []);
-}
-function classifyReflogCommand(args) {
-  if (args.some((arg) => ["delete", "expire", "write"].includes(arg.toLowerCase()))) {
-    return unsupportedLocalMutation(args);
-  }
-  return local(["read"], false, []);
-}
-function unsupportedLocalMutation(args) {
-  return local(["unknown"], true, targetArguments(args), true);
-}
-function classifyBranch(args) {
-  if (args.some((arg) => arg === "--delete" || arg.startsWith("--delete=")) || hasShortOption(args, "d") || hasShortOption(args, "D")) {
-    return local(["branch-delete"], true, [
-      ...targetArguments(args),
-      ...attachedOptionValues(args, ["d", "D"], ["delete"])
-    ]);
-  }
-  const targets = [...new Set([
-    ...targetArguments(args, ["-m", "-M", "--move", "-c", "-C", "--copy"]),
-    ...attachedOptionValues(args, ["m", "M", "c", "C"], ["move", "copy"])
-  ])];
-  const destructive = hasShortOption(args, "f") || hasShortOption(args, "M") || hasShortOption(args, "C") || args.includes("--force");
-  return targets.length > 0 ? local(["branch-create"], destructive, targets) : local(["read"], false, []);
-}
-function classifySwitch(args) {
-  const create = hasShortOption(args, "c") || hasShortOption(args, "C") || args.some((arg) => arg === "--create" || arg.startsWith("--create=") || arg === "--force-create" || arg.startsWith("--force-create="));
-  const destructive = hasShortOption(args, "C") || hasShortOption(args, "f") || args.some((arg) => ["--force", "--force-create", "--discard-changes"].includes(arg) || arg.startsWith("--force-create="));
-  const targets = [...new Set([
-    ...targetArguments(args, ["-c", "-C", "--create", "--force-create"]),
-    ...attachedOptionValues(args, ["c", "C"], ["create", "force-create"])
-  ])];
-  return local(create ? ["branch-create", "branch-switch"] : ["branch-switch"], destructive, targets);
-}
-function classifyCheckout(args) {
-  const create = hasShortOption(args, "b") || hasShortOption(args, "B") || args.some((arg) => arg === "--orphan" || arg.startsWith("--orphan="));
-  const discard = args.includes("--") || args.some((arg) => arg === "." || arg === "--patch") || hasShortOption(args, "p");
-  if (discard)
-    return local(["discard"], true, pathArguments(args));
-  const destructive = hasShortOption(args, "B") || hasShortOption(args, "f") || args.includes("--force");
-  const targets = [...new Set([
-    ...targetArguments(args, ["-b", "-B", "--orphan"]),
-    ...attachedOptionValues(args, ["b", "B"], ["orphan"])
-  ])];
-  return local(create ? ["branch-create", "branch-switch"] : ["branch-switch"], destructive, targets);
-}
-var COMMIT_IMPLICIT_LONG_OPTIONS = new Set([
-  "--all",
-  "--include",
-  "--interactive",
-  "--only",
-  "--patch",
-  "--pathspec-from-file"
-]);
-var COMMIT_IMPLICIT_SHORT_OPTIONS = new Set(["a", "i", "o", "p"]);
-var COMMIT_LONG_OPTIONS_WITH_VALUE = new Set([
-  "--message",
-  "--file",
-  "--reuse-message",
-  "--reedit-message",
-  "--template",
-  "--author",
-  "--date",
-  "--cleanup",
-  "--fixup",
-  "--squash",
-  "--trailer",
-  "--pathspec-from-file"
-]);
-var COMMIT_SHORT_OPTIONS_WITH_VALUE = new Set(["m", "F", "C", "c", "t"]);
-var COMMIT_SHORT_OPTIONS_WITH_OPTIONAL_ATTACHED_VALUE = new Set(["S", "u"]);
-function classifyCommit(args) {
-  const amend = args.includes("--amend");
-  const parsed = parseCommitArguments(args);
-  const operations = [
-    ...parsed.implicitStage ? ["implicit-stage"] : [],
-    amend ? "amend" : "commit"
-  ];
-  return local(operations, amend, amend ? ["HEAD", ...parsed.targets] : parsed.targets);
-}
-function parseCommitArguments(args) {
-  let implicitStage = false;
-  const targets = [];
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index] ?? "";
-    if (arg === "--") {
-      targets.push(...args.slice(index + 1));
-      implicitStage ||= targets.length > 0;
-      break;
-    }
-    if (COMMIT_IMPLICIT_LONG_OPTIONS.has(arg) || [...COMMIT_IMPLICIT_LONG_OPTIONS].some((option) => arg.startsWith(`${option}=`))) {
-      implicitStage = true;
-    }
-    if (COMMIT_LONG_OPTIONS_WITH_VALUE.has(arg)) {
-      index += 1;
-      continue;
-    }
-    if ([...COMMIT_LONG_OPTIONS_WITH_VALUE].some((option) => arg.startsWith(`${option}=`)))
-      continue;
-    if (/^-[^-]/.test(arg)) {
-      const short = parseCommitShortOptions(arg);
-      implicitStage ||= short.implicitStage;
-      if (short.consumesNext)
-        index += 1;
-      continue;
-    }
-    if (arg.startsWith("-"))
-      continue;
-    targets.push(arg);
-    implicitStage = true;
-  }
-  return { implicitStage, targets };
-}
-function parseCommitShortOptions(arg) {
-  let implicitStage = false;
-  for (let index = 1;index < arg.length; index += 1) {
-    const option = arg[index] ?? "";
-    if (COMMIT_IMPLICIT_SHORT_OPTIONS.has(option))
-      implicitStage = true;
-    if (COMMIT_SHORT_OPTIONS_WITH_VALUE.has(option)) {
-      return { implicitStage, consumesNext: index === arg.length - 1 };
-    }
-    if (COMMIT_SHORT_OPTIONS_WITH_OPTIONAL_ATTACHED_VALUE.has(option)) {
-      return { implicitStage, consumesNext: false };
-    }
-  }
-  return { implicitStage, consumesNext: false };
-}
-function targetArguments(args, valueFlags = []) {
-  const values = [];
-  const consumes = new Set(valueFlags);
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index] ?? "";
-    if (arg === "--") {
-      values.push(...args.slice(index + 1));
-      break;
-    }
-    if (consumes.has(arg)) {
-      index += 1;
-      const value = args[index];
-      if (value)
-        values.push(value);
-      continue;
-    }
-    if (!arg.startsWith("-"))
-      values.push(arg);
-  }
-  return values;
-}
-function hasShortOption(args, option) {
-  return args.some((arg) => /^-[^-]/.test(arg) && arg.slice(1).includes(option));
-}
-function attachedOptionValues(args, short, long) {
-  const values = [];
-  for (const arg of args) {
-    if (/^-[^-]/.test(arg)) {
-      for (const option of short) {
-        const index = arg.indexOf(option, 1);
-        if (index >= 1 && index < arg.length - 1) {
-          values.push(arg.slice(index + 1));
-          break;
-        }
-      }
-    }
-    for (const option of long) {
-      const prefix = `--${option}=`;
-      if (arg.startsWith(prefix) && arg.length > prefix.length)
-        values.push(arg.slice(prefix.length));
-    }
-  }
-  return values;
-}
-function pathArguments(args) {
-  const separator = args.indexOf("--");
-  if (separator >= 0)
-    return args.slice(separator + 1);
-  return args.filter((arg) => !arg.startsWith("-"));
-}
-function isConflictStateFlag(value) {
-  return ["--abort", "--continue", "--quit", "--skip"].includes(value);
-}
-function local(operations, destructive, targets, failClosed = false) {
-  return { remote: false, failClosed, operations, destructive, targets, remoteReasons: [] };
-}
-function remote(reason, failClosed = false) {
-  return {
-    remote: true,
-    failClosed,
-    operations: ["remote"],
-    destructive: false,
-    targets: [],
-    remoteReasons: [reason]
-  };
-}
-function mergeClassification(combined, current) {
-  if ("hasGitCommand" in current && current.hasGitCommand)
-    combined.hasGitCommand = true;
-  combined.remote ||= current.remote;
-  combined.failClosed ||= current.failClosed;
-  combined.destructive ||= current.destructive;
-  appendUnique(combined.operations, current.operations);
-  appendUnique(combined.targets, current.targets);
-  appendUnique(combined.remoteReasons, current.remoteReasons);
-}
-function appendUnique(target, values) {
-  for (const value of values)
-    if (!target.includes(value))
-      target.push(value);
-}
-function recordInlineAlias(value, aliases) {
-  const match = /^alias\.([^=]+)=([\s\S]*)$/i.exec(value);
-  if (match?.[1] && match[2] !== undefined)
-    aliases[match[1].toLowerCase()] = match[2];
-}
-function isGitExecutable(value) {
-  const executable = executableName(value);
-  return executable === "git" || executable === "git.exe";
-}
-function remoteGitExecutableReason(value) {
-  const executable = executableName(value).replace(/\.exe$/, "");
-  if (/^git-remote-.+/.test(executable))
-    return `helper-${executable}`;
-  if (["git-fetch-pack", "git-http-fetch", "git-http-push", "git-ls-remote", "git-send-pack"].includes(executable)) {
-    return `helper-${executable}`;
-  }
-  return;
-}
-function executableName(value) {
-  return value.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
-}
-function shellExecutableIndexes(tokens) {
-  const indexes = new Set;
-  const primary = unwrapCommandIndex(tokens, 0);
-  if (primary >= 0)
-    indexes.add(primary);
-  for (let index = 0;index < tokens.length; index += 1) {
-    if (tokens[index] !== "-exec" && tokens[index] !== "-execdir")
-      continue;
-    const nested = unwrapCommandIndex(tokens, index + 1);
-    if (nested >= 0)
-      indexes.add(nested);
-  }
-  return [...indexes].sort((left, right) => left - right);
-}
-function unwrapCommandIndex(tokens, start) {
-  let index = skipCommandAssignments(tokens, start);
-  const visited = new Set;
-  while (index >= 0 && index < tokens.length && !visited.has(index)) {
-    visited.add(index);
-    const executable = executableName(tokens[index] ?? "");
-    const nested = wrappedCommandIndex(executable, tokens, index);
-    if (nested === undefined)
-      return index;
-    if (nested < 0)
-      return -1;
-    index = skipCommandAssignments(tokens, nested);
-  }
-  return -1;
-}
-function wrappedCommandIndex(executable, tokens, index) {
-  switch (executable) {
-    case "env":
-      return firstWrapperOperand(tokens, index + 1, new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]), true);
-    case "command":
-      return commandBuiltinTarget(tokens, index + 1);
-    case "exec":
-      return firstWrapperOperand(tokens, index + 1, new Set(["-a"]));
-    case "nohup":
-      return firstWrapperOperand(tokens, index + 1, new Set);
-    case "sudo":
-    case "sudo.exe":
-      return firstWrapperOperand(tokens, index + 1, new Set([
-        "-C",
-        "--close-from",
-        "-D",
-        "--chdir",
-        "-g",
-        "--group",
-        "-h",
-        "--host",
-        "-p",
-        "--prompt",
-        "-R",
-        "--chroot",
-        "-r",
-        "--role",
-        "-T",
-        "--command-timeout",
-        "-t",
-        "--type",
-        "-U",
-        "--other-user",
-        "-u",
-        "--user"
-      ]));
-    case "xargs":
-      return firstWrapperOperand(tokens, index + 1, new Set([
-        "-a",
-        "--arg-file",
-        "-d",
-        "--delimiter",
-        "-E",
-        "-e",
-        "--eof",
-        "-I",
-        "--replace",
-        "-L",
-        "-l",
-        "--max-lines",
-        "-n",
-        "--max-args",
-        "-P",
-        "--max-procs",
-        "-s",
-        "--max-chars"
-      ]));
-    case "timeout": {
-      const duration = firstWrapperOperand(tokens, index + 1, new Set(["-k", "--kill-after", "-s", "--signal"]));
-      return duration >= 0 ? duration + 1 : -1;
-    }
-    default:
-      return;
-  }
-}
-function commandBuiltinTarget(tokens, start) {
-  for (let index = start;index < tokens.length; index += 1) {
-    const token = tokens[index] ?? "";
-    if (token === "--")
-      return index + 1 < tokens.length ? index + 1 : -1;
-    if (token === "-v" || token === "-V")
-      return -1;
-    if (token === "-p")
-      continue;
-    return index;
-  }
-  return -1;
-}
-function firstWrapperOperand(tokens, start, optionsWithValue, skipAssignments = false) {
-  for (let index = start;index < tokens.length; index += 1) {
-    const token = tokens[index] ?? "";
-    if (token === "--")
-      return index + 1 < tokens.length ? index + 1 : -1;
-    if (skipAssignments && isEnvironmentAssignment(token))
-      continue;
-    if (!token.startsWith("-") || token === "-")
-      return index;
-    if (optionsWithValue.has(token))
-      index += 1;
-  }
-  return -1;
-}
-function skipCommandAssignments(tokens, start) {
-  let index = start;
-  while (index < tokens.length && isEnvironmentAssignment(tokens[index] ?? ""))
-    index += 1;
-  return index;
-}
-function isEnvironmentAssignment(value) {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(value);
-}
-function commandSubstitutions(command) {
-  const substitutions = [];
-  let quote;
-  let escaped = false;
-  for (let index = 0;index < command.length; index += 1) {
-    const character = command[index] ?? "";
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote === "'") {
-      if (character === "'")
-        quote = undefined;
-      continue;
-    }
-    if (character === "'" && quote === undefined) {
-      quote = "'";
-      continue;
-    }
-    if (character === '"') {
-      if (quote === '"')
-        quote = undefined;
-      else if (quote === undefined)
-        quote = '"';
-      continue;
-    }
-    if (character === "$" && command[index + 1] === "(") {
-      const nested = readParenthesizedSubstitution(command, index + 2);
-      if (nested) {
-        substitutions.push(nested.command);
-        index = nested.end;
-      }
-      continue;
-    }
-    if (character === "`") {
-      const nested = readBacktickSubstitution(command, index + 1);
-      if (nested) {
-        substitutions.push(nested.command);
-        index = nested.end;
-      }
-    }
-  }
-  return substitutions;
-}
-function readParenthesizedSubstitution(source, start) {
-  let depth = 1;
-  let quote;
-  let escaped = false;
-  for (let index = start;index < source.length; index += 1) {
-    const character = source[index] ?? "";
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote)
-        quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === "(")
-      depth += 1;
-    if (character !== ")")
-      continue;
-    depth -= 1;
-    if (depth === 0)
-      return { command: source.slice(start, index), end: index };
-  }
-  return;
-}
-function readBacktickSubstitution(source, start) {
-  let escaped = false;
-  for (let index = start;index < source.length; index += 1) {
-    const character = source[index] ?? "";
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (character === "`")
-      return { command: source.slice(start, index), end: index };
-  }
-  return;
-}
-function splitShellSegments(command) {
-  const segments = [];
-  let current = "";
-  let quote;
-  let escaped = false;
-  for (let index = 0;index < command.length; index += 1) {
-    const character = command[index] ?? "";
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      current += character;
-      if (character === quote)
-        quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      current += character;
-      continue;
-    }
-    if (character === `
-` || character === ";" || character === "|" || character === "&") {
-      if (current.trim())
-        segments.push(current.trim());
-      current = "";
-      if ((character === "|" || character === "&") && command[index + 1] === character)
-        index += 1;
-      continue;
-    }
-    current += character;
-  }
-  if (current.trim())
-    segments.push(current.trim());
-  return segments;
-}
-function shellTokens(command) {
-  const tokens = [];
-  let current = "";
-  let quote;
-  let escaped = false;
-  for (const character of command) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote)
-        quote = undefined;
-      else
-        current += character;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (/\s/.test(character)) {
-      if (current)
-        tokens.push(current);
-      current = "";
-      continue;
-    }
-    current += character;
-  }
-  if (current)
-    tokens.push(current);
-  return tokens;
-}
-
 // src/cli/core/hooks/approvals.ts
+init_git_command_policy();
 var TRUSTED_CHANNELS = new Set(["cli-tty", "opencode-ui", "host-ui"]);
 function consumeApproval(nonce, context, options = {}) {
   if (isRemoteGitContext(context)) {
@@ -3415,1150 +6637,11 @@ function isRecord3(value) {
 import { execFileSync as execFileSync3 } from "node:child_process";
 import fs11 from "node:fs";
 import path15 from "node:path";
-
-// src/cli/core/infrastructure-boundary.ts
-import fs9 from "node:fs";
-import path12 from "node:path";
-var CI_DIRECTORIES = [
-  ".github/workflows",
-  ".github/actions",
-  ".gitlab/ci",
-  ".circleci",
-  ".buildkite",
-  ".azure-pipelines",
-  ".drone",
-  ".tekton",
-  "tekton"
-];
-var INFRASTRUCTURE_DIRECTORIES = new Map([
-  ["infra", "iac"],
-  ["infrastructure", "iac"],
-  ["terraform", "iac"],
-  ["tofu", "iac"],
-  ["pulumi", "iac"],
-  ["cloudformation", "iac"],
-  ["cdk", "iac"],
-  ["deploy", "deployment"],
-  ["deployment", "deployment"],
-  ["k8s", "deployment"],
-  ["kubernetes", "deployment"],
-  ["helm", "deployment"],
-  ["charts", "deployment"],
-  ["argocd", "deployment"],
-  [".argocd", "deployment"],
-  ["flux", "deployment"],
-  [".flux", "deployment"]
-]);
-var CI_FILES = [
-  /^\.gitlab-ci\.ya?ml$/,
-  /^azure-pipelines(?:[._-].*)?\.ya?ml$/,
-  /^jenkinsfile(?:\..*)?$/,
-  /^bitbucket-pipelines\.ya?ml$/,
-  /^\.drone\.ya?ml$/,
-  /^\.travis\.ya?ml$/,
-  /^cloudbuild(?:[._-].*)?\.ya?ml$/,
-  /^appveyor\.ya?ml$/
-];
-var IAC_FILES = [
-  /\.tf(?:\.json)?$/,
-  /\.tfvars(?:\.json)?$/,
-  /\.bicep$/,
-  /^\.terraform\.lock\.hcl$/,
-  /^pulumi(?:\..+)?\.ya?ml$/,
-  /^cdk\.json$/,
-  /^samconfig\.toml$/
-];
-var DEPLOYMENT_FILES = [
-  /^chart\.ya?ml$/,
-  /^kustomization\.ya?ml$/,
-  /^skaffold\.ya?ml$/,
-  /^tiltfile$/,
-  /^serverless\.ya?ml$/,
-  /^helmfile\.ya?ml$/,
-  /^values(?:[._-].*)?\.ya?ml$/,
-  /^dockerfile(?:\..*)?$/,
-  /^containerfile(?:\..*)?$/,
-  /^(?:docker-)?compose(?:[._-].*)?\.ya?ml$/,
-  /^vercel\.json$/,
-  /^netlify\.toml$/,
-  /^fly\.toml$/,
-  /^firebase\.json$/,
-  /^railway\.(?:json|toml)$/,
-  /^appspec\.ya?ml$/,
-  /^render\.ya?ml$/
-];
-var RELEASE_FILES = [
-  /^\.npmrc$/,
-  /^\.releaserc(?:\..*)?$/,
-  /^release\.config\.[a-z0-9]+$/,
-  /^\.changeset\/config\.json$/
-];
-var DEPLOYMENT_SCRIPT = /^(?:deploy|release|publish)(?:[._-].*)?\.(?:sh|bash|zsh|ps1|cmd|bat|js|mjs|cjs|ts|py|rb)$/;
-function classifyInfrastructurePath(projectRoot, targetPath) {
-  for (const relativePath of relativeCandidates(projectRoot, targetPath)) {
-    const classification = classifyRelativePath(relativePath);
-    if (classification.protected)
-      return { ...classification, relativePath };
-  }
-  const markerScoped = classifyMarkerScopedPath(projectRoot, targetPath);
-  if (markerScoped.protected)
-    return markerScoped;
-  return { protected: false };
-}
-function classifyInfrastructureCommand(command) {
-  for (const segment of commandSegments(command)) {
-    const classification = classifyCommandSegment(segment);
-    if (classification.protected)
-      return classification;
-  }
-  return { protected: false };
-}
-function classifyRelativePath(relativePath) {
-  const normalized = normalizeRelative(relativePath);
-  if (!normalized)
-    return { protected: false };
-  if (CI_DIRECTORIES.some((directory) => normalized === directory || normalized.startsWith(`${directory}/`))) {
-    return protectedMatch("ci-cd", "directorio de automatizacion CI/CD");
-  }
-  const segments = normalized.split("/");
-  const first = segments[0] ?? "";
-  const base = segments.at(-1) ?? "";
-  const directorySurface = INFRASTRUCTURE_DIRECTORIES.get(first);
-  if (directorySurface)
-    return protectedMatch(directorySurface, `directorio raiz ${first}`);
-  if (CI_FILES.some((pattern) => pattern.test(base))) {
-    return protectedMatch("ci-cd", `definicion CI/CD ${base}`);
-  }
-  if (segments.length === 1 && /^template\.(?:ya?ml|json)$/.test(base)) {
-    return protectedMatch("iac", `plantilla declarativa ${base}`);
-  }
-  if (IAC_FILES.some((pattern) => pattern.test(base))) {
-    return protectedMatch("iac", `infraestructura como codigo ${base}`);
-  }
-  if (DEPLOYMENT_FILES.some((pattern) => pattern.test(base))) {
-    return protectedMatch("deployment", `configuracion de despliegue ${base}`);
-  }
-  if (RELEASE_FILES.some((pattern) => pattern.test(normalized) || pattern.test(base))) {
-    return protectedMatch("release", `configuracion de publicacion ${normalized}`);
-  }
-  if ((segments.length === 1 || segments.length === 2 && segments[0] === "scripts") && DEPLOYMENT_SCRIPT.test(base)) {
-    return protectedMatch("deployment", `script operativo ${normalized}`);
-  }
-  return { protected: false };
-}
-function classifyCommandSegment(segment) {
-  const normalized = segment.trim().toLowerCase().replace(/\s+/g, " ");
-  if (!normalized)
-    return { protected: false };
-  const dryRun = /(?:^|\s)--dry-run(?:=(?:true|client|server))?(?:\s|$)/.test(normalized);
-  if (isDirectPublish(normalized) && !dryRun)
-    return protectedMatch("release", "publicacion de paquete o artefacto");
-  if (isCiOrReleaseTrigger(normalized))
-    return protectedMatch("ci-cd", "disparo o modificacion de workflow/release");
-  if (isContainerPublish(normalized))
-    return protectedMatch("release", "publicacion de imagen o chart");
-  if (isTerraformMutation(normalized))
-    return protectedMatch("iac", "operacion mutante de Terraform/OpenTofu");
-  if (isPulumiMutation(normalized))
-    return protectedMatch("iac", "operacion mutante de Pulumi");
-  if (isKubectlMutation(normalized) && !dryRun)
-    return protectedMatch("deployment", "operacion mutante de kubectl");
-  if (isHelmMutation(normalized) && !dryRun)
-    return protectedMatch("deployment", "operacion mutante de Helm");
-  if (isCloudDeployment(normalized))
-    return protectedMatch("deployment", "operacion de despliegue cloud");
-  if (isDeploymentTask(normalized) && !(dryRun && isDirectPublish(normalized))) {
-    return protectedMatch("deployment", "tarea o script de deploy/release/publish");
-  }
-  return { protected: false };
-}
-function isDirectPublish(command) {
-  return /\b(?:npm|pnpm|bun)\b[^;&|]*\bpublish\b/.test(command) || /\byarn\b[^;&|]*\bpublish\b/.test(command) || /\bsemantic-release\b/.test(command) || /\bchangeset\s+publish\b/.test(command) || /\bcargo\s+publish\b/.test(command) || /\bmvn(?:w)?\b[^;&|]*\bdeploy\b/.test(command) || /\bgradle(?:w)?\b[^;&|]*\bpublish\b/.test(command) || /\bdotnet\s+nuget\s+push\b/.test(command) || /\btwine\s+upload\b/.test(command) || /\bgem\s+push\b/.test(command);
-}
-function isCiOrReleaseTrigger(command) {
-  return /\bgh\b[^;&|]*\bworkflow\s+run\b/.test(command) || /\bgh\b[^;&|]*\brun\s+rerun\b/.test(command) || /\bgh\b[^;&|]*\brelease\s+(?:create|upload|edit|delete)\b/.test(command) || /\bglab\b[^;&|]*\b(?:ci\s+run|pipeline\s+(?:run|retry|cancel))\b/.test(command);
-}
-function isContainerPublish(command) {
-  return /\b(?:docker|podman)\b[^;&|]*\bpush\b/.test(command) || /\bdocker\b[^;&|]*\bbuildx\s+build\b[^;&|]*\s--push(?:\s|$)/.test(command) || /\bhelm\b[^;&|]*\bpush\b/.test(command);
-}
-function isTerraformMutation(command) {
-  if (!/\b(?:terraform|tofu)\b/.test(command))
-    return false;
-  if (/\bfmt\b/.test(command))
-    return !/(?:^|\s)-(?:check|-check)(?:\s|$)/.test(command);
-  if (/\binit\b/.test(command)) {
-    return /(?:^|\s)-(?:upgrade|-upgrade|migrate-state|-migrate-state|reconfigure|-reconfigure)(?:\s|$)/.test(command);
-  }
-  return /\b(?:apply|destroy|import|taint|untaint|force-unlock)\b/.test(command) || /\bstate\s+(?:mv|rm|push|replace-provider)\b/.test(command) || /\bworkspace\s+(?:new|delete)\b/.test(command);
-}
-function isPulumiMutation(command) {
-  return /\bpulumi\b[^;&|]*\b(?:up|destroy|import|refresh|cancel)\b/.test(command) || /\bpulumi\b[^;&|]*\bstate\s+(?:delete|move|repair|unprotect)\b/.test(command);
-}
-function isKubectlMutation(command) {
-  return /\bkubectl\b[^;&|]*\b(?:apply|create|delete|replace|patch|edit|set|scale|rollout|annotate|label|taint|drain|cordon|uncordon|expose|autoscale|exec|cp)\b/.test(command);
-}
-function isHelmMutation(command) {
-  return /\bhelm\b[^;&|]*\b(?:install|upgrade|uninstall|rollback)\b/.test(command);
-}
-function isCloudDeployment(command) {
-  return /\baws\b[^;&|]*\bcloudformation\s+(?:deploy|create-stack|update-stack|delete-stack|create-change-set|execute-change-set)\b/.test(command) || /\baz\b[^;&|]*\bdeployment\b[^;&|]*\b(?:create|delete)\b/.test(command) || /\bgcloud\b[^;&|]*\b(?:run\s+deploy|app\s+deploy|functions\s+deploy|deploy\s+releases\s+create)\b/.test(command) || /\b(?:firebase|vercel|netlify|fly|flyctl|railway|serverless|sls|sam|cdk)\b[^;&|]*\b(?:deploy|remove|destroy|up|promote|rollback|publish)\b/.test(command) || /\bheroku\b[^;&|]*\b(?:container:(?:push|release)|releases:rollback)\b/.test(command);
-}
-function isDeploymentTask(command) {
-  return /\b(?:npm|pnpm|yarn|bun)\b[^;&|]*\b(?:run\s+)?(?:deploy|release|publish)(?::[a-z0-9._-]+)?\b/.test(command) || /\b(?:make|just|task)\s+(?:deploy|release|publish)(?::[a-z0-9._-]+)?\b/.test(command) || /(?:^|\s)(?:\.\/)?(?:scripts\/)?(?:deploy|release|publish)(?:[._-][^\s;&|]+)?(?:\s|$)/.test(command);
-}
-function commandSegments(command) {
-  return command.split(/(?:&&|\|\||[;|\n])/).map((segment) => segment.trim()).filter(Boolean);
-}
-function protectedMatch(surface, evidence) {
-  return { protected: true, surface, evidence };
-}
-function relativeCandidates(projectRoot, targetPath) {
-  const lexicalRoot = path12.resolve(projectRoot);
-  const lexicalTarget = path12.resolve(targetPath);
-  const canonicalRoot = canonicalPlannedPath(lexicalRoot);
-  const canonicalTarget = canonicalPlannedPath(lexicalTarget);
-  const candidates = [
-    relativeInside(lexicalRoot, lexicalTarget),
-    relativeInside(canonicalRoot, canonicalTarget)
-  ].filter((value) => value !== undefined);
-  return [...new Set(candidates)];
-}
-function classifyMarkerScopedPath(projectRoot, targetPath) {
-  const pairs = [
-    [path12.resolve(projectRoot), path12.resolve(targetPath)],
-    [canonicalPlannedPath(projectRoot), canonicalPlannedPath(targetPath)]
-  ];
-  for (const [root, target] of pairs) {
-    if (relativeInside(root, target) === undefined)
-      continue;
-    let current = fs9.existsSync(target) && fs9.statSync(target).isDirectory() ? target : path12.dirname(target);
-    while (relativeInside(root, current) !== undefined) {
-      if (fileExistsAny(current, ["Chart.yaml", "Chart.yml"])) {
-        return { ...protectedMatch("deployment", "archivo dentro de un chart Helm"), relativePath: normalizeRelative(path12.relative(root, target)) };
-      }
-      if (fileExistsAny(current, ["Pulumi.yaml", "Pulumi.yml"])) {
-        return { ...protectedMatch("iac", "archivo dentro de un proyecto Pulumi"), relativePath: normalizeRelative(path12.relative(root, target)) };
-      }
-      if (fs9.existsSync(path12.join(current, "cdk.json"))) {
-        const relative = normalizeRelative(path12.relative(current, target));
-        const first = relative.split("/")[0] ?? "";
-        if (["bin", "lib", "src", "stacks"].includes(first)) {
-          return { ...protectedMatch("iac", "codigo de infraestructura AWS CDK"), relativePath: normalizeRelative(path12.relative(root, target)) };
-        }
-      }
-      if (current === root)
-        break;
-      const parent = path12.dirname(current);
-      if (parent === current)
-        break;
-      current = parent;
-    }
-  }
-  return { protected: false };
-}
-function fileExistsAny(directory, names) {
-  return names.some((name) => {
-    try {
-      return fs9.statSync(path12.join(directory, name)).isFile();
-    } catch {
-      return false;
-    }
-  });
-}
-function relativeInside(root, target) {
-  const relative = path12.relative(root, target);
-  if (relative === "")
-    return "";
-  if (relative.startsWith("..") || path12.isAbsolute(relative))
-    return;
-  return relative;
-}
-function canonicalPlannedPath(value) {
-  const resolved = path12.resolve(value);
-  let current = resolved;
-  const suffix = [];
-  while (!fs9.existsSync(current)) {
-    const parent = path12.dirname(current);
-    if (parent === current)
-      break;
-    suffix.unshift(path12.basename(current));
-    current = parent;
-  }
-  try {
-    return path12.resolve(fs9.realpathSync(current), ...suffix);
-  } catch {
-    return resolved;
-  }
-}
-function normalizeRelative(value) {
-  return value.split(path12.sep).join("/").replace(/^\.\//, "").toLowerCase();
-}
-
-// src/cli/core/documentation-boundary.ts
-import path13 from "node:path";
-var MARKDOWN_EXTENSIONS = new Set([".md", ".mdx", ".markdown", ".adoc", ".rst"]);
-var ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
-  "assets",
-  "examples",
-  "example",
-  "fixtures",
-  "fixture",
-  "test",
-  "tests",
-  "__tests__",
-  ".github"
-]);
-var ALLOWED_NESTED_DIRECTORIES = new Set([
-  "fixtures",
-  "fixture",
-  "__fixtures__",
-  "examples",
-  "example",
-  "__examples__",
-  "__tests__",
-  "__snapshots__"
-]);
-var PUBLIC_DOCUMENT_STEMS = /^(?:readme|license|licence|notice|changelog|contributing|security|support|governance|code[-_]of[-_]conduct|third[-_]party[-_]notices|agents|claude)(?:[._-][a-z0-9-]+)*$/i;
-function classifyDocumentationPath(projectRoot, targetPath) {
-  const root = path13.resolve(projectRoot);
-  const absolute = path13.resolve(root, targetPath);
-  const relative = path13.relative(root, absolute);
-  if (relative === "" || relative.startsWith("..") || path13.isAbsolute(relative))
-    return { protected: false };
-  const portable = relative.split(path13.sep).join("/");
-  const segments = portable.split("/");
-  const basename = segments.at(-1) ?? "";
-  const extension = path13.extname(basename).toLowerCase();
-  if (!MARKDOWN_EXTENSIONS.has(extension))
-    return { protected: false, relativePath: portable };
-  const stem = basename.slice(0, -extension.length);
-  if (PUBLIC_DOCUMENT_STEMS.test(stem)) {
-    return { protected: false, relativePath: portable, reason: "README/licencia/gobernanza publica permitida" };
-  }
-  const directories = segments.slice(0, -1).map((segment) => segment.toLowerCase());
-  if (ALLOWED_TOP_LEVEL_DIRECTORIES.has(directories[0] ?? "") || directories.some((segment) => ALLOWED_NESTED_DIRECTORIES.has(segment))) {
-    return { protected: false, relativePath: portable, reason: "asset gestionado, ejemplo o fixture permitido" };
-  }
-  return { protected: true, relativePath: portable, reason: "Markdown bloqueado por defecto fuera de la allowlist publica" };
-}
-function isProtectedDocumentationPath(projectRoot, targetPath) {
-  return classifyDocumentationPath(projectRoot, targetPath).protected;
-}
-function parsePatchOperations(patchText) {
-  const operations = [];
-  let pendingUpdate;
-  const flushUpdate = () => {
-    if (pendingUpdate)
-      operations.push({ kind: "update", path: pendingUpdate });
-    pendingUpdate = undefined;
-  };
-  for (const line of patchText.split(/\r?\n/)) {
-    let match = line.match(/^\*\*\* Add File: (.+)$/);
-    if (match) {
-      flushUpdate();
-      operations.push({ kind: "add", path: match[1].trim() });
-      continue;
-    }
-    match = line.match(/^\*\*\* Delete File: (.+)$/);
-    if (match) {
-      flushUpdate();
-      operations.push({ kind: "delete", path: match[1].trim() });
-      continue;
-    }
-    match = line.match(/^\*\*\* Update File: (.+)$/);
-    if (match) {
-      flushUpdate();
-      pendingUpdate = match[1].trim();
-      continue;
-    }
-    match = line.match(/^\*\*\* Move to: (.+)$/);
-    if (match && pendingUpdate) {
-      operations.push({ kind: "move-out", path: pendingUpdate });
-      operations.push({ kind: "move-in", path: match[1].trim() });
-      pendingUpdate = undefined;
-    }
-  }
-  flushUpdate();
-  return operations;
-}
-function isRemovalOperation(kind) {
-  return kind === "delete" || kind === "move-out";
-}
-
-// src/cli/core/git-commit-message.ts
-var COMMIT_TYPES = [
-  "feat",
-  "fix",
-  "docs",
-  "style",
-  "refactor",
-  "perf",
-  "test",
-  "build",
-  "ci",
-  "chore",
-  "revert",
-  "security"
-];
-var MAX_COMMIT_SUBJECT_LENGTH = 82;
-var COMMIT_TYPE_PATTERN = COMMIT_TYPES.join("|");
-var SCOPE_SEGMENT = String.raw`[\p{L}\p{N}][\p{L}\p{M}\p{N}]*`;
-var COMMIT_SUBJECT_PATTERN = new RegExp(String.raw`^(\S+) (${COMMIT_TYPE_PATTERN})(?:\((${SCOPE_SEGMENT}(?:-${SCOPE_SEGMENT})*)\))?(!)?: (\S(?:.*\S)?)$`, "u");
-var GRAPHEME_SEGMENTER = new Intl.Segmenter("es", { granularity: "grapheme" });
-function isValidCommitSubject(subject) {
-  if (!subject || subject.includes(`
-`) || subject.includes("\r"))
-    return false;
-  if ([...subject].length > MAX_COMMIT_SUBJECT_LENGTH)
-    return false;
-  const match = COMMIT_SUBJECT_PATTERN.exec(subject);
-  if (!match)
-    return false;
-  return isEmojiGrapheme(match[1] ?? "");
-}
-function isEmojiGrapheme(value) {
-  if (!value || /\s/u.test(value))
-    return false;
-  const graphemes = [...GRAPHEME_SEGMENTER.segment(value)];
-  if (graphemes.length !== 1 || graphemes[0]?.segment !== value)
-    return false;
-  return /\p{Extended_Pictographic}/u.test(value) || /^(?:\p{Regional_Indicator}){2}$/u.test(value) || /^[#*0-9]\uFE0F?\u20E3$/u.test(value);
-}
-
-// src/cli/core/hooks/secret-scan.ts
-import fs10 from "node:fs";
-import path14 from "node:path";
-import { createHash as createHash5 } from "node:crypto";
-var SECRET_KINDS = [
-  "private-key",
-  "aws-access-key",
-  "credential-assignment",
-  "bearer-token",
-  "env-file"
-];
-var PRIVATE_KEY_SOURCE = ["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" ");
-var CREDENTIAL_NAME_SOURCE = "api[_-]?key|access[_-]?token|secret[_-]?key|password";
-var CREDENTIAL_ASSIGNMENT_SOURCE = `(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])([^\\r\\n"']{16,})\\3`;
-var FILE_PATTERNS = [
-  { kind: "private-key", source: PRIVATE_KEY_SOURCE },
-  { kind: "aws-access-key", source: "\\b(AKIA|ASIA)[A-Z0-9]{16}\\b" },
-  {
-    kind: "credential-assignment",
-    source: CREDENTIAL_ASSIGNMENT_SOURCE,
-    flags: "i"
-  },
-  { kind: "bearer-token", source: "\\bBearer\\s+[A-Za-z0-9._~+/=-]{20,}" }
-];
-var PAYLOAD_PATTERNS = FILE_PATTERNS;
-var PRIVATE_KEY_BLOCK = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g;
-var PRIVATE_KEY_HEADER = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g;
-var AWS_ACCESS_KEY = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g;
-var BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g;
-var CREDENTIAL_ASSIGNMENT = new RegExp(CREDENTIAL_ASSIGNMENT_SOURCE, "gi");
-var SECRET_KIND_SET = new Set(SECRET_KINDS);
-var SECRET_PATCH_SUMMARY_BRAND = Symbol("malahor.secret-patch-summary");
-var PATCH_EVIDENCE = new WeakMap;
-var MAX_SCANNED_FILE_BYTES = 512 * 1024;
-var MAX_PATCH_FILES = 100;
-var MAX_FINDINGS_PER_KIND = 1e6;
-var MAX_EXPORTED_FINDINGS = 100;
-var MAX_REMEDIATION_LINE_CHARS = 500;
-var SYNTHETIC_VALUE_EXPRESSION = '["synthetic", "fixture", "credential"].join("-")';
-var SYNTHETIC_VALUE_PATTERN = /^synthetic[-_][A-Za-z0-9._-]{8,80}$/i;
-var DIRECT_SYNTHETIC_ASSIGNMENT = new RegExp(`^(\\s*(?:(?:export\\s+)?(?:const|let)\\s+)?)(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\4([,;]?\\s*)$`, "i");
-var SERIALIZED_DECLARATION = /^(\s*(?:(?:export\s+)?(?:const|let))\s+([A-Za-z_$][A-Za-z0-9_$]{0,127})\s*=\s*)(["'`])(.+)\3(;?\s*)$/;
-var SERIALIZED_SYNTHETIC_ASSIGNMENT = new RegExp(`^(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\3$`, "i");
-function detectFileSecretCounts(content, filePath) {
-  const counts = countPatterns(content, FILE_PATTERNS);
-  if (filePath && /^\.env(\.|$)/.test(path14.basename(filePath)))
-    counts["env-file"] = 1;
-  return counts;
-}
-function detectFileSecretFindings(content, filePath, displayPath = path14.basename(filePath)) {
-  const findings = [];
-  const lines = content.split(/\r?\n/);
-  const starts = [0];
-  for (let index = 0;index < content.length; index += 1) {
-    if (content[index] === `
-`)
-      starts.push(index + 1);
-  }
-  const lineAt = (offset) => {
-    let low = 0;
-    let high = starts.length;
-    while (low + 1 < high) {
-      const middle = low + high >>> 1;
-      if (starts[middle] <= offset)
-        low = middle;
-      else
-        high = middle;
-    }
-    return low;
-  };
-  const matched = FILE_PATTERNS.flatMap((pattern) => {
-    const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
-    return [...content.matchAll(new RegExp(pattern.source, flags))].map((match) => ({ pattern, match, startLine: lineAt(match.index ?? 0) }));
-  }).sort((a, b) => (a.match.index ?? 0) - (b.match.index ?? 0));
-  for (const item of matched.slice(0, MAX_EXPORTED_FINDINGS)) {
-    const index = item.startLine;
-    const line = lines[index] ?? "";
-    const match = item.match;
-    const onOneLine = !match[0].includes(`
-`) && !match[0].includes("\r");
-    const localMatch = onOneLine ? Object.assign([...match], {
-      index: (match.index ?? 0) - starts[index],
-      input: line
-    }) : undefined;
-    const lineFindingCount = matched.filter((other) => other.startLine === index).length;
-    const remediation = item.pattern.kind === "credential-assignment" ? localMatch && line.includes(match[0]) ? buildSyntheticFixtureRemediation(line, filePath, displayPath, index + 1, localMatch, lineFindingCount) : removalRemediation(displayPath, index + 1, "unsupported-syntax") : undefined;
-    findings.push({
-      kind: item.pattern.kind,
-      path: displayPath,
-      line: index + 1,
-      ...remediation ? { remediation } : {}
-    });
-  }
-  if (/^\.env(\.|$)/.test(path14.basename(filePath)) && !findings.some((finding) => finding.kind === "env-file")) {
-    findings.push({ kind: "env-file", path: displayPath, line: 1 });
-  }
-  return findings;
-}
-function detectPayloadSecretKinds(content) {
-  return secretKinds(countPatterns(content, PAYLOAD_PATTERNS));
-}
-function redactPayloadSecrets(content) {
-  const kinds = new Set;
-  let value = content.replace(PRIVATE_KEY_BLOCK, () => {
-    kinds.add("private-key");
-    return "<redacted:private-key>";
-  });
-  value = value.replace(PRIVATE_KEY_HEADER, () => {
-    kinds.add("private-key");
-    return "<redacted:private-key>";
-  });
-  value = value.replace(AWS_ACCESS_KEY, () => {
-    kinds.add("aws-access-key");
-    return "<redacted:aws-access-key>";
-  });
-  value = value.replace(BEARER_TOKEN, () => {
-    kinds.add("bearer-token");
-    return "Bearer <redacted:bearer-token>";
-  });
-  value = value.replace(CREDENTIAL_ASSIGNMENT, (_match, name, operator, quote) => {
-    kinds.add("credential-assignment");
-    return `${name}${operator}${quote}<redacted:credential-assignment>${quote}`;
-  });
-  return { value, kinds: SECRET_KINDS.filter((kind) => kinds.has(kind)) };
-}
-function isPotentialSecretPath(target) {
-  const normalized = target.replaceAll("\\", "/");
-  const base = path14.basename(normalized);
-  if (base === ".env.example")
-    return false;
-  return /(^|\/)\.env(\.|$)/.test(normalized) || /(^|\/)\.ssh\//.test(normalized) || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized) || /\.(pem|p12|pfx|key)$/i.test(base);
-}
-function secretKinds(counts) {
-  return SECRET_KINDS.filter((kind) => (counts[kind] ?? 0) > 0);
-}
-function buildSecretPatchSummary(patchText, cwd, binding) {
-  const parsed = parsePatchSections(patchText);
-  const root = path14.resolve(cwd);
-  const patchHash = digest(patchText);
-  const fail = (reason, code = "PATCH_NOT_EVALUABLE", section, safePath, hunk) => {
-    const failure = {
-      code,
-      reason,
-      ...section ? { operation: section.operation } : {},
-      ...safePath ? { path: safePath } : {},
-      ...hunk ? { hunk } : {}
-    };
-    return brandedSummary(false, [], { root, binding, patchHash, prestate: [] }, failure);
-  };
-  if (parsed.failure)
-    return fail(parsed.failure, parsed.failure === "file-unavailable" ? "SECURITY_CONTROL_UNAVAILABLE" : "PATCH_NOT_EVALUABLE");
-  if (parsed.sections.length === 0 || parsed.sections.length > MAX_PATCH_FILES)
-    return fail("invalid-structure");
-  const seen = new Set;
-  const files = [];
-  const prestate = [];
-  for (const section of parsed.sections) {
-    const absolute = path14.resolve(root, section.path);
-    if (!section.path || path14.isAbsolute(section.path) || /[\\\u0000-\u001f\u007f]/.test(section.path) || !isWithin2(absolute, root) || absolute === root)
-      return fail("invalid-path", "PATCH_NOT_EVALUABLE", section);
-    const relative = path14.relative(root, absolute).split(path14.sep).join("/");
-    if (seen.has(absolute))
-      return fail("duplicate-target", "PATCH_NOT_EVALUABLE", section, relative);
-    seen.add(absolute);
-    if (!pathComponentsAreRegular(root, absolute))
-      return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
-    if (section.operation === "add") {
-      if (lstatIfExists(absolute) !== null)
-        return fail("file-unavailable", "PATCH_NOT_EVALUABLE", section, relative);
-      const added = section.added.join(`
-`);
-      if (Buffer.byteLength(added) > MAX_SCANNED_FILE_BYTES)
-        return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
-      files.push({
-        path: relative,
-        operation: section.operation,
-        before: {},
-        after: detectFileSecretCounts(added, absolute)
-      });
-      prestate.push({ absolute, hash: null });
-      continue;
-    }
-    const current = readRegularTextFile(absolute);
-    if (current === null)
-      return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
-    const before = detectFileSecretCounts(current.content, absolute);
-    let after = {};
-    if (section.operation === "update") {
-      const simulated = simulateHunks(current.content, section.hunks);
-      if (!simulated.ok)
-        return fail(simulated.reason, "PATCH_NOT_EVALUABLE", section, relative, simulated.hunk);
-      if (Buffer.byteLength(simulated.content) > MAX_SCANNED_FILE_BYTES) {
-        return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
-      }
-      after = detectFileSecretCounts(simulated.content, absolute);
-    }
-    files.push({ path: relative, operation: section.operation, before, after });
-    prestate.push({ absolute, hash: current.hash });
-  }
-  return brandedSummary(true, files, { root, binding, patchHash, prestate });
-}
-function parseSecretPatchSummary(value) {
-  if (typeof value !== "object" || value === null || !PATCH_EVIDENCE.has(value) || value[SECRET_PATCH_SUMMARY_BRAND] !== true)
-    return null;
-  const record = objectValue(value);
-  const evidence = PATCH_EVIDENCE.get(value);
-  if (!evidence || digest(JSON.stringify(value)) !== evidence.summaryHash)
-    return null;
-  if (!record || record.version !== 1 || typeof record.evaluable !== "boolean" || !Array.isArray(record.files) || record.files.length > MAX_PATCH_FILES || record.evaluable && record.files.length === 0)
-    return null;
-  const seen = new Set;
-  const files = [];
-  for (const item of record.files) {
-    const file = objectValue(item);
-    if (!file || typeof file.path !== "string" || !file.path.trim() || file.path.length > 4096 || !["add", "update", "delete"].includes(String(file.operation)))
-      return null;
-    if (seen.has(file.path))
-      return null;
-    seen.add(file.path);
-    const before = parseSecretCounts(file.before);
-    const after = parseSecretCounts(file.after);
-    if (!before || !after)
-      return null;
-    files.push({
-      path: file.path,
-      operation: file.operation,
-      before,
-      after
-    });
-  }
-  const failure = objectValue(record.failure);
-  return {
-    version: 1,
-    evaluable: record.evaluable,
-    files,
-    ...failure && typeof failure.code === "string" && typeof failure.reason === "string" ? { failure } : {}
-  };
-}
-function revalidateSecretPatchSummary(value, cwd, binding) {
-  const summary = parseSecretPatchSummary(value);
-  const evidence = PATCH_EVIDENCE.get(value);
-  if (!summary?.evaluable || !evidence || evidence.root !== path14.resolve(cwd))
-    return false;
-  if (JSON.stringify(evidence.binding ?? null) !== JSON.stringify(binding ?? null))
-    return false;
-  for (const item of evidence.prestate) {
-    if (!pathComponentsAreRegular(evidence.root, item.absolute))
-      return false;
-    if (item.hash === null) {
-      if (lstatIfExists(item.absolute) !== null)
-        return false;
-    } else if (readRegularTextFile(item.absolute)?.hash !== item.hash)
-      return false;
-  }
-  return true;
-}
-function countPatterns(content, patterns) {
-  const counts = {};
-  for (const pattern of patterns) {
-    const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
-    const count = [...content.matchAll(new RegExp(pattern.source, flags))].length;
-    if (count > 0)
-      counts[pattern.kind] = count;
-  }
-  return counts;
-}
-function parsePatchSections(patchText) {
-  const sections = [];
-  if (Buffer.byteLength(patchText) > MAX_SCANNED_FILE_BYTES)
-    return { sections, failure: "file-unavailable" };
-  const lines = patchText.split(/\r?\n/);
-  if (lines.at(-1) === "")
-    lines.pop();
-  if (lines.shift() !== "*** Begin Patch" || lines.pop() !== "*** End Patch") {
-    return { sections, failure: "invalid-structure" };
-  }
-  let current;
-  let hunk;
-  for (const line of lines) {
-    let match = line.match(/^\*\*\* (Add|Update|Delete) File: (.+)$/);
-    if (match) {
-      if (current)
-        sections.push(current);
-      current = {
-        operation: match[1].toLowerCase(),
-        path: match[2].trim(),
-        added: [],
-        hunks: []
-      };
-      hunk = undefined;
-      if (!current.path)
-        return { sections, failure: "invalid-structure" };
-      continue;
-    }
-    if (!current)
-      return { sections, failure: "invalid-structure" };
-    if (line.startsWith("***"))
-      return { sections, failure: "unsupported-operation" };
-    if (current.operation === "delete")
-      return { sections, failure: "invalid-structure" };
-    if (current.operation === "add") {
-      if (!line.startsWith("+"))
-        return { sections, failure: "invalid-structure" };
-      current.added.push(line.slice(1));
-      continue;
-    }
-    if (line === "@@" || line.startsWith("@@ ")) {
-      hunk = { before: [], after: [] };
-      current.hunks.push(hunk);
-      continue;
-    }
-    if (!hunk)
-      return { sections, failure: "invalid-structure" };
-    if (line.startsWith("+"))
-      hunk.after.push(line.slice(1));
-    else if (line.startsWith("-"))
-      hunk.before.push(line.slice(1));
-    else if (line.startsWith(" ")) {
-      hunk.before.push(line.slice(1));
-      hunk.after.push(line.slice(1));
-    } else
-      return { sections, failure: "invalid-structure" };
-  }
-  if (current)
-    sections.push(current);
-  if (sections.some((section) => section.operation === "update" && (section.hunks.length === 0 || section.hunks.some((item) => item.before.length === 0)))) {
-    return { sections, failure: "invalid-structure" };
-  }
-  return { sections };
-}
-function readRegularTextFile(filePath) {
-  let fd;
-  try {
-    fd = fs10.openSync(filePath, fs10.constants.O_RDONLY | fs10.constants.O_NOFOLLOW);
-    const before = fs10.fstatSync(fd);
-    if (!before.isFile() || before.size > MAX_SCANNED_FILE_BYTES)
-      return null;
-    const bytes = fs10.readFileSync(fd);
-    const after = fs10.fstatSync(fd);
-    const byPath = fs10.lstatSync(filePath);
-    if (!byPath.isFile() || before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs || before.size !== after.size || before.dev !== byPath.dev || before.ino !== byPath.ino || bytes.length > MAX_SCANNED_FILE_BYTES)
-      return null;
-    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    if (content.includes("\x00") || content.includes("\r"))
-      return null;
-    return { content, hash: digest(bytes) };
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined)
-      fs10.closeSync(fd);
-  }
-}
-function simulateHunks(content, hunks) {
-  const lines = content.split(`
-`);
-  let cursor = 0;
-  for (let index = 0;index < hunks.length; index += 1) {
-    const hunk = hunks[index];
-    const matches = [];
-    for (let offset = cursor;offset <= lines.length - hunk.before.length; offset += 1) {
-      if (hunk.before.every((line, position) => lines[offset + position] === line))
-        matches.push(offset);
-      if (matches.length > 1)
-        break;
-    }
-    if (matches.length !== 1)
-      return { ok: false, reason: matches.length ? "ambiguous-context" : "context-mismatch", hunk: index + 1 };
-    const at = matches[0];
-    lines.splice(at, hunk.before.length, ...hunk.after);
-    cursor = at + hunk.after.length;
-  }
-  return { ok: true, content: lines.join(`
-`) };
-}
-function pathComponentsAreRegular(root, target) {
-  try {
-    if (!fs10.lstatSync(root).isDirectory())
-      return false;
-    if (fs10.realpathSync(root) !== root)
-      return false;
-    let directory = root;
-    const components = path14.relative(root, path14.dirname(target)).split(path14.sep).filter(Boolean);
-    for (const component of components) {
-      directory = path14.join(directory, component);
-      if (!fs10.lstatSync(directory).isDirectory())
-        return false;
-    }
-    const targetStat = lstatIfExists(target);
-    return targetStat === null || targetStat.isFile();
-  } catch {
-    return false;
-  }
-}
-function lstatIfExists(target) {
-  try {
-    return fs10.lstatSync(target);
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return null;
-    throw error;
-  }
-}
-function digest(value) {
-  return createHash5("sha256").update(value).digest("hex");
-}
-function parseSecretCounts(value) {
-  const record = objectValue(value);
-  if (!record)
-    return null;
-  const counts = {};
-  for (const [kind, count] of Object.entries(record)) {
-    if (!SECRET_KIND_SET.has(kind) || typeof count !== "number" || !Number.isSafeInteger(count) || count < 0 || count > MAX_FINDINGS_PER_KIND)
-      return null;
-    if (count > 0)
-      counts[kind] = count;
-  }
-  return counts;
-}
-function containsOtherPayloadSecret(before, replacement) {
-  const withoutMarker = before.replaceAll("[VALOR SINTETICO OCULTO]", "x");
-  return detectPayloadSecretKinds(withoutMarker).length > 0 || detectPayloadSecretKinds(replacement).length > 0;
-}
-function buildSyntheticFixtureRemediation(line, filePath, displayPath, lineNumber, match, lineFindingCount) {
-  if (!isSyntheticFixturePath(filePath)) {
-    return removalRemediation(displayPath, lineNumber, "unsupported-file-type");
-  }
-  if (line.length > MAX_REMEDIATION_LINE_CHARS) {
-    return removalRemediation(displayPath, lineNumber, "line-too-long");
-  }
-  if (lineFindingCount !== 1) {
-    return removalRemediation(displayPath, lineNumber, "multiple-findings");
-  }
-  const detectedValue = match[4];
-  if (typeof detectedValue !== "string" || !SYNTHETIC_VALUE_PATTERN.test(detectedValue)) {
-    return removalRemediation(displayPath, lineNumber, "value-not-demonstrably-synthetic");
-  }
-  const direct = DIRECT_SYNTHETIC_ASSIGNMENT.exec(line);
-  if (direct) {
-    const [, prefix = "", credentialName = "", operator = "", quote = "", , suffix = ""] = direct;
-    const before = `${prefix}${credentialName}${operator}${quote}[VALOR SINTETICO OCULTO]${quote}${suffix}`;
-    const replacement = `${prefix}${credentialName}${operator}${SYNTHETIC_VALUE_EXPRESSION}${suffix}`;
-    if (containsOtherPayloadSecret(before, replacement)) {
-      return removalRemediation(displayPath, lineNumber, "multiple-findings");
-    }
-    return replacementRemediation({
-      path: displayPath,
-      line: lineNumber,
-      anchor: credentialName,
-      before,
-      replacement
-    });
-  }
-  const declaration = SERIALIZED_DECLARATION.exec(line);
-  if (declaration) {
-    const [, prefix = "", variableName = "", outerQuote = "", serialized = "", suffix = ""] = declaration;
-    const assignment = SERIALIZED_SYNTHETIC_ASSIGNMENT.exec(serialized);
-    if (assignment) {
-      const [, credentialName = "", operator = "", innerQuote = ""] = assignment;
-      const credentialExpression = credentialNameExpression(credentialName);
-      if (credentialExpression) {
-        const replacementExpression = [
-          credentialExpression,
-          JSON.stringify(`${operator}${innerQuote}`),
-          SYNTHETIC_VALUE_EXPRESSION,
-          JSON.stringify(innerQuote)
-        ].join(", ");
-        const before = `${prefix}${outerQuote}${credentialName}${operator}${innerQuote}[VALOR SINTETICO OCULTO]${innerQuote}${outerQuote}${suffix}`;
-        const replacement = `${prefix}[${replacementExpression}].join("")${suffix}`;
-        if (containsOtherPayloadSecret(before, replacement)) {
-          return removalRemediation(displayPath, lineNumber, "multiple-findings");
-        }
-        return replacementRemediation({
-          path: displayPath,
-          line: lineNumber,
-          anchor: variableName,
-          before,
-          replacement
-        });
-      }
-    }
-  }
-  return buildComplexStringRemediation(line, filePath, displayPath, lineNumber, match) ?? removalRemediation(displayPath, lineNumber, "unsupported-syntax");
-}
-function buildComplexStringRemediation(line, filePath, displayPath, lineNumber, match) {
-  if (/\.[cm]?[jt]sx$/i.test(path14.basename(filePath)))
-    return;
-  const matchStart = match.index;
-  const credentialName = match[1];
-  const operator = match[2];
-  const innerQuote = match[3];
-  const detectedValue = match[4];
-  if (matchStart === undefined || !credentialName || operator === undefined || !innerQuote || !detectedValue) {
-    return;
-  }
-  const matchEnd = matchStart + match[0].length;
-  const literal = scanSourceStringLiterals(line).find((item) => item.contentStart <= matchStart && item.contentEnd >= matchEnd);
-  if (!literal || literal.interpolated || !isExpressionStringContext(line, literal))
-    return;
-  const leading = decodeStringFragment(line.slice(literal.contentStart, matchStart), literal.quote);
-  const trailing = decodeStringFragment(line.slice(matchEnd, literal.contentEnd), literal.quote);
-  const credentialExpression = credentialNameExpression(credentialName);
-  const before = sanitizedLineReference(line, match, detectedValue);
-  if (leading === undefined || trailing === undefined || !credentialExpression || !before)
-    return;
-  const expression = [
-    JSON.stringify(leading),
-    credentialExpression,
-    JSON.stringify(`${operator}${innerQuote}`),
-    SYNTHETIC_VALUE_EXPRESSION,
-    JSON.stringify(`${innerQuote}${trailing}`)
-  ].join(", ");
-  const replacement = `${line.slice(0, literal.start)}[${expression}].join("")${line.slice(literal.end)}`;
-  if (before.includes(detectedValue) || replacement.includes(detectedValue) || containsOtherPayloadSecret(before, replacement))
-    return;
-  return replacementRemediation({
-    path: displayPath,
-    line: lineNumber,
-    anchor: sourceAnchor(line.slice(0, literal.start), credentialName),
-    before,
-    replacement
-  });
-}
-function scanSourceStringLiterals(line) {
-  const literals = [];
-  let index = 0;
-  while (index < line.length) {
-    if (line[index] === "/" && line[index + 1] === "/")
-      break;
-    const quote = line[index];
-    if (quote !== '"' && quote !== "'" && quote !== "`") {
-      index += 1;
-      continue;
-    }
-    const start = index;
-    let interpolated = false;
-    index += 1;
-    while (index < line.length) {
-      const current = line[index];
-      if (current === "\\") {
-        index += 2;
-        continue;
-      }
-      if (quote === "`" && current === "$" && line[index + 1] === "{")
-        interpolated = true;
-      if (current === quote) {
-        literals.push({
-          start,
-          contentStart: start + 1,
-          contentEnd: index,
-          end: index + 1,
-          quote,
-          interpolated
-        });
-        index += 1;
-        break;
-      }
-      index += 1;
-    }
-    if (index >= line.length && line[index - 1] !== quote)
-      return [];
-  }
-  return literals;
-}
-function isExpressionStringContext(line, literal) {
-  const before = line.slice(0, literal.start).trimEnd();
-  const after = line.slice(literal.end).trimStart();
-  if (!before || /^(?:\/\/|\/\*|\*)/.test(before.trimStart()))
-    return false;
-  if (/\b(?:import|interface|enum|type)\b/.test(before))
-    return false;
-  if (after.startsWith(":"))
-    return false;
-  return ["=", "(", "[", ",", ":"].includes(before.at(-1) ?? "");
-}
-function decodeStringFragment(raw, quote) {
-  let output = "";
-  for (let index = 0;index < raw.length; index += 1) {
-    const current = raw[index] ?? "";
-    if (quote === "`" && current === "$" && raw[index + 1] === "{")
-      return;
-    if (current !== "\\") {
-      if (current === quote)
-        return;
-      output += current;
-      continue;
-    }
-    const escaped = raw[++index];
-    if (escaped === undefined)
-      return;
-    const simple = {
-      "\\": "\\",
-      '"': '"',
-      "'": "'",
-      "`": "`",
-      n: `
-`,
-      r: "\r",
-      t: "\t",
-      b: "\b",
-      f: "\f",
-      v: "\v",
-      0: "\x00"
-    };
-    if (escaped in simple) {
-      output += simple[escaped];
-      continue;
-    }
-    if (escaped === "x") {
-      const value = decodeHexEscape(raw.slice(index + 1, index + 3), 2);
-      if (value === undefined)
-        return;
-      output += value;
-      index += 2;
-      continue;
-    }
-    if (escaped === "u") {
-      const value = decodeUnicodeEscape(raw, index + 1);
-      if (!value)
-        return;
-      output += value.character;
-      index = value.end;
-      continue;
-    }
-    return;
-  }
-  return output;
-}
-function decodeHexEscape(raw, length) {
-  if (raw.length !== length || !new RegExp(`^[0-9A-Fa-f]{${length}}$`).test(raw))
-    return;
-  return String.fromCodePoint(Number.parseInt(raw, 16));
-}
-function decodeUnicodeEscape(raw, start) {
-  if (raw[start] === "{") {
-    const close = raw.indexOf("}", start + 1);
-    if (close < 0)
-      return;
-    const digits2 = raw.slice(start + 1, close);
-    if (!/^[0-9A-Fa-f]{1,6}$/.test(digits2))
-      return;
-    const codePoint = Number.parseInt(digits2, 16);
-    if (codePoint > 1114111)
-      return;
-    return { character: String.fromCodePoint(codePoint), end: close };
-  }
-  const digits = raw.slice(start, start + 4);
-  const character = decodeHexEscape(digits, 4);
-  return character === undefined ? undefined : { character, end: start + 3 };
-}
-function sanitizedLineReference(line, match, detectedValue) {
-  const matchStart = match.index;
-  const credentialName = match[1];
-  const operator = match[2];
-  const innerQuote = match[3];
-  if (matchStart === undefined || !credentialName || operator === undefined || !innerQuote)
-    return;
-  const valueStart = matchStart + credentialName.length + operator.length + innerQuote.length;
-  const valueEnd = valueStart + detectedValue.length;
-  if (line.slice(valueStart, valueEnd) !== detectedValue)
-    return;
-  return `${line.slice(0, valueStart)}[VALOR SINTETICO OCULTO]${line.slice(valueEnd)}`;
-}
-function sourceAnchor(prefix, fallback) {
-  return prefix.match(/([A-Za-z_$][A-Za-z0-9_$]{0,127})\s*[:=]?\s*$/)?.[1] ?? fallback;
-}
-function removalRemediation(displayPath, lineNumber, reason) {
-  return {
-    version: 1,
-    kind: "remove-secret",
-    reason,
-    path: displayPath,
-    startLine: lineNumber,
-    endLine: lineNumber,
-    finding: "credential-assignment",
-    revalidate: true
-  };
-}
-function replacementRemediation(input) {
-  return {
-    version: 1,
-    kind: "replace-block",
-    reason: "synthetic-test-fixture",
-    path: input.path,
-    startLine: input.line,
-    endLine: input.line,
-    anchor: input.anchor,
-    before: [input.before],
-    replacement: [input.replacement],
-    revalidate: true
-  };
-}
-function credentialNameExpression(value) {
-  const separator = value.includes("_") ? "_" : value.includes("-") ? "-" : "";
-  let parts = separator ? value.split(separator) : credentialCamelParts(value);
-  parts = parts.filter(Boolean);
-  if (parts.length < 2 || parts.join(separator) !== value)
-    return;
-  return `[${parts.map((part) => JSON.stringify(part)).join(", ")}].join(${JSON.stringify(separator)})`;
-}
-function credentialCamelParts(value) {
-  const normalized = value.toLowerCase();
-  if (normalized === "apikey")
-    return [value.slice(0, 3), value.slice(3)];
-  if (normalized === "accesstoken")
-    return [value.slice(0, 6), value.slice(6)];
-  if (normalized === "secretkey")
-    return [value.slice(0, 6), value.slice(6)];
-  if (normalized === "password")
-    return [value.slice(0, 4), value.slice(4)];
-  return [];
-}
-function isSyntheticFixturePath(filePath) {
-  const normalized = filePath.replaceAll("\\", "/");
-  const basename = path14.basename(normalized);
-  if (!/\.[cm]?[jt]sx?$/i.test(basename))
-    return false;
-  return /\/(?:tests?|__tests__|fixtures?)(?:\/|$)/i.test(normalized) || /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(basename);
-}
-function brandedSummary(evaluable, files, evidence, failure) {
-  const summary = { version: 1, evaluable, files, ...failure ? { failure } : {} };
-  Object.defineProperty(summary, SECRET_PATCH_SUMMARY_BRAND, { value: true, enumerable: false });
-  PATCH_EVIDENCE.set(summary, { ...evidence, summaryHash: digest(JSON.stringify(summary)) });
-  return summary;
-}
-function isWithin2(value, root) {
-  const relative = path14.relative(root, value);
-  return relative === "" || !relative.startsWith("..") && !path14.isAbsolute(relative);
-}
-function objectValue(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
-}
-
-// src/cli/core/hooks/rules.ts
+init_infrastructure_boundary();
+init_documentation_boundary();
+init_git_command_policy();
+init_git_commit_message();
+init_secret_scan();
 var builtInHookRules = [
   { id: "policy-integrity", run: policyIntegrityGuard },
   { id: "resource-contract", run: resourceContractGuard },
@@ -5446,6 +7529,10 @@ var KNOWN_OPENCODE_TOOLS = new Set([
   "malahor_plan_control",
   "malahor_commit_prepare",
   "commit_prepare",
+  "malahor_task_classify",
+  "task_classify",
+  "malahor_direct_prepare",
+  "direct_prepare",
   ...MALAHOR_CODE_MODE_TOOL_NAMES,
   "invalid"
 ]);
@@ -5868,6 +7955,9 @@ function strongestDecision(violations) {
 }
 
 // src/cli/core/hooks/plugin-adapter.ts
+init_documentation_boundary();
+init_git_command_policy();
+init_secret_scan();
 async function evaluatePermission(input, options) {
   const action = stringValue4(input.action) || "unknown";
   const resources = stringArray(input.resources);
@@ -6442,6 +8532,10 @@ var KNOWN_TOOLS = new Set([
   "list",
   "question",
   "invalid",
+  "malahor_task_classify",
+  "task_classify",
+  "malahor_direct_prepare",
+  "direct_prepare",
   ...MALAHOR_CODE_MODE_TOOL_NAMES
 ]);
 function hookEventValue(value) {
@@ -6573,6 +8667,8 @@ Intervención y reparación
 - Una acción puntual de bajo riesgo no usa Planning ni SDD: en la primera versión solo admite una edición de un archivo regular existente, dentro de la raíz, sin symlinks, creación, borrado, movimiento, secretos, infraestructura ni shell mutante. El harness solicita una única aprobación nativa ligada a sesión, proyecto, política, tool call, efecto y recurso exactos, con save vacío.
 - Si el host ya mostró un ASK exacto para esa llamada, reutilízalo sin producir un segundo diálogo. Después de aprobar, recalcula scope, política, ruta e intención; un cambio de turno, llamada, manifest o control invalida la acción.
 - El trabajo considerable se expande primero mediante SDD. Solo entonces usa malahor_plan con nivel 1 o 2, specRef bajo SDD/ y specHash SHA-256 de la versión documental canónica. Los estados históricos de nivel 0 siguen legibles, pero no se crean nuevos.
+- Antes de una mutación, clasifica la tarea por cierre y consecuencias. El modelo aporta señales; el runtime deriva la ruta. Toda mutación directa exige aprobación nativa exacta y ninguna salida del modelo se convierte en grant.
+- malahor_task_classify es read-only y no autoriza tools. malahor_direct_prepare exige una decisión direct vigente, compila el envelope y solicita la aprobación nativa; si falta la decisión o cambia el scope, falla cerrado.
 - La autorización de un plan no caduca por tiempo; un cambio de revisión, efectos, proyecto, modo o política la invalida. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
 - Sustituir una lectura por otra equivalente no exige una revisión del plan cuando no cambian efectos, recursos ni riesgo. Solo un cambio material de efectos, recursos o riesgo exige una nueva revisión proporcional.
 - Los intentos técnicos equivalentes reutilizan la misma revisión V5 y crean otro attempt; solo un cambio material exige otro plan. ASK, DENY y controles críticos nunca se reintentan automáticamente.
@@ -8366,703 +10462,11 @@ function hash(input) {
   return createHash7("sha256").update(input).digest("hex");
 }
 
-// src/cli/core/action-intent.ts
-import { createHash as createHash8 } from "node:crypto";
-import fs14 from "node:fs";
-import path18 from "node:path";
-var ACTION_INTENT_CANONICALIZER = "action-intent-v1";
-
-class ActionIntentError extends Error {
-  code;
-  constructor(code, message) {
-    super(message);
-    this.name = "ActionIntentError";
-    this.code = code;
-  }
-}
-function canonicalizeActionIntent(input) {
-  const kind = input.kind;
-  if (kind !== "edit" && kind !== "shell" && kind !== "subagent") {
-    throw canonicalizationError("Tipo de acción no soportado por ActionIntentV1.");
-  }
-  const project = requiredText(input.project, "Proyecto no evaluable.", 256);
-  const root = canonicalRoot(requiredText(input.root, "Raíz de acción no evaluable.", 8192));
-  const rootRef = requiredText(input.rootRef ?? "project", "Referencia de raíz no evaluable.", 256);
-  const rootDigest = sha2562(root);
-  const constraints = normalizeConstraints(input.constraints);
-  if (kind === "edit") {
-    const target = requiredText(input.path, "Ruta de edición no evaluable.", 8192);
-    const existence = input.existence === "may-create" ? "may-create" : input.existence === "must-exist" || input.existence === undefined ? "must-exist" : undefined;
-    if (!existence)
-      throw canonicalizationError("Contrato de existencia no evaluable.");
-    const resource = filesystemResource(target, root, "write", existence);
-    return [sealIntent({
-      schema: 1,
-      canonicalizer: ACTION_INTENT_CANONICALIZER,
-      kind,
-      effect: "write",
-      project,
-      rootRef,
-      rootDigest,
-      resources: [resource],
-      constraints
-    })];
-  }
-  if (kind === "subagent") {
-    const agent = input.agent;
-    if (agent !== "malahor-diagnostico" && agent !== "malahor-testing") {
-      throw canonicalizationError("El especialista no está gestionado por Malahor.");
-    }
-    return [sealIntent({
-      schema: 1,
-      canonicalizer: ACTION_INTENT_CANONICALIZER,
-      kind,
-      effect: "delegate",
-      project,
-      rootRef,
-      rootDigest,
-      resources: [],
-      delegate: { agent },
-      constraints
-    })];
-  }
-  const command = requiredText(input.command, "Comando shell no evaluable.", 16384);
-  const cwd = canonicalPathInsideRoot(typeof input.cwd === "string" && input.cwd.trim() ? input.cwd : root, root, "El cwd queda fuera de la raíz autorizada.");
-  if (input.network !== undefined && input.network !== "forbidden") {
-    throw canonicalizationError("ActionIntentV1 no autoriza red.");
-  }
-  const filesystem = normalizeFilesystem(input.filesystem, root);
-  const resources = filesystemResources(filesystem, root);
-  const environment = normalizeEnvironment(input.environment);
-  const segments = parseClosedShell(command);
-  return segments.map(({ executable, argv }) => sealIntent({
-    schema: 1,
-    canonicalizer: ACTION_INTENT_CANONICALIZER,
-    kind,
-    effect: "execute",
-    project,
-    rootRef,
-    rootDigest,
-    resources,
-    command: { executable, argv, cwd, composition: "single" },
-    filesystem,
-    network: "forbidden",
-    environment,
-    constraints
-  }));
-}
-function canonicalizePlannedAction(action, context) {
-  const base = {
-    project: context.project,
-    root: context.root,
-    rootRef: context.rootRef ?? "project",
-    constraints: { remote: false, infrastructure: false }
-  };
-  if (action.action === "edit") {
-    return canonicalizeActionIntent({
-      ...base,
-      kind: "edit",
-      path: action.resource,
-      existence: pathExistsWithoutFollowingSymlink(action.resource, context.root) ? "must-exist" : "may-create"
-    });
-  }
-  if (action.action === "shell") {
-    return canonicalizeActionIntent({
-      ...base,
-      kind: "shell",
-      command: action.resource,
-      cwd: context.cwd ?? context.root,
-      filesystem: {
-        readRoots: [context.root],
-        writePaths: [],
-        createPaths: [],
-        sandboxWriteRoots: context.sandboxWriteRoots ?? []
-      },
-      network: "forbidden",
-      environment: []
-    });
-  }
-  if (action.action === "subagent") {
-    return canonicalizeActionIntent({ ...base, kind: "subagent", agent: action.resource });
-  }
-  throw canonicalizationError("Acción de plan no soportada por ActionIntentV1.");
-}
-function deriveActionIntentRepair(planned, actual, context) {
-  if (planned.action !== "shell" || actual.action !== "shell")
-    return;
-  try {
-    const root = canonicalRoot(context.root);
-    const plannedCwd = context.plannedCwd ?? root;
-    const plannedIntents = canonicalizePlannedAction(planned, { ...context, root, cwd: plannedCwd });
-    const actualIntents = canonicalizePlannedAction(actual, {
-      ...context,
-      root,
-      cwd: context.cwd ?? plannedCwd
-    });
-    if (plannedIntents.length !== 1 || actualIntents.length !== 1)
-      return;
-    const source = plannedIntents[0];
-    const repaired = actualIntents[0];
-    if (source.actionID === repaired.actionID || !sameRepairEnvelope(source, repaired))
-      return;
-    const plannedTargets = gitStageTargets(source);
-    const actualTargets = gitStageTargets(repaired);
-    if (!plannedTargets || !actualTargets)
-      return;
-    if (!hasLiteralStageDirectory(plannedTargets, root, source.command.cwd))
-      return;
-    const plannedManifest = stageManifest(plannedTargets, root, source.command.cwd, true);
-    const manifest = stageManifest(actualTargets, root, repaired.command.cwd, false);
-    if (plannedManifest.length === 0 || manifest.length === 0 || !subset(manifest, plannedManifest))
-      return;
-    const relation = sameTextSequence(manifest, plannedManifest) ? "equal" : "narrower";
-    const manifestHash = hashReference(canonical(manifest));
-    const repairedInputHash = hashReference(canonical({
-      kind: "git-stage-manifest",
-      sourceActionID: source.actionID,
-      repairedActionID: repaired.actionID,
-      relation,
-      manifestHash
-    }));
-    return {
-      schema: 1,
-      kind: "git-stage-manifest",
-      sourceActionID: source.actionID,
-      repairedActionID: repaired.actionID,
-      relation,
-      manifest,
-      manifestHash,
-      repairedInputHash
-    };
-  } catch {
-    return;
-  }
-}
-function validActionIntentRepair(value, rootValue) {
-  if (!isRecord5(value) || value.schema !== 1 || value.kind !== "git-stage-manifest" || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID) || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID) || value.sourceActionID === value.repairedActionID || value.relation !== "equal" && value.relation !== "narrower" || !Array.isArray(value.manifest) || value.manifest.length === 0 || value.manifest.length > 512 || value.manifest.some((item) => typeof item !== "string") || typeof value.manifestHash !== "string" || typeof value.repairedInputHash !== "string")
-    return false;
-  try {
-    const root = canonicalRoot(rootValue);
-    const manifest = value.manifest;
-    if (!sameTextSequence(manifest, [...new Set(manifest)].sort(compareText)))
-      return false;
-    if (!sameTextSequence(manifest, stageManifest(manifest, root, root, false)))
-      return false;
-    const manifestHash = hashReference(canonical(manifest));
-    if (value.manifestHash !== manifestHash)
-      return false;
-    const repairedInputHash = hashReference(canonical({
-      kind: value.kind,
-      sourceActionID: value.sourceActionID,
-      repairedActionID: value.repairedActionID,
-      relation: value.relation,
-      manifestHash
-    }));
-    return value.repairedInputHash === repairedInputHash;
-  } catch {
-    return false;
-  }
-}
-function compatibilityActionIntents(actions, project) {
-  const rootDigest = sha2562(`unresolved:${project}`);
-  return actions.flatMap((action) => {
-    const base = {
-      schema: 1,
-      canonicalizer: ACTION_INTENT_CANONICALIZER,
-      project,
-      rootRef: "planning:unresolved",
-      rootDigest,
-      constraints: { remote: false, infrastructure: false, protectedOperation: "runtime-recanonicalization" }
-    };
-    if (action.action === "edit") {
-      return [sealIntent({
-        ...base,
-        kind: "edit",
-        effect: "write",
-        resources: [{
-          kind: "filesystem",
-          canonicalPath: path18.resolve(action.resource),
-          relativePath: action.resource,
-          access: "write",
-          existence: "may-create"
-        }]
-      })];
-    }
-    if (action.action === "subagent") {
-      if (action.resource !== "malahor-diagnostico" && action.resource !== "malahor-testing") {
-        throw canonicalizationError("El especialista no está gestionado por Malahor.");
-      }
-      return [sealIntent({
-        ...base,
-        kind: "subagent",
-        effect: "delegate",
-        resources: [],
-        delegate: { agent: action.resource }
-      })];
-    }
-    if (action.action !== "shell")
-      throw canonicalizationError("Acción de plan no soportada.");
-    return [sealIntent({
-      ...base,
-      kind: "shell",
-      effect: "execute",
-      resources: [],
-      command: {
-        executable: "planning-exact",
-        argv: [action.resource],
-        cwd: "planning:unresolved",
-        composition: "single"
-      },
-      filesystem: { readRoots: [], writePaths: [], createPaths: [], sandboxWriteRoots: [] },
-      network: "forbidden",
-      environment: []
-    })];
-  });
-}
-function sameActionIntentSequence(left, right) {
-  return left.length === right.length && left.every((intent, index) => intent.actionID === right[index]?.actionID);
-}
-function validActionIntentV1(value) {
-  if (!isRecord5(value) || value.schema !== 1 || value.canonicalizer !== ACTION_INTENT_CANONICALIZER || typeof value.actionID !== "string" || !/^[a-f0-9]{64}$/.test(value.actionID) || !["edit", "shell", "subagent"].includes(String(value.kind)) || !["write", "execute", "delegate"].includes(String(value.effect)) || typeof value.project !== "string" || !value.project || typeof value.rootRef !== "string" || !value.rootRef || typeof value.rootDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.rootDigest) || !Array.isArray(value.resources) || !value.resources.every(validFilesystemResource) || !validConstraints(value.constraints))
-    return false;
-  const common = ["schema", "canonicalizer", "actionID", "kind", "effect", "project", "rootRef", "rootDigest", "resources", "constraints"];
-  if (value.kind === "edit" && (value.effect !== "write" || value.resources.length !== 1 || !hasOnlyKeys(value, common)))
-    return false;
-  if (value.kind === "subagent" && (value.effect !== "delegate" || !isRecord5(value.delegate) || !hasOnlyKeys(value, [...common, "delegate"]) || !hasOnlyKeys(value.delegate, ["agent"]) || !["malahor-diagnostico", "malahor-testing"].includes(String(value.delegate.agent))))
-    return false;
-  if (value.kind === "shell" && (value.effect !== "execute" || !validCommand(value.command) || value.network !== "forbidden" || !validFilesystem(value.filesystem) || !Array.isArray(value.environment) || !value.environment.every(validEnvironment) || !hasOnlyKeys(value, [...common, "command", "filesystem", "network", "environment"])))
-    return false;
-  const { actionID: _actionID, ...unsigned } = value;
-  return sha2562(canonical(unsigned)) === value.actionID;
-}
-function parseClosedShell(command) {
-  const segments = splitAndSequence(command);
-  return segments.map((segment) => {
-    const words = shellWords(segment);
-    if (words.length === 0)
-      throw canonicalizationError("Segmento shell vacío.");
-    const [executable, ...argv] = words;
-    if (!executable || /^[A-Za-z_][A-Za-z0-9_]*=/.test(executable)) {
-      throw canonicalizationError("ActionIntentV1 no admite asignaciones shell inline.");
-    }
-    const basename = path18.basename(executable).toLowerCase();
-    if (basename === "eval" || ["sh", "bash", "zsh", "dash", "fish", "cmd", "powershell", "pwsh"].includes(basename) && argv.some((item) => item === "-c" || item === "/c" || item === "-command")) {
-      throw canonicalizationError("ActionIntentV1 no admite shells anidados ni eval.");
-    }
-    return { executable, argv };
-  });
-}
-function splitAndSequence(command) {
-  const segments = [];
-  let current = "";
-  let quote;
-  let escaped = false;
-  for (let index = 0;index < command.length; index += 1) {
-    const character = command[index];
-    const next = command[index + 1];
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      current += character;
-      if (character === quote)
-        quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      current += character;
-      continue;
-    }
-    if (character === "&" && next === "&") {
-      if (!current.trim())
-        throw canonicalizationError("Secuencia shell incompleta.");
-      segments.push(current.trim());
-      current = "";
-      index += 1;
-      continue;
-    }
-    if (character === "&" || character === "|" || character === ";" || character === "<" || character === ">" || character === `
-` || character === "\r" || character === "`" || character === "$" || character === "*" || character === "?" || character === "[") {
-      throw canonicalizationError("Operador o expansión shell fuera del subconjunto cerrado.");
-    }
-    current += character;
-  }
-  if (escaped || quote || !current.trim())
-    throw canonicalizationError("Comando shell incompleto o con quoting inválido.");
-  segments.push(current.trim());
-  return segments;
-}
-function shellWords(segment) {
-  const words = [];
-  let current = "";
-  let quote;
-  let escaped = false;
-  let started = false;
-  for (let index = 0;index < segment.length; index += 1) {
-    const character = segment[index];
-    if (escaped) {
-      current += character;
-      started = true;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      started = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote)
-        quote = undefined;
-      else
-        current += character;
-      started = true;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      started = true;
-      continue;
-    }
-    if (/\s/u.test(character)) {
-      if (started) {
-        words.push(current);
-        current = "";
-        started = false;
-      }
-      continue;
-    }
-    current += character;
-    started = true;
-  }
-  if (escaped || quote)
-    throw canonicalizationError("Token shell incompleto.");
-  if (started)
-    words.push(current);
-  return words;
-}
-function normalizeFilesystem(value, root) {
-  const record = value === undefined ? {} : value;
-  if (!isRecord5(record))
-    throw canonicalizationError("Footprint de filesystem no evaluable.");
-  return {
-    readRoots: normalizedPathList(record.readRoots ?? [root], root, true),
-    writePaths: normalizedPathList(record.writePaths ?? [], root, true),
-    createPaths: normalizedPathList(record.createPaths ?? [], root, true),
-    sandboxWriteRoots: normalizedPathList(record.sandboxWriteRoots ?? [], root, false)
-  };
-}
-function normalizedPathList(value, root, confined) {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
-    throw canonicalizationError("Lista de paths no evaluable.");
-  }
-  return [...new Set(value.map((item) => confined ? canonicalPathInsideRoot(item, root, "Recurso fuera de la raíz autorizada.") : canonicalLoosePath(item, root)))].sort(compareText);
-}
-function filesystemResources(filesystem, root) {
-  const resources = [];
-  for (const target of filesystem.readRoots) {
-    resources.push(resourceFromCanonical(target, root, "read", "must-exist"));
-  }
-  for (const target of filesystem.writePaths) {
-    resources.push(resourceFromCanonical(target, root, "write", "must-exist"));
-  }
-  for (const target of filesystem.createPaths) {
-    resources.push(resourceFromCanonical(target, root, "write", "may-create"));
-  }
-  for (const target of filesystem.sandboxWriteRoots) {
-    resources.push({
-      kind: "filesystem",
-      canonicalPath: target,
-      relativePath: path18.relative(root, target) || ".",
-      access: "write",
-      existence: "may-create",
-      sandbox: true
-    });
-  }
-  return resources.sort((left, right) => compareText(`${left.access}\x00${left.canonicalPath}\x00${left.existence}`, `${right.access}\x00${right.canonicalPath}\x00${right.existence}`));
-}
-function filesystemResource(target, root, access, existence) {
-  const canonicalPath = canonicalPathInsideRoot(target, root, "Recurso fuera de la raíz autorizada.");
-  if (existence === "must-exist" && !fs14.existsSync(canonicalPath)) {
-    throw canonicalizationError("El recurso declarado como existente no existe.");
-  }
-  return resourceFromCanonical(canonicalPath, root, access, existence);
-}
-function resourceFromCanonical(canonicalPath, root, access, existence) {
-  return {
-    kind: "filesystem",
-    canonicalPath,
-    relativePath: portableRelative(root, canonicalPath),
-    access,
-    existence
-  };
-}
-function canonicalRoot(value) {
-  const resolved = path18.resolve(value);
-  try {
-    const stat = fs14.lstatSync(resolved);
-    if (stat.isSymbolicLink() || !stat.isDirectory())
-      throw new Error("not-directory");
-    return fs14.realpathSync(resolved);
-  } catch (error) {
-    if (error instanceof ActionIntentError)
-      throw error;
-    throw canonicalizationError("La raíz física no es un directorio regular evaluable.");
-  }
-}
-function canonicalPathInsideRoot(target, root, message) {
-  const resolved = path18.resolve(root, target);
-  if (!inside2(resolved, root))
-    throw resourceScopeError(message);
-  const canonical = canonicalExistingOrFuturePath(resolved);
-  if (!inside2(canonical, root))
-    throw resourceScopeError(message);
-  return canonical;
-}
-function canonicalExistingOrFuturePath(target) {
-  if (fs14.existsSync(target))
-    return fs14.realpathSync(target);
-  const suffix = [];
-  let cursor = target;
-  while (!fs14.existsSync(cursor)) {
-    const parent = path18.dirname(cursor);
-    if (parent === cursor)
-      throw canonicalizationError("No se pudo resolver el ancestro físico del recurso.");
-    suffix.unshift(path18.basename(cursor));
-    cursor = parent;
-  }
-  const stat = fs14.lstatSync(cursor);
-  if (stat.isSymbolicLink())
-    throw resourceScopeError("El recurso atraviesa un enlace simbólico no evaluable.");
-  return path18.join(fs14.realpathSync(cursor), ...suffix);
-}
-function canonicalLoosePath(target, root) {
-  return canonicalExistingOrFuturePath(path18.resolve(root, target));
-}
-function pathExistsWithoutFollowingSymlink(target, root) {
-  const resolved = path18.resolve(root, target);
-  try {
-    const stat = fs14.lstatSync(resolved);
-    return !stat.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-function normalizeEnvironment(value) {
-  if (value === undefined)
-    return [];
-  if (!Array.isArray(value))
-    throw canonicalizationError("Entorno de acción no evaluable.");
-  const output = value.map((item) => {
-    if (!isRecord5(item) || typeof item.key !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.key) || item.source !== "host-managed" && item.source !== "literal-nonsecret" || item.valueDigest !== undefined && (typeof item.valueDigest !== "string" || !/^[a-f0-9]{64}$/.test(item.valueDigest))) {
-      throw canonicalizationError("Variable de entorno no evaluable.");
-    }
-    return {
-      key: item.key,
-      source: item.source,
-      ...typeof item.valueDigest === "string" ? { valueDigest: item.valueDigest } : {}
-    };
-  });
-  const keys = output.map((item) => item.key);
-  if (new Set(keys).size !== keys.length)
-    throw canonicalizationError("Variables de entorno duplicadas.");
-  return output.sort((left, right) => compareText(left.key, right.key));
-}
-function normalizeConstraints(value) {
-  const record = value === undefined ? {} : value;
-  if (!isRecord5(record) || record.remote !== undefined && record.remote !== false || record.infrastructure !== undefined && record.infrastructure !== false || record.protectedOperation !== undefined && (typeof record.protectedOperation !== "string" || !record.protectedOperation.trim() || record.protectedOperation.length > 256)) {
-    throw canonicalizationError("Restricciones de acción no evaluables.");
-  }
-  return {
-    remote: false,
-    infrastructure: false,
-    ...typeof record.protectedOperation === "string" ? { protectedOperation: record.protectedOperation.trim() } : {}
-  };
-}
-function sealIntent(value) {
-  return { ...value, actionID: sha2562(canonical(value)) };
-}
-function validFilesystemResource(value) {
-  return isRecord5(value) && value.kind === "filesystem" && typeof value.canonicalPath === "string" && typeof value.relativePath === "string" && (value.access === "read" || value.access === "write") && (value.existence === "must-exist" || value.existence === "may-create") && (value.sandbox === undefined || typeof value.sandbox === "boolean") && hasOnlyKeys(value, value.sandbox === undefined ? ["kind", "canonicalPath", "relativePath", "access", "existence"] : ["kind", "canonicalPath", "relativePath", "access", "existence", "sandbox"]);
-}
-function validCommand(value) {
-  return isRecord5(value) && typeof value.executable === "string" && value.executable.length > 0 && Array.isArray(value.argv) && value.argv.every((item) => typeof item === "string") && typeof value.cwd === "string" && value.cwd.length > 0 && (value.composition === "single" || value.composition === "and-sequence") && hasOnlyKeys(value, ["executable", "argv", "cwd", "composition"]);
-}
-function validFilesystem(value) {
-  return isRecord5(value) && [value.readRoots, value.writePaths, value.createPaths, value.sandboxWriteRoots].every((item) => Array.isArray(item) && item.every((entry) => typeof entry === "string")) && hasOnlyKeys(value, ["readRoots", "writePaths", "createPaths", "sandboxWriteRoots"]);
-}
-function validEnvironment(value) {
-  return isRecord5(value) && typeof value.key === "string" && (value.source === "host-managed" || value.source === "literal-nonsecret") && (value.valueDigest === undefined || typeof value.valueDigest === "string" && /^[a-f0-9]{64}$/.test(value.valueDigest)) && hasOnlyKeys(value, value.valueDigest === undefined ? ["key", "source"] : ["key", "source", "valueDigest"]);
-}
-function validConstraints(value) {
-  return isRecord5(value) && value.remote === false && value.infrastructure === false && (value.protectedOperation === undefined || typeof value.protectedOperation === "string") && hasOnlyKeys(value, value.protectedOperation === undefined ? ["remote", "infrastructure"] : ["remote", "infrastructure", "protectedOperation"]);
-}
-function hasOnlyKeys(value, keys) {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-function portableRelative(root, target) {
-  const relative = path18.relative(root, target) || ".";
-  return relative.split(path18.sep).join("/");
-}
-function sameRepairEnvelope(left, right) {
-  if (!left.command || !right.command)
-    return false;
-  return left.kind === "shell" && right.kind === "shell" && left.effect === right.effect && left.project === right.project && left.rootRef === right.rootRef && left.rootDigest === right.rootDigest && left.command.executable === "git" && right.command.executable === "git" && left.command.cwd === right.command.cwd && left.command.composition === "single" && right.command.composition === "single" && canonical(left.resources) === canonical(right.resources) && canonical(left.filesystem) === canonical(right.filesystem) && canonical(left.environment) === canonical(right.environment) && left.network === "forbidden" && right.network === "forbidden" && canonical(left.constraints) === canonical(right.constraints);
-}
-function gitStageTargets(intent) {
-  const argv = intent.command?.argv;
-  if (!argv || argv.length < 3 || argv[0] !== "add" || argv[1] !== "--")
-    return;
-  const targets = argv.slice(2);
-  if (targets.some((target) => !safeLiteralStageTarget(target)))
-    return;
-  return targets;
-}
-function safeLiteralStageTarget(value) {
-  if (value.length === 0 || value.length > 4096 || path18.isAbsolute(value) || value.startsWith(":"))
-    return false;
-  if (value.includes("\x00") || value.includes("\r") || value.includes(`
-`))
-    return false;
-  for (const marker of ["*", "?", "[", "]", "{", "}"]) {
-    if (value.includes(marker))
-      return false;
-  }
-  return value.split(/[\\/]/u).every((part) => part !== "" && part !== "." && part !== ".." && part.toLowerCase() !== ".git");
-}
-function hasLiteralStageDirectory(targets, root, cwd) {
-  return targets.some((target) => {
-    const resolved = path18.resolve(cwd, target);
-    if (!inside2(resolved, root))
-      throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
-    assertNoSymlinkTraversal(resolved, root);
-    const stat = fs14.lstatSync(resolved);
-    if (stat.isSymbolicLink() || !stat.isDirectory())
-      return false;
-    const canonicalTarget = fs14.realpathSync(resolved);
-    return canonicalTarget !== root && path18.basename(canonicalTarget).toLowerCase() !== ".git";
-  });
-}
-function stageManifest(targets, root, cwd, allowDirectories) {
-  const found = new Set;
-  const traversal = { nodes: 0 };
-  for (const target of targets) {
-    if (!safeLiteralStageTarget(target))
-      throw canonicalizationError("Target de stage no literal.");
-    const resolved = path18.resolve(cwd, target);
-    if (!inside2(resolved, root))
-      throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
-    collectStageTarget(resolved, root, allowDirectories, found, traversal, 0);
-    if (found.size > 512)
-      throw canonicalizationError("Manifest de stage fuera de límite.");
-  }
-  const manifest = [...found].sort(compareText);
-  const size = manifest.reduce((total, item) => total + item.length, 0);
-  if (size > 16384)
-    throw canonicalizationError("Manifest de stage fuera de límite.");
-  return manifest;
-}
-function collectStageTarget(target, root, allowDirectories, found, traversal, depth) {
-  traversal.nodes += 1;
-  if (traversal.nodes > 1024 || depth > 128)
-    throw canonicalizationError("Recorrido de stage fuera de límite.");
-  assertNoSymlinkTraversal(target, root);
-  const stat = fs14.lstatSync(target);
-  if (stat.isSymbolicLink())
-    throw resourceScopeError("Stage mediante symlink no permitido.");
-  const canonicalTarget = fs14.realpathSync(target);
-  if (!inside2(canonicalTarget, root))
-    throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
-  if (stat.isFile()) {
-    if (stat.nlink > 1)
-      throw resourceScopeError("Stage mediante hardlink no permitido.");
-    const relativePath = portableRelative(root, canonicalTarget);
-    if (!found.has(relativePath) && found.size >= 512) {
-      throw canonicalizationError("Manifest de stage fuera de límite.");
-    }
-    found.add(relativePath);
-    return;
-  }
-  if (!stat.isDirectory() || !allowDirectories || canonicalTarget === root || path18.basename(canonicalTarget).toLowerCase() === ".git") {
-    throw canonicalizationError("El manifest reparado exige archivos exactos.");
-  }
-  const entries = fs14.readdirSync(canonicalTarget, { withFileTypes: true }).sort((left, right) => compareText(left.name, right.name));
-  for (const entry of entries) {
-    if (entry.name.toLowerCase() === ".git")
-      throw canonicalizationError("El manifest no atraviesa metadata Git.");
-    collectStageTarget(path18.join(canonicalTarget, entry.name), root, true, found, traversal, depth + 1);
-  }
-}
-function assertNoSymlinkTraversal(target, root) {
-  const relative = path18.relative(root, target);
-  if (relative === "")
-    return;
-  if (relative.startsWith("..") || path18.isAbsolute(relative)) {
-    throw resourceScopeError("Path de stage fuera de la raíz autorizada.");
-  }
-  let cursor = root;
-  for (const part of relative.split(path18.sep)) {
-    cursor = path18.join(cursor, part);
-    if (fs14.lstatSync(cursor).isSymbolicLink()) {
-      throw resourceScopeError("Stage mediante symlink no permitido.");
-    }
-  }
-}
-function subset(values, allowed) {
-  const scope = new Set(allowed);
-  return values.every((value) => scope.has(value));
-}
-function sameTextSequence(left, right) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-function inside2(target, root) {
-  const relative = path18.relative(path18.resolve(root), path18.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path18.isAbsolute(relative);
-}
-function requiredText(value, message, max) {
-  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000\r\n]/u.test(value)) {
-    throw canonicalizationError(message);
-  }
-  return value.trim();
-}
-function canonicalizationError(message) {
-  return new ActionIntentError("ACTION_NOT_CANONICALIZABLE", message);
-}
-function resourceScopeError(message) {
-  return new ActionIntentError("RESOURCE_OUTSIDE_SCOPE", message);
-}
-function sha2562(value) {
-  return createHash8("sha256").update(value).digest("hex");
-}
-function hashReference(value) {
-  return `sha256:${sha2562(value)}`;
-}
-function canonical(value) {
-  if (Array.isArray(value))
-    return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText(left, right));
-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-function compareText(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-function isRecord5(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+// src/plugin/planning.ts
+init_action_intent();
 
 // src/cli/core/planning.ts
+init_action_intent();
 import { createHash as createHash9, randomBytes as randomBytes4 } from "node:crypto";
 
 // src/cli/core/plan-presentation.ts
@@ -10377,610 +11781,9 @@ function record(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 
-// src/cli/core/read-only-shell-policy.ts
-import fs15 from "node:fs";
-import path19 from "node:path";
-var SAFE_GIT_COMMANDS = new Set([
-  "diff",
-  "log",
-  "ls-files",
-  "rev-parse",
-  "show",
-  "status"
-]);
-var SAFE_GIT_GLOBAL_OPTIONS = new Set([
-  "--no-pager",
-  "--no-optional-locks",
-  "--literal-pathspecs",
-  "--glob-pathspecs",
-  "--noglob-pathspecs",
-  "--icase-pathspecs"
-]);
-var GIT_STATUS_FLAGS = new Set([
-  "-s",
-  "--short",
-  "-b",
-  "--branch",
-  "--show-stash",
-  "--long",
-  "-v",
-  "-vv",
-  "-z",
-  "--null",
-  "--no-renames",
-  "--renames",
-  "--ahead-behind",
-  "--no-ahead-behind"
-]);
-var GIT_DIFF_FLAGS = new Set([
-  "-p",
-  "--patch",
-  "-s",
-  "--no-patch",
-  "--raw",
-  "--patch-with-raw",
-  "--stat",
-  "--numstat",
-  "--shortstat",
-  "--compact-summary",
-  "--summary",
-  "--name-only",
-  "--name-status",
-  "--check",
-  "--cached",
-  "--staged",
-  "--quiet",
-  "--exit-code",
-  "--binary",
-  "--full-index",
-  "--no-ext-diff",
-  "--no-textconv",
-  "--submodule",
-  "--ignore-submodules",
-  "--no-color"
-]);
-var GIT_HISTORY_FLAGS = new Set([
-  "--oneline",
-  "--stat",
-  "--numstat",
-  "--shortstat",
-  "--summary",
-  "--name-only",
-  "--name-status",
-  "--no-patch",
-  "-s",
-  "--patch",
-  "-p",
-  "--graph",
-  "--decorate",
-  "--no-decorate",
-  "--first-parent",
-  "--merges",
-  "--no-merges",
-  "--reverse",
-  "--date-order",
-  "--author-date-order",
-  "--topo-order",
-  "--full-history",
-  "--simplify-merges",
-  "--no-ext-diff",
-  "--no-textconv",
-  "--no-color"
-]);
-var GIT_LS_FILES_FLAGS = new Set([
-  "-c",
-  "--cached",
-  "-d",
-  "--deleted",
-  "-m",
-  "--modified",
-  "-o",
-  "--others",
-  "-i",
-  "--ignored",
-  "-s",
-  "--stage",
-  "-u",
-  "--unmerged",
-  "-k",
-  "--killed",
-  "--directory",
-  "--no-empty-directory",
-  "--exclude-standard",
-  "--full-name",
-  "--recurse-submodules",
-  "--error-unmatch",
-  "--deduplicate",
-  "-z",
-  "--debug",
-  "--eol"
-]);
-var GIT_REV_PARSE_FLAGS = new Set([
-  "--verify",
-  "--quiet",
-  "-q",
-  "--short",
-  "--abbrev-ref",
-  "--symbolic",
-  "--symbolic-full-name",
-  "--show-toplevel",
-  "--show-prefix",
-  "--show-cdup",
-  "--show-superproject-working-tree",
-  "--git-dir",
-  "--absolute-git-dir",
-  "--is-inside-git-dir",
-  "--is-inside-work-tree",
-  "--is-bare-repository",
-  "--is-shallow-repository",
-  "--show-object-format",
-  "--sq",
-  "--revs-only",
-  "--no-revs",
-  "--flags",
-  "--no-flags",
-  "--default"
-]);
-var GIT_FORMAT_OPTIONS = new Set([
-  "--format",
-  "--pretty",
-  "--date",
-  "--author",
-  "--committer",
-  "--grep"
-]);
-var GIT_NUMERIC_OPTIONS = new Set([
-  "-n",
-  "--max-count",
-  "-U",
-  "--unified",
-  "--abbrev"
-]);
-var RG_FLAGS = new Set([
-  "-n",
-  "--line-number",
-  "-i",
-  "--ignore-case",
-  "-S",
-  "--smart-case",
-  "-F",
-  "--fixed-strings",
-  "-l",
-  "--files-with-matches",
-  "--files",
-  "--hidden",
-  "--no-ignore",
-  "--stats",
-  "-c",
-  "--count",
-  "--count-matches",
-  "--json",
-  "--no-messages",
-  "--pcre2"
-]);
-var RG_OPTIONS_WITH_VALUE = new Set([
-  "-g",
-  "--glob",
-  "-t",
-  "--type",
-  "-T",
-  "--type-not",
-  "-m",
-  "--max-count",
-  "-A",
-  "--after-context",
-  "-B",
-  "--before-context",
-  "-C",
-  "--context",
-  "--max-depth"
-]);
-var TEST_PATH_OPERATORS = new Set([
-  "-e",
-  "-f",
-  "-d",
-  "-r",
-  "-w",
-  "-x",
-  "-s",
-  "-L",
-  "-h",
-  "-b",
-  "-c",
-  "-p",
-  "-S"
-]);
-var COMMIT_MESSAGE_FLAGS = new Set(["--breaking", "--json"]);
-var COMMIT_MESSAGE_OPTIONS = new Set(["--type", "--scope", "--icon", "--message", "--profile", "--project"]);
-var COMMIT_MESSAGE_TYPES = new Set(COMMIT_TYPES);
-function classifyReadOnlyShellCommand(command, projectRoot, options = {}) {
-  const workingDirectory = options.workingDirectory ?? projectRoot;
-  if (!safeProjectDirectory(workingDirectory, projectRoot))
-    return denied("directorio-fuera-del-proyecto");
-  const segments = splitReadOnlySegments(command);
-  if (!segments)
-    return denied("sintaxis-shell-no-admitida");
-  for (const segment of segments) {
-    const tokens = shellTokens3(segment);
-    if (!tokens || tokens.length === 0 || !segmentIsReadOnly(tokens, segment, projectRoot, workingDirectory, options.git ?? {})) {
-      return denied("segmento-no-verificable");
-    }
-  }
-  return { readOnly: true };
-}
-function segmentIsReadOnly(tokens, segment, projectRoot, workingDirectory, gitOptions) {
-  const executable = tokens[0] ?? "";
-  if (!/^[A-Za-z0-9_+.[\]-]+$/.test(executable))
-    return false;
-  switch (executable.toLowerCase()) {
-    case "git":
-    case "git.exe":
-      return gitIsReadOnly(tokens, segment, projectRoot, workingDirectory, gitOptions);
-    case "sha256sum":
-      return hashIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
-    case "cmp":
-      return cmpIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
-    case "rg":
-      return ripgrepIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
-    case "test":
-      return testIsReadOnly(tokens.slice(1), projectRoot, workingDirectory);
-    case "pwd":
-      return tokens.slice(1).every((token) => token === "-L" || token === "-P");
-    case "malahor-ai":
-    case "malahor-ai.exe":
-      return malahorCommitMessageIsReadOnly(tokens.slice(1));
-    default:
-      return false;
-  }
-}
-function malahorCommitMessageIsReadOnly(args) {
-  if (args[0] !== "git" || args[1] !== "commit-message")
-    return false;
-  const seen = new Set;
-  for (let index = 2;index < args.length; index += 1) {
-    const arg = args[index] ?? "";
-    if (COMMIT_MESSAGE_FLAGS.has(arg)) {
-      if (seen.has(arg))
-        return false;
-      seen.add(arg);
-      continue;
-    }
-    if (COMMIT_MESSAGE_OPTIONS.has(arg)) {
-      if (seen.has(arg))
-        return false;
-      const value = args[index + 1];
-      if (!value || value.startsWith("--") || value.includes("\x00"))
-        return false;
-      if (arg === "--type" && !COMMIT_MESSAGE_TYPES.has(value))
-        return false;
-      seen.add(arg);
-      index += 1;
-      continue;
-    }
-    if (!arg || arg.startsWith("-") || arg.includes("\x00"))
-      return false;
-  }
-  return true;
-}
-function gitIsReadOnly(tokens, segment, projectRoot, workingDirectory, options) {
-  let index = 1;
-  while (index < tokens.length && tokens[index]?.startsWith("-")) {
-    const option = tokens[index] ?? "";
-    if (!SAFE_GIT_GLOBAL_OPTIONS.has(option))
-      return false;
-    index += 1;
-  }
-  const subcommand = tokens[index]?.toLowerCase();
-  if (!subcommand || !SAFE_GIT_COMMANDS.has(subcommand))
-    return false;
-  if (!closedGitArguments(subcommand, tokens.slice(index + 1), projectRoot, workingDirectory))
-    return false;
-  const classification = classifyGitCommand(segment, options);
-  return classification.hasGitCommand && !classification.remote && !classification.failClosed && !classification.destructive && classification.operations.length > 0 && classification.operations.every((operation) => operation === "read");
-}
-function closedGitArguments(subcommand, args, projectRoot, workingDirectory) {
-  switch (subcommand) {
-    case "status":
-      return parseGitArguments(args, GIT_STATUS_FLAGS, new Set, projectRoot, workingDirectory, "paths", [
-        /^--porcelain(?:=v[12])?$/,
-        /^--untracked-files(?:=(?:no|normal|all))?$/,
-        /^--ignored(?:=(?:traditional|matching|no))?$/,
-        /^--ignore-submodules(?:=(?:none|untracked|dirty|all))?$/,
-        /^--column(?:=[a-z,]+)?$/,
-        /^--find-renames(?:=\d+%?)?$/
-      ]);
-    case "diff":
-      return parseGitArguments(args, GIT_DIFF_FLAGS, GIT_NUMERIC_OPTIONS, projectRoot, workingDirectory, "refs", [
-        /^-U\d+$/,
-        /^--unified=\d+$/,
-        /^--abbrev=\d+$/,
-        /^--color(?:=(?:always|never|auto))?$/,
-        /^--word-diff(?:=(?:plain|color|porcelain|none))?$/,
-        /^--find-renames(?:=\d+%?)?$/,
-        /^--diff-filter=[ACDMRTUXB*]+$/i
-      ]);
-    case "log":
-    case "show":
-      return parseGitArguments(args, GIT_HISTORY_FLAGS, new Set([...GIT_FORMAT_OPTIONS, ...GIT_NUMERIC_OPTIONS]), projectRoot, workingDirectory, "refs", [
-        /^-\d+$/,
-        /^--max-count=\d+$/,
-        /^--abbrev=\d+$/,
-        /^--color(?:=(?:always|never|auto))?$/,
-        /^--format=.+$/,
-        /^--pretty=.+$/,
-        /^--date=.+$/,
-        /^--author=.+$/,
-        /^--committer=.+$/,
-        /^--grep=.+$/
-      ]);
-    case "ls-files":
-      return parseGitArguments(args, GIT_LS_FILES_FLAGS, new Set(["--format", "--with-tree"]), projectRoot, workingDirectory, "paths", [
-        /^--format=.+$/,
-        /^--with-tree=.+$/
-      ]);
-    case "rev-parse":
-      return parseGitArguments(args, GIT_REV_PARSE_FLAGS, new Set, projectRoot, workingDirectory, "refs", [
-        /^--short=\d+$/,
-        /^--abbrev-ref=(?:strict|loose)$/,
-        /^--path-format=(?:absolute|relative)$/,
-        /^--show-object-format(?:=(?:storage|input|output))?$/
-      ]);
-    default:
-      return false;
-  }
-}
-function parseGitArguments(args, flags, optionsWithValue, projectRoot, workingDirectory, positionals, optionPatterns) {
-  let pathsOnly = false;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index] ?? "";
-    if (arg === "--") {
-      pathsOnly = true;
-      continue;
-    }
-    if (!pathsOnly && flags.has(arg))
-      continue;
-    if (!pathsOnly && optionPatterns.some((pattern) => pattern.test(arg)))
-      continue;
-    if (!pathsOnly && optionsWithValue.has(arg)) {
-      const value = args[index + 1];
-      if (!value || value === "--" || !safeGitOptionValue(arg, value))
-        return false;
-      index += 1;
-      continue;
-    }
-    if (!pathsOnly && arg.startsWith("-"))
-      return false;
-    if (pathsOnly || positionals === "paths") {
-      if (!safeProjectPath(arg, projectRoot, workingDirectory, false, true))
-        return false;
-      continue;
-    }
-    if (!safeGitOperand(arg))
-      return false;
-  }
-  return true;
-}
-function safeGitOptionValue(option, value) {
-  if (GIT_NUMERIC_OPTIONS.has(option))
-    return /^\d+$/.test(value);
-  return !value.includes("\x00");
-}
-function safeGitOperand(value) {
-  return value.length > 0 && !value.includes("\x00") && !path19.isAbsolute(value) && !/^[A-Za-z]:[\\/]/.test(value) && !value.startsWith("~") && !/(^|[\\/:])\.\.(?:[\\/:]|$)/.test(value);
-}
-function hashIsReadOnly(args, projectRoot, workingDirectory) {
-  const paths = [];
-  for (const arg of args) {
-    if (["-b", "--binary", "-t", "--text", "--tag", "-z", "--zero", "--"].includes(arg))
-      continue;
-    if (arg.startsWith("-"))
-      return false;
-    paths.push(arg);
-  }
-  return paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, true));
-}
-function cmpIsReadOnly(args, projectRoot, workingDirectory) {
-  const paths = [];
-  for (const arg of args) {
-    if (["-s", "--silent", "--quiet", "-l", "--verbose", "--"].includes(arg))
-      continue;
-    if (arg.startsWith("-"))
-      return false;
-    paths.push(arg);
-  }
-  return paths.length === 2 && paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, true));
-}
-function ripgrepIsReadOnly(args, projectRoot, workingDirectory) {
-  const positionals = [];
-  let patternFromOption = false;
-  let filesMode = false;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index] ?? "";
-    if (arg === "--") {
-      positionals.push(...args.slice(index + 1));
-      break;
-    }
-    if (arg === "-e" || arg === "--regexp") {
-      if (!args[index + 1])
-        return false;
-      patternFromOption = true;
-      index += 1;
-      continue;
-    }
-    if (RG_OPTIONS_WITH_VALUE.has(arg)) {
-      if (!args[index + 1])
-        return false;
-      index += 1;
-      continue;
-    }
-    if (RG_FLAGS.has(arg)) {
-      filesMode ||= arg === "--files";
-      continue;
-    }
-    if (arg.startsWith("-"))
-      return false;
-    positionals.push(arg);
-  }
-  if (filesMode)
-    return positionals.every((value) => safeProjectPath(value, projectRoot, workingDirectory, false));
-  if (!patternFromOption && positionals.length === 0)
-    return false;
-  const paths = patternFromOption ? positionals : positionals.slice(1);
-  return paths.every((value) => safeProjectPath(value, projectRoot, workingDirectory, false));
-}
-function testIsReadOnly(args, projectRoot, workingDirectory) {
-  const normalized = args[0] === "!" ? args.slice(1) : args;
-  if (normalized.length === 2 && TEST_PATH_OPERATORS.has(normalized[0] ?? "")) {
-    return safeProjectPath(normalized[1] ?? "", projectRoot, workingDirectory, false);
-  }
-  if (normalized.length === 3 && ["-ef", "-nt", "-ot"].includes(normalized[1] ?? "")) {
-    return safeProjectPath(normalized[0] ?? "", projectRoot, workingDirectory, true) && safeProjectPath(normalized[2] ?? "", projectRoot, workingDirectory, true);
-  }
-  return false;
-}
-function safeProjectPath(value, projectRoot, workingDirectory, mustExist, allowGitPathspec = false) {
-  if (!value || value === "-" || value.startsWith("~") || value.includes("\x00"))
-    return false;
-  if (!allowGitPathspec && /[*?[\]{}]/.test(value))
-    return false;
-  try {
-    const root = fs15.realpathSync(path19.resolve(projectRoot));
-    const directory = fs15.realpathSync(path19.resolve(workingDirectory));
-    if (!inside3(directory, root))
-      return false;
-    const target = path19.resolve(directory, value);
-    if (!inside3(target, root))
-      return false;
-    if (fs15.existsSync(target))
-      return inside3(fs15.realpathSync(target), root);
-    if (mustExist)
-      return false;
-    let parent = path19.dirname(target);
-    while (!fs15.existsSync(parent)) {
-      const next = path19.dirname(parent);
-      if (next === parent)
-        return false;
-      parent = next;
-    }
-    return inside3(fs15.realpathSync(parent), root);
-  } catch {
-    return false;
-  }
-}
-function safeProjectDirectory(value, projectRoot) {
-  try {
-    const root = fs15.realpathSync(path19.resolve(projectRoot));
-    const directory = fs15.realpathSync(path19.resolve(value));
-    return fs15.statSync(directory).isDirectory() && inside3(directory, root);
-  } catch {
-    return false;
-  }
-}
-function inside3(target, root) {
-  const relative = path19.relative(path19.resolve(root), path19.resolve(target));
-  return relative === "" || !relative.startsWith("..") && !path19.isAbsolute(relative);
-}
-function splitReadOnlySegments(command) {
-  const segments = [];
-  let current = "";
-  let quote;
-  let escaped = false;
-  for (let index = 0;index < command.length; index += 1) {
-    const character = command[index] ?? "";
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (quote === '"' && (character === "$" || character === "`"))
-        return;
-      current += character;
-      if (character === quote)
-        quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      current += character;
-      continue;
-    }
-    if (["$", "`", ">", "<", ";", `
-`, "\r", "(", ")", "{", "}"].includes(character))
-      return;
-    if (character === "&" || character === "|") {
-      const doubled = command[index + 1] === character;
-      if (character === "&" && !doubled)
-        return;
-      if (!current.trim())
-        return;
-      segments.push(current.trim());
-      current = "";
-      if (doubled)
-        index += 1;
-      continue;
-    }
-    current += character;
-  }
-  if (escaped || quote || !current.trim())
-    return;
-  segments.push(current.trim());
-  return segments;
-}
-function shellTokens3(command) {
-  const tokens = [];
-  let current = "";
-  let tokenStarted = false;
-  let quote;
-  let escaped = false;
-  for (const character of command) {
-    if (escaped) {
-      current += character;
-      tokenStarted = true;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      tokenStarted = true;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote)
-        quote = undefined;
-      else
-        current += character;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      tokenStarted = true;
-      quote = character;
-      continue;
-    }
-    if (/\s/.test(character)) {
-      if (tokenStarted)
-        tokens.push(current);
-      current = "";
-      tokenStarted = false;
-      continue;
-    }
-    current += character;
-    tokenStarted = true;
-  }
-  if (escaped || quote)
-    return;
-  if (tokenStarted)
-    tokens.push(current);
-  return tokens;
-}
-function denied(reason) {
-  return { readOnly: false, reason };
-}
+// src/plugin/planning.ts
+init_documentation_boundary();
+init_read_only_shell_policy();
 
 // src/docs/resolver.ts
 import fs16 from "node:fs";
@@ -12970,6 +13773,11 @@ function isRecord9(value) {
 }
 
 // src/plugin/commit-workflow.ts
+init_git_command_policy();
+init_git_commit_message();
+init_secret_scan();
+init_infrastructure_boundary();
+init_read_only_shell_policy();
 import { execFileSync as execFileSync5 } from "node:child_process";
 import { createHash as createHash13 } from "node:crypto";
 import fs17 from "node:fs";
@@ -13717,6 +14525,10 @@ function compareText4(left, right) {
 }
 
 // src/plugin/point-action-approval.ts
+init_action_intent();
+init_documentation_boundary();
+init_secret_scan();
+init_infrastructure_boundary();
 import { createHash as createHash14 } from "node:crypto";
 import fs18 from "node:fs";
 import path22 from "node:path";
@@ -15497,10 +16309,10 @@ function permissionShellCandidate(input, projectRoot) {
   const metadataCommand = text2(metadata.command || metadata.cmd);
   const rawCwd = metadata.workdir ?? metadata.cwd;
   const source = isRecord10(input.source) ? input.source : {};
-  const command = resources.length === 1 && typeof resources[0] === "string" ? resources[0] : "";
+  const command = metadataCommand || (resources.length === 1 && typeof resources[0] === "string" ? resources[0].trim() : "");
   const messageID = text2(source.messageID);
   const toolCallID = text2(source.id || source.callID || source.toolCallID);
-  const valid = Boolean(command) && (!metadataCommand || metadataCommand === command) && (rawCwd === undefined || typeof rawCwd === "string") && source.type === "tool" && Boolean(messageID && toolCallID);
+  const valid = Boolean(command) && (rawCwd === undefined || typeof rawCwd === "string") && source.type === "tool" && Boolean(messageID && toolCallID);
   return {
     command,
     cwd: typeof rawCwd === "string" ? path23.resolve(projectRoot, rawCwd) : projectRoot,
@@ -38102,7 +38914,12 @@ var interruptAllAs = fiberInterruptAllAs;
 var isFiber = (u) => hasProperty(u, FiberTypeId);
 var getCurrent = getCurrentFiber;
 var runIn = fiberRunIn;
+// src/plugin/code-mode.ts
+init_infrastructure_boundary();
+init_secret_scan();
+
 // src/plugin/code-mode-redaction.ts
+init_secret_scan();
 import path24 from "node:path";
 var DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 var HOST_METADATA_KEYS = new Set([
@@ -55312,6 +56129,33 @@ async function setupV2(context3) {
     } else {
       capabilities["commit.workflow.tool"] = false;
     }
+    if (planningTools && approvalPort && projectAffinity && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
+      try {
+        const [{ createTaskClassifier: createTaskClassifier2, registerTaskClassificationTool: registerTaskClassificationTool2 }, { createDirectTaskRegistry: createDirectTaskRegistry2, registerDirectTaskTool: registerDirectTaskTool2 }] = await Promise.all([
+          Promise.resolve().then(() => (init_task_classification2(), exports_task_classification)),
+          Promise.resolve().then(() => (init_direct_task_execution(), exports_direct_task_execution))
+        ]);
+        const taskClassifier = createTaskClassifier2();
+        const directTasks = createDirectTaskRegistry2();
+        const classifierRegistration = await registerTaskClassificationTool2(planningTools, taskClassifier, resolveCommitWorkflowScope);
+        if (classifierRegistration && typeof classifierRegistration.dispose === "function") {
+          cleanups.push(() => classifierRegistration.dispose?.());
+        }
+        const directRegistration = await registerDirectTaskTool2(planningTools, directTasks, taskClassifier, resolveCommitWorkflowScope, approvalPort);
+        if (directRegistration && typeof directRegistration.dispose === "function") {
+          cleanups.push(() => directRegistration.dispose?.());
+        }
+        capabilities["task.classification"] = true;
+        capabilities["direct.task"] = true;
+      } catch (error) {
+        capabilities["task.classification"] = false;
+        capabilities["direct.task"] = false;
+        warn(`herramientas de clasificación directa no registradas: ${error.message}`);
+      }
+    } else {
+      capabilities["task.classification"] = false;
+      capabilities["direct.task"] = false;
+    }
     const codeModeTools = typeof tool.transform === "function" && typeof tool.list === "function" ? tool : undefined;
     if (codeModeTools && approvalPort && storage && options.resolveSessionProject && options.permissionRegistered && registered) {
       try {
@@ -55600,8 +56444,8 @@ function locationCanonical(context3) {
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function isWithin5(value3, root) {
-  const relative = path27.relative(path27.resolve(root), path27.resolve(value3));
-  return relative === "" || !relative.startsWith("..") && !path27.isAbsolute(relative);
+  const relative = path28.relative(path28.resolve(root), path28.resolve(value3));
+  return relative === "" || !relative.startsWith("..") && !path28.isAbsolute(relative);
 }
 function transformDomain(value3) {
   if (!isRecord15(value3) || typeof value3.transform !== "function")
@@ -55632,21 +56476,21 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
   const memoryProject = memoryProjectForLocation(paths, cwd, canonical5);
-  const horielIndex = paths.horielIndex ?? path27.join(paths.malahorHome, "horiel", "index.js");
-  const horielDatabase = paths.horielDb ?? path27.join(paths.malahorHome, "horiel", "horiel.sqlite");
-  const horielSnapshots = paths.horielSnapshots ?? path27.join(paths.malahorHome, "horiel", "snapshots");
-  if (!fs21.existsSync(paths.mnemoIndex)) {
+  const horielIndex = paths.horielIndex ?? path28.join(paths.malahorHome, "horiel", "index.js");
+  const horielDatabase = paths.horielDb ?? path28.join(paths.malahorHome, "horiel", "horiel.sqlite");
+  const horielSnapshots = paths.horielSnapshots ?? path28.join(paths.malahorHome, "horiel", "snapshots");
+  if (!fs22.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   } else if (!memoryProject) {
     warnings.push("mcp.mnemo-project-unresolved");
   }
-  if (!fs21.existsSync(paths.docsIndex)) {
+  if (!fs22.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs21.existsSync(paths.mnemoIndex)) {
+      if (fs22.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
@@ -55667,7 +56511,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         }
       }
       const existingDocs = editor.get("docs");
-      if (fs21.existsSync(paths.docsIndex)) {
+      if (fs22.existsSync(paths.docsIndex)) {
         if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
           editor.set("docs", {
             ...existingDocs ?? {},
@@ -55681,7 +56525,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         }
       }
       const existingHoriel = editor.get("horiel");
-      if (fs21.existsSync(horielIndex)) {
+      if (fs22.existsSync(horielIndex)) {
         if (!memoryProject) {
           warnings.push("mcp.horiel-project-unresolved");
         } else if (!existingHoriel || isMalahorHoriel(existingHoriel, paths)) {
@@ -55705,7 +56549,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
       }
       let target;
       try {
-        const registered = canonical5 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs21.realpathSync(entry.root) === fs21.realpathSync(canonical5)) : undefined;
+        const registered = canonical5 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs22.realpathSync(entry.root) === fs22.realpathSync(canonical5)) : undefined;
         if (!canonical5 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
@@ -55747,14 +56591,14 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path27.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path28.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function memoryProjectForLocation(paths, cwd, canonical5) {
   const roots = registeredProjectRoots(paths.projectsFile).sort((left2, right) => right.root.length - left2.root.length);
   const canonicalValue = canonical5?.trim();
   const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
   const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
-  const byCanonicalPath = canonicalValue && path27.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
+  const byCanonicalPath = canonicalValue && path28.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
   const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey].filter((value3) => Boolean(value3)));
   if (candidates.size > 1)
     return;
@@ -55774,33 +56618,33 @@ function validMemoryProject(value3) {
 }
 function canonicalLocation(value3) {
   try {
-    return fs21.realpathSync(value3);
+    return fs22.realpathSync(value3);
   } catch {
-    return path27.resolve(value3);
+    return path28.resolve(value3);
   }
 }
 function pathInside(value3, root) {
-  const relative = path27.relative(canonicalLocation(root), canonicalLocation(value3));
-  return relative === "" || !relative.startsWith("..") && !path27.isAbsolute(relative);
+  const relative = path28.relative(canonicalLocation(root), canonicalLocation(value3));
+  return relative === "" || !relative.startsWith("..") && !path28.isAbsolute(relative);
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path27.resolve(paths.opencodeDir, item) === path27.resolve(paths.mnemoIndex));
+  return command.some((item) => path28.resolve(paths.opencodeDir, item) === path28.resolve(paths.mnemoIndex));
 }
 function isMalahorDocs(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path27.resolve(paths.opencodeDir, item) === path27.resolve(paths.docsIndex));
+  return command.some((item) => path28.resolve(paths.opencodeDir, item) === path28.resolve(paths.docsIndex));
 }
 function isMalahorHoriel(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
-  const index3 = paths.horielIndex ?? path27.join(paths.malahorHome, "horiel", "index.js");
+  const index3 = paths.horielIndex ?? path28.join(paths.malahorHome, "horiel", "index.js");
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path27.resolve(paths.opencodeDir, item) === path27.resolve(index3));
+  return command.some((item) => path28.resolve(paths.opencodeDir, item) === path28.resolve(index3));
 }
 function withoutHorielEnablement(value3) {
   if (!isRecord15(value3))
@@ -55824,7 +56668,7 @@ function sessionLocationProject(value3) {
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path27.join(directory, "plugin-state.json");
+  const file = path28.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -55836,15 +56680,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs21.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path27.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs21.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs22.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path28.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs22.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs21.chmodSync(temporary, 384);
-    fs21.renameSync(temporary, file);
+    fs22.chmodSync(temporary, 384);
+    fs22.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -55854,8 +56698,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path27.resolve(override);
-  return path27.join(os2.homedir(), ".malahor");
+    return path28.resolve(override);
+  return path28.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))

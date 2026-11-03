@@ -2710,7 +2710,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       storage,
     });
     try {
-      expect(definitions).toEqual(["plan", "run", "plan_control", "commit_prepare"]);
+      expect(definitions).toEqual(["plan", "run", "plan_control", "commit_prepare", "task_classify", "direct_prepare"]);
       expect(hooks.has("permission.evaluate")).toBe(true);
       expect(hooks.has("tool.execute.before")).toBe(true);
       expect(hooks.has("shell.create.before")).toBe(true);

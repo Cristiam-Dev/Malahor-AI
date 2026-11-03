@@ -791,6 +791,10 @@ const KNOWN_TOOLS = new Set([
   "list",
   "question",
   "invalid",
+  "malahor_task_classify",
+  "task_classify",
+  "malahor_direct_prepare",
+  "direct_prepare",
   ...MALAHOR_CODE_MODE_TOOL_NAMES,
 ]);
 
