@@ -146,6 +146,7 @@ interface ActionIntent {
   canonicalizer: "action-intent-v1";
   actionID: string;
   kind: "edit" | "shell" | "subagent";
+  logicalKey?: string;
   command?: { executable: string; argv: string[]; cwd: string; composition: "single" | "and-sequence" };
 }
 
@@ -165,6 +166,7 @@ interface ActionIntentApi {
     manifestHash: string;
     repairedInputHash: string;
   } | undefined;
+  validActionIntentV1(value: unknown): boolean;
   validActionIntentRepair(value: unknown, root: string): boolean;
   sameActionIntentSequence(left: readonly ActionIntent[], right: readonly ActionIntent[]): boolean;
 }
@@ -371,6 +373,49 @@ describe("A1: ActionIntentV1 y decisiones tipadas", () => {
       kind: "shell",
       command: { executable: "bun", argv: ["test", "tests/planning.test.ts"] },
     });
+  });
+
+  test("los edits con clave son intents autocontenidos y válidos", async () => {
+    const api = await loadActionIntentApi();
+    const base = {
+      kind: "edit",
+      project: "demo",
+      root: repo,
+      rootRef: "project",
+      path: "src/a.ts",
+      existence: "may-create",
+      constraints: { remote: false, infrastructure: false },
+    };
+    const first = api.canonicalizeActionIntent({ ...base, logicalKey: "edit-a" });
+    const second = api.canonicalizeActionIntent({ ...base, logicalKey: "edit-b" });
+    const same = api.canonicalizeActionIntent({ ...base, logicalKey: "edit-a" });
+    const withoutKey = api.canonicalizeActionIntent(base);
+
+    expect(first[0]?.actionID).not.toBe(second[0]?.actionID);
+    expect(first[0]?.actionID).toBe(same[0]?.actionID);
+    expect(first[0]?.logicalKey).toBe("edit-a");
+    expect(first[0] && api.validActionIntentV1(first[0])).toBe(true);
+    expect(second[0] && api.validActionIntentV1(second[0])).toBe(true);
+    expect(withoutKey[0]?.logicalKey).toBeUndefined();
+    expect(withoutKey[0] && "logicalKey" in withoutKey[0]).toBe(false);
+    expect(withoutKey[0] && api.validActionIntentV1(withoutKey[0])).toBe(true);
+  });
+
+  test("alterar la clave lógica de un intent invalida su actionID", async () => {
+    const api = await loadActionIntentApi();
+    const [intent] = api.canonicalizeActionIntent({
+      kind: "edit",
+      project: "demo",
+      root: repo,
+      rootRef: "project",
+      path: "src/a.ts",
+      existence: "may-create",
+      logicalKey: "edit-a",
+      constraints: { remote: false, infrastructure: false },
+    });
+
+    expect(intent && api.validActionIntentV1(intent)).toBe(true);
+    expect(api.validActionIntentV1({ ...intent, logicalKey: "edit-b" })).toBe(false);
   });
 
   test("split y join de la misma secuencia conservan IDs y orden; reordenar o añadir argumentos cambia la intención", async () => {

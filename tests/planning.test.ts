@@ -2297,7 +2297,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     expect(records.has(planKey(SESSION))).toBe(false);
   });
 
-  test("malahor_plan rechaza dos ediciones sobre el mismo archivo", async () => {
+  test("malahor_plan rechaza dos ediciones del mismo archivo sin cadena", async () => {
     configure("ejecutar");
     const harness = await registeredTools();
 
@@ -2311,8 +2311,84 @@ describe("tools registradas y flujo sin APIs host reales", () => {
         ],
       },
       call(SESSION, "malahor", "msg_duplicate_edit"),
-    )).rejects.toThrow(/mismo archivo|agrupa/i);
+    )).rejects.toThrow(/encadena|dependencias/i);
     expect(records.has(planKey(SESSION))).toBe(false);
+  });
+
+  test("malahor_plan acepta dos ediciones encadenadas del mismo archivo", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    const target = path.join(repo, "file.ts");
+    const result = await harness.execute(
+      "plan",
+      {
+        ...input(),
+        actions: [
+          { action: "edit" as const, resource: target, key: "edit-a" },
+          { action: "edit" as const, resource: target, key: "edit-b", dependsOn: ["edit-a"] },
+        ],
+      },
+      call(SESSION, "malahor", "msg_chained_edits"),
+    );
+    const state = records.get(planKey(SESSION)) as PlanStateV5;
+
+    expect(state.version).toBe(5);
+    expect(state.actionIntents).toHaveLength(2);
+    expect(new Set(state.actionIntents.map((intent) => intent.actionID)).size).toBe(2);
+    expect(state.actionGraph?.map((node) => node.key)).toEqual(["edit-a", "edit-b"]);
+    expect(result.content).toContain(FOREGROUND_START);
+  });
+
+  test("la ejecución secuencial empareja primero una edición y luego la otra", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    const target = path.join(repo, "file.ts");
+    await harness.execute("plan", {
+      ...input(),
+      actions: [
+        { action: "edit" as const, resource: target, key: "edit-a" },
+        { action: "edit" as const, resource: target, key: "edit-b", dependsOn: ["edit-a"] },
+      ],
+    }, call(SESSION, "malahor", "msg_chain_plan"));
+    const presented = records.get(planKey(SESSION)) as PlanStateV5;
+    await harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_chain_run"));
+    options = { ...options, toolRegistered: true };
+    const firstCall = {
+      sessionID: SESSION,
+      agent: "malahor",
+      messageID: "msg_chain_one",
+      id: "call_chain_one",
+      tool: "edit",
+      input: { path: target },
+    };
+    await evaluatePlanningTool(firstCall, options, storage);
+    const completed = await completePlanningTool(firstCall, options, storage);
+    expect(completed).toMatchObject({ ok: true, completed: 1 });
+    const secondCall = { ...firstCall, messageID: "msg_chain_two", id: "call_chain_two" };
+    await expect(evaluatePlanningTool(secondCall, options, storage)).resolves.toBeUndefined();
+  });
+
+  test("la clasificación y la preparación directa no exigen un plan activo", async () => {
+    configure("ejecutar");
+    const permission = {
+      sessionID: SESSION,
+      action: "malahor_task_classify",
+      resources: [],
+      effect: "allow",
+    };
+    await evaluatePlanningPermission(permission, options, storage);
+    expect(permission.effect).toBe("allow");
+
+    await expect(evaluatePlanningTool(
+      { sessionID: SESSION, agent: "malahor", tool: "malahor_task_classify", input: {} },
+      options,
+      storage,
+    )).resolves.toBeUndefined();
+    await expect(evaluatePlanningTool(
+      { sessionID: SESSION, agent: "malahor", tool: "malahor_direct_prepare", input: {} },
+      options,
+      storage,
+    )).resolves.toBeUndefined();
   });
 
   test("los errores de Planning indican el siguiente paso", async () => {
@@ -2372,6 +2448,12 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       storage,
     });
     await recovery.snapshot();
+    await recovery.recordAttempt({
+      actionID: actionGraphForPlan(running)[0]!.actionID,
+      outcome: "success",
+      canonicalInputHash: "sha256:anchor-success",
+      resourceDigests: { before: ["sha256:anchor-v1"], after: ["sha256:anchor-v2"] },
+    });
 
     await harness.execute("plan_control", { action: "pause" }, call(SESSION, "malahor", "msg_anchor_pause"));
     const paused = records.get(planKey(SESSION)) as PlanStateV5;
@@ -2382,6 +2464,58 @@ describe("tools registradas y flujo sin APIs host reales", () => {
 
     await expect(harness.execute(
       "plan_control", { action: "complete" }, call(SESSION, "malahor", "msg_anchor_complete"),
+    )).resolves.toBeDefined();
+    expect((records.get(planKey(SESSION)) as PlanStateV5).phase).toBe("completed");
+  });
+
+  test("malahor_plan acepta un edit con clave y persiste un estado V5 válido", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    const result = await harness.execute(
+      "plan",
+      {
+        ...input(),
+        actions: [{ action: "edit" as const, resource: path.join(repo, "file.ts"), key: "edit-keyed" }],
+      },
+      call(SESSION, "malahor", "msg_keyed_edit_plan"),
+    );
+    const state = records.get(planKey(SESSION)) as PlanStateV5;
+
+    expect(state.version).toBe(5);
+    expect(state.actionIntents).toHaveLength(1);
+    expect(state.actionIntents[0]).toMatchObject({ kind: "edit", logicalKey: "edit-keyed" });
+    expect(result.content).toContain(FOREGROUND_START);
+  });
+
+  test("plan_control complete falla mientras existan acciones sin ejecutar", async () => {
+    const fixture = await runningPluginRecovery();
+    await fixture.recovery.snapshot();
+
+    await expect(fixture.harness.execute(
+      "plan_control",
+      { action: "complete" },
+      call(SESSION, "malahor", "msg_completion_pending"),
+    )).rejects.toThrow(/sin ejecutar|pendiente/i);
+    expect(records.get(planKey(SESSION))).toMatchObject({
+      revision: fixture.running.revision,
+      phase: "running",
+    });
+  });
+
+  test("plan_control complete acepta el cierre cuando todas las acciones terminaron", async () => {
+    const fixture = await runningPluginRecovery();
+    await fixture.recovery.snapshot();
+    await fixture.recovery.recordAttempt({
+      actionID: fixture.actionID,
+      outcome: "success",
+      canonicalInputHash: "sha256:completion-success",
+      resourceDigests: { before: ["sha256:completion-v1"], after: ["sha256:completion-v2"] },
+    });
+
+    await expect(fixture.harness.execute(
+      "plan_control",
+      { action: "complete" },
+      call(SESSION, "malahor", "msg_completion_succeeded"),
     )).resolves.toBeDefined();
     expect((records.get(planKey(SESSION)) as PlanStateV5).phase).toBe("completed");
   });

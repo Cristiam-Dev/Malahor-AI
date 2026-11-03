@@ -501,28 +501,54 @@ export function normalizePlannedActions(actions: PlannedAction[]): PlannedAction
     return { action: item.action, resource: item.resource, key, dependsOn };
   });
   const unique = new Map<string, PlannedAction>();
-  const editTargets = new Map<string, string>();
   for (const item of normalized) {
-    if (item.action === "edit") {
-      const previousKey = editTargets.get(item.resource);
-      if (previousKey !== undefined && previousKey !== item.key) {
-        throw new Error("Dos acciones de edición no pueden compartir el mismo archivo; agrupa los cambios en una sola edición o divide el trabajo en otro plan.");
-      }
-      editTargets.set(item.resource, item.key!);
-    }
-    const identity = `${item.action}\0${item.resource}`;
+    const identity = `${item.action}\0${item.resource}\0${item.key}`;
     const previous = unique.get(identity);
-    if (previous && (previous.key !== item.key || !sameStrings(previous.dependsOn ?? [], item.dependsOn ?? []))) {
-      throw new Error("Una acción duplicada no puede declarar claves o dependencias distintas.");
+    if (previous && !sameStrings(previous.dependsOn ?? [], item.dependsOn ?? [])) {
+      throw new Error("Una acción duplicada no puede declarar dependencias distintas.");
     }
     unique.set(identity, item);
   }
   const result = [...unique.values()].sort((left, right) => compareText(
-    `${left.action}\0${left.resource}`,
-    `${right.action}\0${right.resource}`,
+    `${left.action}\0${left.resource}\0${left.key}`,
+    `${right.action}\0${right.resource}\0${right.key}`,
   ));
   validateLogicalActionGraph(result);
+  assertChainedEdits(result);
   return result;
+}
+
+function assertChainedEdits(actions: PlannedAction[]): void {
+  const byKey = new Map(actions.map((action) => [action.key!, action]));
+  const reaches = (from: string, to: string): boolean => {
+    const seen = new Set<string>();
+    const stack = [from];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (current === to) return true;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      for (const dependency of byKey.get(current)?.dependsOn ?? []) stack.push(dependency);
+    }
+    return false;
+  };
+  const editsByResource = new Map<string, string[]>();
+  for (const action of actions) {
+    if (action.action !== "edit") continue;
+    const keys = editsByResource.get(action.resource) ?? [];
+    keys.push(action.key!);
+    editsByResource.set(action.resource, keys);
+  }
+  for (const keys of editsByResource.values()) {
+    for (const left of keys) {
+      for (const right of keys) {
+        if (left === right) continue;
+        if (!reaches(left, right) && !reaches(right, left)) {
+          throw new Error("Las ediciones del mismo archivo deben encadenarse con dependencias.");
+        }
+      }
+    }
+  }
 }
 
 function normalizeActionKey(value: string): string {

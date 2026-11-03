@@ -117,6 +117,7 @@ const fallbackAuthority = DEFAULT_PLANNING_AUTHORITY;
 const READ_ONLY_TOOLS = new Set([
   "read", "glob", "grep", "webfetch", "websearch", "list", "question", "skill",
   "todowrite", "todoread", "invalid", "malahor_plan", "malahor_run", "malahor_plan_control",
+  "malahor_task_classify", "malahor_direct_prepare",
   ...MALAHOR_CODE_MODE_TOOL_NAMES,
 ]);
 const PROTECTED = new Set(["edit", "shell", "subagent"]);
@@ -1174,8 +1175,11 @@ export async function assertPlanningCompletionReady(
     || Object.values(raw.nodes).some((node) => node.state === "in-flight")) {
     throw new Error("El plan no puede completarse mientras exista una reserva in-flight pendiente.");
   }
-  if (Object.values(raw.nodes).some((node) => node.state === "failed")) {
-    throw new Error("El plan no puede completarse mientras exista un intento fallido pendiente.");
+  const pending = Object.values(raw.nodes)
+    .filter((node) => node.state !== "succeeded" && node.state !== "removed")
+    .map((node) => node.key);
+  if (pending.length > 0) {
+    throw new Error(`El plan no puede completarse: quedan acciones sin ejecutar (${pending.slice(0, 5).join(", ")}).`);
   }
 }
 
@@ -1716,13 +1720,27 @@ function matchedOperationActionIDs(
       constraints: { remote: false, infrastructure: false },
     })[0]!;
     const canonicalPath = normalized.resources[0]?.canonicalPath;
-    const match = planned.find((group) => group.action.action === "edit"
+    const matches = planned.filter((group) => group.action.action === "edit"
       && group.intents.length === 1
       && group.intents[0]?.resources[0]?.canonicalPath === canonicalPath);
-    if (!match) return undefined;
-    actionIDs.push(match.intents[0]!.actionID);
+    if (matches.length === 0) return undefined;
+    actionIDs.push(...matches.map((group) => group.intents[0]!.actionID));
   }
   return [...new Set(actionIDs)];
+}
+
+function selectActionIDs(
+  state: PlanStateV5,
+  checkpoint: PlanExecutionCheckpointV1,
+  actionIDs: string[],
+): string[] {
+  const kind = state.actionIntents.find((intent) => intent.actionID === actionIDs[0])?.kind;
+  if (kind !== "edit") return actionIDs;
+  const actionable = actionIDs.filter((actionID) => {
+    const nodeState = checkpoint.nodes[actionID]?.state;
+    return nodeState === "ready" || nodeState === "failed";
+  });
+  return actionable.length > 0 ? actionable.slice(0, 1) : actionIDs.slice(0, 1);
 }
 
 async function authorizeCheckpointActions(
@@ -1738,8 +1756,9 @@ async function authorizeCheckpointActions(
   try {
     const recovery = recoveryForState(state, storage, authority, directory, projectRoot);
     const checkpoint = await recovery.snapshot();
-    const requested = new Set(actionIDs);
-    for (const actionID of actionIDs) {
+    const selected = selectActionIDs(state, checkpoint, actionIDs);
+    const requested = new Set(selected);
+    for (const actionID of selected) {
       const decision = await recovery.evaluateAction(actionID);
       if (decision.effect === "deny") {
         // El host puede comprobar el permiso después de tool.execute.before:
@@ -1753,7 +1772,7 @@ async function authorizeCheckpointActions(
         if (!internalSequence) return recoveryDenial(decision.code);
       }
     }
-    return { effect: "allow", code: "AUTHORIZED", actionID: actionIDs.at(-1)! };
+    return { effect: "allow", code: "AUTHORIZED", actionID: selected.at(-1)! };
   } catch {
     return { effect: "deny", code: "PLAN_CHECKPOINT_INVALID" };
   }
@@ -1784,7 +1803,9 @@ async function reservePlanningToolCall(
   const call = toolCallIdentity(input);
   if (!call) throw new PlanningAuthorizationError("CRITICAL_CONTROL_UNAVAILABLE", "La tool no incluye correlación before/after.");
   const recovery = recoveryForState(state, storage, authority, directory, projectRoot);
-  for (const actionID of actionIDs) {
+  const checkpoint = await recovery.snapshot();
+  const selected = selectActionIDs(state, checkpoint, actionIDs);
+  for (const actionID of selected) {
     const result = await recovery.reserveToolCall(recoveryCorrelation(state, actionID, call, input));
     if (result.decision === "block") {
       const denial = recoveryDenial(result.code);

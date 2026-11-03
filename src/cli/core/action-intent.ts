@@ -40,6 +40,8 @@ export interface ActionIntentV1 {
   rootRef: string;
   rootDigest: string;
   resources: ActionIntentFilesystemResource[];
+  /** Clave lógica del edit; viaja dentro del intent firmado. */
+  logicalKey?: string;
   command?: ActionIntentCommand;
   filesystem?: {
     readRoots: string[];
@@ -62,6 +64,7 @@ export interface ActionIntentV1 {
 export interface PlannedActionLike {
   action: string;
   resource: string;
+  key?: string;
 }
 
 export interface PlannedActionIntentContext {
@@ -117,6 +120,7 @@ export function canonicalizeActionIntent(input: Record<string, unknown>): Action
         : undefined;
     if (!existence) throw canonicalizationError("Contrato de existencia no evaluable.");
     const resource = filesystemResource(target, root, "write", existence);
+    const logicalKey = normalizeLogicalKey(input.logicalKey);
     return [sealIntent({
       schema: 1,
       canonicalizer: ACTION_INTENT_CANONICALIZER,
@@ -126,6 +130,7 @@ export function canonicalizeActionIntent(input: Record<string, unknown>): Action
       rootRef,
       rootDigest,
       resources: [resource],
+      ...(logicalKey === undefined ? {} : { logicalKey }),
       constraints,
     })];
   }
@@ -208,6 +213,7 @@ export function canonicalizePlannedAction(
       kind: "edit",
       path: action.resource,
       existence: pathExistsWithoutFollowingSymlink(action.resource, context.root) ? "must-exist" : "may-create",
+      logicalKey: action.key,
     });
   }
   if (action.action === "shell") {
@@ -387,6 +393,18 @@ export function sameActionIntentSequence(
   return left.length === right.length && left.every((intent, index) => intent.actionID === right[index]?.actionID);
 }
 
+function normalizeLogicalKey(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw canonicalizationError("Clave lógica de edición no evaluable.");
+  const normalized = value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-");
+  if (!validLogicalKey(normalized)) throw canonicalizationError("Clave lógica de edición no evaluable.");
+  return normalized;
+}
+
+function validLogicalKey(value: unknown): boolean {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,127}$/.test(value);
+}
+
 export function validActionIntentV1(value: unknown): value is ActionIntentV1 {
   if (!isRecord(value) || value.schema !== 1 || value.canonicalizer !== ACTION_INTENT_CANONICALIZER
     || typeof value.actionID !== "string" || !/^[a-f0-9]{64}$/.test(value.actionID)
@@ -399,7 +417,8 @@ export function validActionIntentV1(value: unknown): value is ActionIntentV1 {
     || !validConstraints(value.constraints)) return false;
   const common = ["schema", "canonicalizer", "actionID", "kind", "effect", "project", "rootRef", "rootDigest", "resources", "constraints"];
   if (value.kind === "edit" && (value.effect !== "write" || value.resources.length !== 1
-    || !hasOnlyKeys(value, common))) return false;
+    || !hasOnlyKeys(value, value.logicalKey === undefined ? common : [...common, "logicalKey"])
+    || (value.logicalKey !== undefined && !validLogicalKey(value.logicalKey)))) return false;
   if (value.kind === "subagent" && (value.effect !== "delegate" || !isRecord(value.delegate)
     || !hasOnlyKeys(value, [...common, "delegate"]) || !hasOnlyKeys(value.delegate, ["agent"])
     || !["malahor-diagnostico", "malahor-testing"].includes(String(value.delegate.agent)))) return false;

@@ -2180,6 +2180,7 @@ function canonicalizeActionIntent(input) {
     if (!existence)
       throw canonicalizationError("Contrato de existencia no evaluable.");
     const resource = filesystemResource(target, root, "write", existence);
+    const logicalKey = normalizeLogicalKey(input.logicalKey);
     return [sealIntent({
       schema: 1,
       canonicalizer: ACTION_INTENT_CANONICALIZER,
@@ -2189,6 +2190,7 @@ function canonicalizeActionIntent(input) {
       rootRef,
       rootDigest,
       resources: [resource],
+      ...logicalKey === undefined ? {} : { logicalKey },
       constraints
     })];
   }
@@ -2247,7 +2249,8 @@ function canonicalizePlannedAction(action, context) {
       ...base,
       kind: "edit",
       path: action.resource,
-      existence: pathExistsWithoutFollowingSymlink(action.resource, context.root) ? "must-exist" : "may-create"
+      existence: pathExistsWithoutFollowingSymlink(action.resource, context.root) ? "must-exist" : "may-create",
+      logicalKey: action.key
     });
   }
   if (action.action === "shell") {
@@ -2406,11 +2409,24 @@ function compatibilityActionIntents(actions, project) {
 function sameActionIntentSequence(left, right) {
   return left.length === right.length && left.every((intent, index) => intent.actionID === right[index]?.actionID);
 }
+function normalizeLogicalKey(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string")
+    throw canonicalizationError("Clave lógica de edición no evaluable.");
+  const normalized = value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-");
+  if (!validLogicalKey(normalized))
+    throw canonicalizationError("Clave lógica de edición no evaluable.");
+  return normalized;
+}
+function validLogicalKey(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,127}$/.test(value);
+}
 function validActionIntentV1(value) {
   if (!isRecord5(value) || value.schema !== 1 || value.canonicalizer !== ACTION_INTENT_CANONICALIZER || typeof value.actionID !== "string" || !/^[a-f0-9]{64}$/.test(value.actionID) || !["edit", "shell", "subagent"].includes(String(value.kind)) || !["write", "execute", "delegate"].includes(String(value.effect)) || typeof value.project !== "string" || !value.project || typeof value.rootRef !== "string" || !value.rootRef || typeof value.rootDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.rootDigest) || !Array.isArray(value.resources) || !value.resources.every(validFilesystemResource) || !validConstraints(value.constraints))
     return false;
   const common = ["schema", "canonicalizer", "actionID", "kind", "effect", "project", "rootRef", "rootDigest", "resources", "constraints"];
-  if (value.kind === "edit" && (value.effect !== "write" || value.resources.length !== 1 || !hasOnlyKeys(value, common)))
+  if (value.kind === "edit" && (value.effect !== "write" || value.resources.length !== 1 || !hasOnlyKeys(value, value.logicalKey === undefined ? common : [...common, "logicalKey"]) || value.logicalKey !== undefined && !validLogicalKey(value.logicalKey)))
     return false;
   if (value.kind === "subagent" && (value.effect !== "delegate" || !isRecord5(value.delegate) || !hasOnlyKeys(value, [...common, "delegate"]) || !hasOnlyKeys(value.delegate, ["agent"]) || !["malahor-diagnostico", "malahor-testing"].includes(String(value.delegate.agent))))
     return false;
@@ -11476,25 +11492,55 @@ function normalizePlannedActions(actions) {
     return { action: item.action, resource: item.resource, key, dependsOn };
   });
   const unique2 = new Map;
-  const editTargets = new Map;
   for (const item of normalized) {
-    if (item.action === "edit") {
-      const previousKey = editTargets.get(item.resource);
-      if (previousKey !== undefined && previousKey !== item.key) {
-        throw new Error("Dos acciones de edición no pueden compartir el mismo archivo; agrupa los cambios en una sola edición o divide el trabajo en otro plan.");
-      }
-      editTargets.set(item.resource, item.key);
-    }
-    const identity = `${item.action}\x00${item.resource}`;
+    const identity = `${item.action}\x00${item.resource}\x00${item.key}`;
     const previous = unique2.get(identity);
-    if (previous && (previous.key !== item.key || !sameStrings2(previous.dependsOn ?? [], item.dependsOn ?? []))) {
-      throw new Error("Una acción duplicada no puede declarar claves o dependencias distintas.");
+    if (previous && !sameStrings2(previous.dependsOn ?? [], item.dependsOn ?? [])) {
+      throw new Error("Una acción duplicada no puede declarar dependencias distintas.");
     }
     unique2.set(identity, item);
   }
-  const result = [...unique2.values()].sort((left, right) => compareText2(`${left.action}\x00${left.resource}`, `${right.action}\x00${right.resource}`));
+  const result = [...unique2.values()].sort((left, right) => compareText2(`${left.action}\x00${left.resource}\x00${left.key}`, `${right.action}\x00${right.resource}\x00${right.key}`));
   validateLogicalActionGraph(result);
+  assertChainedEdits(result);
   return result;
+}
+function assertChainedEdits(actions) {
+  const byKey = new Map(actions.map((action) => [action.key, action]));
+  const reaches = (from, to) => {
+    const seen = new Set;
+    const stack = [from];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current === to)
+        return true;
+      if (seen.has(current))
+        continue;
+      seen.add(current);
+      for (const dependency of byKey.get(current)?.dependsOn ?? [])
+        stack.push(dependency);
+    }
+    return false;
+  };
+  const editsByResource = new Map;
+  for (const action of actions) {
+    if (action.action !== "edit")
+      continue;
+    const keys = editsByResource.get(action.resource) ?? [];
+    keys.push(action.key);
+    editsByResource.set(action.resource, keys);
+  }
+  for (const keys of editsByResource.values()) {
+    for (const left of keys) {
+      for (const right of keys) {
+        if (left === right)
+          continue;
+        if (!reaches(left, right) && !reaches(right, left)) {
+          throw new Error("Las ediciones del mismo archivo deben encadenarse con dependencias.");
+        }
+      }
+    }
+  }
 }
 function normalizeActionKey(value) {
   if (typeof value !== "string")
@@ -15008,6 +15054,8 @@ var READ_ONLY_TOOLS = new Set([
   "malahor_plan",
   "malahor_run",
   "malahor_plan_control",
+  "malahor_task_classify",
+  "malahor_direct_prepare",
   ...MALAHOR_CODE_MODE_TOOL_NAMES
 ]);
 var PROTECTED = new Set(["edit", "shell", "subagent"]);
@@ -15867,8 +15915,9 @@ async function assertPlanningCompletionReady(storage, state, authority = fallbac
   if (Object.keys(raw.reservations).length > 0 || Object.values(raw.nodes).some((node) => node.state === "in-flight")) {
     throw new Error("El plan no puede completarse mientras exista una reserva in-flight pendiente.");
   }
-  if (Object.values(raw.nodes).some((node) => node.state === "failed")) {
-    throw new Error("El plan no puede completarse mientras exista un intento fallido pendiente.");
+  const pending = Object.values(raw.nodes).filter((node) => node.state !== "succeeded" && node.state !== "removed").map((node) => node.key);
+  if (pending.length > 0) {
+    throw new Error(`El plan no puede completarse: quedan acciones sin ejecutar (${pending.slice(0, 5).join(", ")}).`);
   }
 }
 async function ask(port, call, action, digest2) {
@@ -16314,12 +16363,22 @@ function matchedOperationActionIDs(state, operations, directory, projectRoot, op
       constraints: { remote: false, infrastructure: false }
     })[0];
     const canonicalPath = normalized.resources[0]?.canonicalPath;
-    const match = planned.find((group) => group.action.action === "edit" && group.intents.length === 1 && group.intents[0]?.resources[0]?.canonicalPath === canonicalPath);
-    if (!match)
+    const matches = planned.filter((group) => group.action.action === "edit" && group.intents.length === 1 && group.intents[0]?.resources[0]?.canonicalPath === canonicalPath);
+    if (matches.length === 0)
       return;
-    actionIDs.push(match.intents[0].actionID);
+    actionIDs.push(...matches.map((group) => group.intents[0].actionID));
   }
   return [...new Set(actionIDs)];
+}
+function selectActionIDs(state, checkpoint, actionIDs) {
+  const kind = state.actionIntents.find((intent) => intent.actionID === actionIDs[0])?.kind;
+  if (kind !== "edit")
+    return actionIDs;
+  const actionable = actionIDs.filter((actionID) => {
+    const nodeState = checkpoint.nodes[actionID]?.state;
+    return nodeState === "ready" || nodeState === "failed";
+  });
+  return actionable.length > 0 ? actionable.slice(0, 1) : actionIDs.slice(0, 1);
 }
 async function authorizeCheckpointActions(state, actionIDs, storage, authority, directory, projectRoot, call) {
   if (!actionIDs?.length)
@@ -16327,8 +16386,9 @@ async function authorizeCheckpointActions(state, actionIDs, storage, authority, 
   try {
     const recovery = recoveryForState(state, storage, authority, directory, projectRoot);
     const checkpoint = await recovery.snapshot();
-    const requested = new Set(actionIDs);
-    for (const actionID of actionIDs) {
+    const selected = selectActionIDs(state, checkpoint, actionIDs);
+    const requested = new Set(selected);
+    for (const actionID of selected) {
       const decision = await recovery.evaluateAction(actionID);
       if (decision.effect === "deny") {
         if (decision.code === "ACTION_IN_FLIGHT" && call && reservationOwnedByCall(checkpoint, actionID, call))
@@ -16339,7 +16399,7 @@ async function authorizeCheckpointActions(state, actionIDs, storage, authority, 
           return recoveryDenial(decision.code);
       }
     }
-    return { effect: "allow", code: "AUTHORIZED", actionID: actionIDs.at(-1) };
+    return { effect: "allow", code: "AUTHORIZED", actionID: selected.at(-1) };
   } catch {
     return { effect: "deny", code: "PLAN_CHECKPOINT_INVALID" };
   }
@@ -16354,7 +16414,9 @@ async function reservePlanningToolCall(input, state, actionIDs, storage, authori
   if (!call)
     throw new PlanningAuthorizationError("CRITICAL_CONTROL_UNAVAILABLE", "La tool no incluye correlación before/after.");
   const recovery = recoveryForState(state, storage, authority, directory, projectRoot);
-  for (const actionID of actionIDs) {
+  const checkpoint = await recovery.snapshot();
+  const selected = selectActionIDs(state, checkpoint, actionIDs);
+  for (const actionID of selected) {
     const result = await recovery.reserveToolCall(recoveryCorrelation(state, actionID, call, input));
     if (result.decision === "block") {
       const denial = recoveryDenial(result.code);
