@@ -38,8 +38,28 @@ export interface TaskClassifier {
   invalidate(sessionID: string): void;
 }
 
+const sharedDecisions = new Map<string, TaskClassificationRecord>();
+
+export function recordCommitDecision(scope: TaskClassificationScope, messageID: string): TaskDecisionV1 {
+  const context: TaskClassificationContext = {
+    sessionID: scope.sessionID,
+    messageID,
+    project: scope.project,
+    root: scope.root,
+    mode: scope.mode,
+    policyRevision: scope.policyRevision,
+  };
+  const decision = commitTaskDecision(context);
+  sharedDecisions.set(scope.sessionID, {
+    decision,
+    scope: normalizeScope(scope),
+    messageID,
+  });
+  return decision;
+}
+
 export function createTaskClassifier(): TaskClassifier {
-  const decisions = new Map<string, TaskClassificationRecord>();
+  const decisions = sharedDecisions;
 
   return {
     classify(value, scope, call) {

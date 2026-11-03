@@ -3725,10 +3725,28 @@ var init_task_classification = __esm(() => {
 var exports_task_classification = {};
 __export(exports_task_classification, {
   registerTaskClassificationTool: () => registerTaskClassificationTool,
+  recordCommitDecision: () => recordCommitDecision,
   createTaskClassifier: () => createTaskClassifier
 });
+function recordCommitDecision(scope3, messageID) {
+  const context3 = {
+    sessionID: scope3.sessionID,
+    messageID,
+    project: scope3.project,
+    root: scope3.root,
+    mode: scope3.mode,
+    policyRevision: scope3.policyRevision
+  };
+  const decision = commitTaskDecision(context3);
+  sharedDecisions.set(scope3.sessionID, {
+    decision,
+    scope: normalizeScope3(scope3),
+    messageID
+  });
+  return decision;
+}
 function createTaskClassifier() {
-  const decisions = new Map;
+  const decisions = sharedDecisions;
   return {
     classify(value3, scope3, call) {
       if (call.agent !== "malahor" || call.sessionID !== scope3.sessionID) {
@@ -3829,9 +3847,10 @@ function normalizeScope3(scope3) {
 function sameScope3(left2, right) {
   return left2.sessionID === right.sessionID && left2.project === right.project && left2.policyRevision === right.policyRevision && left2.mode === right.mode && left2.root === right.root;
 }
-var TASK_ASSESSMENT_INPUT_SCHEMA;
+var sharedDecisions, TASK_ASSESSMENT_INPUT_SCHEMA;
 var init_task_classification2 = __esm(() => {
   init_task_classification();
+  sharedDecisions = new Map;
   TASK_ASSESSMENT_INPUT_SCHEMA = {
     type: "object",
     properties: {
@@ -56446,7 +56465,16 @@ async function setupV2(context3) {
         }
         if (event2 === "session.prompt.before" && capabilities["commit.workflow.tool"] === true) {
           try {
-            await commitWorkflow.observePrompt(input, resolveCommitWorkflowScope);
+            const observed = await commitWorkflow.observePrompt(input, resolveCommitWorkflowScope);
+            const sessionID = typeof input.sessionID === "string" ? input.sessionID : "";
+            const messageID = typeof input.messageID === "string" ? input.messageID : "";
+            if (observed.explicit && sessionID && messageID) {
+              const scope3 = await resolveCommitWorkflowScope(sessionID);
+              if (scope3) {
+                const { recordCommitDecision: recordCommitDecision2 } = await Promise.resolve().then(() => (init_task_classification2(), exports_task_classification));
+                recordCommitDecision2(scope3, messageID);
+              }
+            }
           } catch (error) {
             const sessionID = typeof input.sessionID === "string" ? input.sessionID : "";
             if (sessionID)

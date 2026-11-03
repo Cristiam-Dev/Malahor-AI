@@ -516,7 +516,16 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
         }
         if (event === "session.prompt.before" && capabilities["commit.workflow.tool"] === true) {
           try {
-            await commitWorkflow.observePrompt(input, resolveCommitWorkflowScope);
+            const observed = await commitWorkflow.observePrompt(input, resolveCommitWorkflowScope);
+            const sessionID = typeof input.sessionID === "string" ? input.sessionID : "";
+            const messageID = typeof input.messageID === "string" ? input.messageID : "";
+            if (observed.explicit && sessionID && messageID) {
+              const scope = await resolveCommitWorkflowScope(sessionID);
+              if (scope) {
+                const { recordCommitDecision } = await import("./task-classification");
+                recordCommitDecision(scope, messageID);
+              }
+            }
           } catch (error) {
             const sessionID = typeof input.sessionID === "string" ? input.sessionID : "";
             if (sessionID) commitWorkflow.invalidate(sessionID);
