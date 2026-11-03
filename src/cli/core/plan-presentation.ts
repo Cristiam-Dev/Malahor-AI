@@ -54,10 +54,17 @@ export interface PlanRevisionDeltaPresentation {
   planChanged?: boolean;
 }
 
+export interface PlanActionStatePresentation {
+  key: string;
+  state: string;
+  dependsOn: readonly string[];
+}
+
 export interface PlanRevisionPresentationContext {
   parentRevision: string;
   progress: PlanExecutionProgressPresentation;
   delta: PlanRevisionDeltaPresentation;
+  actions?: readonly PlanActionStatePresentation[];
 }
 
 const MAX_STEPS = 5;
@@ -142,6 +149,9 @@ function renderRevisionSummary(revision: PlanRevisionPresentationContext): strin
     `- Completadas: ${progress.succeeded}; listas: ${progress.ready}; esperando: ${progress.waiting}; bloqueadas: ${progress.blocked}.`,
     `- En curso: ${progress.inFlight}; con fallo técnico pendiente: ${progress.failed}; total: ${progress.total}.`,
     "- El trabajo independiente ya confirmado se mantiene; los bloqueos y permisos pendientes no se trasladan a la revisión nueva.",
+    ...(revision.actions && revision.actions.length > 0
+      ? ["", "## Estado por acción", ...revision.actions.map(actionStateLine)]
+      : []),
     "",
     "## Cambios de esta revisión",
     `- Preservadas: ${delta.preserved.length}.`,
@@ -174,6 +184,9 @@ function renderRevisionTechnical(
     `- Bloqueadas: ${progress.blocked}`,
     `- En curso: ${progress.inFlight}`,
     `- Fallidas: ${progress.failed}`,
+    ...(revision.actions && revision.actions.length > 0
+      ? ["", "### Estado por acción", ...revision.actions.map(actionStateLine)]
+      : []),
     "",
     "### Delta firmado",
     ...revisionDeltaTechnicalLines("Preservadas", delta.preserved),
@@ -182,6 +195,10 @@ function renderRevisionTechnical(
     ...revisionDeltaTechnicalLines("Retiradas", delta.removed),
     `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}`,
   ].join("\n");
+}
+
+function actionStateLine(action: PlanActionStatePresentation): string {
+  return `- ${action.key}: ${action.state}${action.dependsOn.length > 0 ? ` (depende de: ${action.dependsOn.join(", ")})` : ""}`;
 }
 
 function revisionDeltaTechnicalLines(label: string, actionIDs: readonly string[]): string[] {
@@ -232,6 +249,14 @@ function renderSummaryView(state: PlanState): string {
       "## Ruta",
       ...presentation.steps.map((step, index) =>
         `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`),
+    );
+  }
+  if (state.plan.actions.length > 0) {
+    lines.push(
+      "",
+      "## Acciones",
+      ...state.plan.actions.map(({ action, key, dependsOn }) =>
+        `- ${key ?? "sin-clave"}: ${action}${dependsOn && dependsOn.length > 0 ? ` (depende de: ${dependsOn.join(", ")})` : " (sin dependencias)"}`),
     );
   }
   if (presentation.impact.length > 0) {
@@ -340,7 +365,8 @@ function technicalBody(state: PlanState): string[] {
     lines.push(
       "",
       "### Acciones exactas",
-      ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${safeJson(resource)}`),
+      ...state.plan.actions.map(({ action, resource, key, dependsOn }) =>
+        `- ${action}: ${safeJson(resource)} (clave: ${key ?? "sin-clave"}${dependsOn && dependsOn.length > 0 ? `; depende de: ${dependsOn.join(", ")}` : "; sin dependencias"})`),
     );
   }
   if (state.version === 5 && state.actionIntents.length > 0) {

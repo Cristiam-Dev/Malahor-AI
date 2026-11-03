@@ -996,10 +996,17 @@ function revisionPresentationContext(
     else if (node.state === "in-flight") counts.inFlight++;
     else if (node.state === "failed") counts.failed++;
   }
+  const keyByActionID = new Map(actionGraphForPlan(revision.candidate).map((node) => [node.actionID, node.key]));
+  const actions = Object.values(checkpoint.nodes).map((node) => ({
+    key: keyByActionID.get(node.actionID) ?? node.actionID,
+    state: node.state,
+    dependsOn: node.dependsOn.map((actionID) => keyByActionID.get(actionID) ?? actionID),
+  }));
   return {
     parentRevision: revision.parent.revision,
     progress: counts,
     delta: revision.delta,
+    actions,
   };
 }
 

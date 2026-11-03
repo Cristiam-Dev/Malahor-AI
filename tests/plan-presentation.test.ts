@@ -324,6 +324,40 @@ describe("divulgación progresiva del plan", () => {
     expect(technical).toContain(`- shell: ${safeJson("bun test tests/planning.test.ts")}`);
   });
 
+  test("la vista principal y la técnica muestran acciones y dependencias", async () => {
+    const state = renderState({ mode: "executor" });
+    const summary = await render(state);
+    const technical = await render(state, "technical");
+
+    expect(summary).toContain("## Acciones");
+    expect(summary).toMatch(/\(sin dependencias\)|depende de:/);
+    expect(technical).toContain("### Acciones exactas");
+    expect(technical).toMatch(/clave:/);
+    expect(technical).toMatch(/sin dependencias|depende de:/);
+  });
+
+  test("la revisión muestra el estado por acción con sus dependencias", async () => {
+    const module = await import("../src/cli/core/plan-presentation");
+    const state = renderState({ mode: "executor" });
+    const revision = {
+      parentRevision: "a".repeat(32),
+      progress: { total: 2, succeeded: 1, ready: 1, waiting: 0, blocked: 0, inFlight: 0, failed: 0 },
+      delta: { preserved: ["x"], changed: [], added: [], removed: [] },
+      actions: [
+        { key: "edit-a", state: "succeeded", dependsOn: [] },
+        { key: "test-b", state: "ready", dependsOn: ["edit-a"] },
+      ],
+    };
+    const summary = module.renderPlanRevisionPresentation(state, revision, "summary");
+    const technical = module.renderPlanRevisionPresentation(state, revision, "technical");
+
+    expect(summary).toContain("## Estado por acción");
+    expect(summary).toContain("- edit-a: succeeded");
+    expect(summary).toContain("- test-b: ready (depende de: edit-a)");
+    expect(technical).toContain("### Estado por acción");
+    expect(technical).toContain("- test-b: ready (depende de: edit-a)");
+  });
+
   test("omite secciones realmente vacías", async () => {
     const state = renderState({
       mode: "advisor",
@@ -395,8 +429,10 @@ describe("divulgación progresiva del plan", () => {
     const encoded = safeJson(resource);
     const actionLines = technical.split("\n").filter((line) => line.startsWith("- shell: "));
 
-    expect(actionLines).toEqual([`- shell: ${encoded}`]);
-    expect(JSON.parse(actionLines[0]!.slice("- shell: ".length))).toBe(resource);
+    expect(actionLines).toHaveLength(1);
+    expect(actionLines[0]).toContain(`- shell: ${encoded}`);
+    expect(actionLines[0]).toContain("clave:");
+    expect(JSON.parse(actionLines[0]!.slice("- shell: ".length, "- shell: ".length + encoded.length))).toBe(resource);
     expect(markdown).not.toContain("<details");
     expect(markdown.match(/<\/details>/g) ?? []).toHaveLength(0);
     expect(markdown).toContain("&lt;/details&gt;");

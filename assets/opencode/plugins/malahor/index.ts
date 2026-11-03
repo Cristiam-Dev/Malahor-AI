@@ -10749,6 +10749,7 @@ function renderRevisionSummary(revision) {
     `- Completadas: ${progress.succeeded}; listas: ${progress.ready}; esperando: ${progress.waiting}; bloqueadas: ${progress.blocked}.`,
     `- En curso: ${progress.inFlight}; con fallo técnico pendiente: ${progress.failed}; total: ${progress.total}.`,
     "- El trabajo independiente ya confirmado se mantiene; los bloqueos y permisos pendientes no se trasladan a la revisión nueva.",
+    ...revision.actions && revision.actions.length > 0 ? ["", "## Estado por acción", ...revision.actions.map(actionStateLine)] : [],
     "",
     "## Cambios de esta revisión",
     `- Preservadas: ${delta.preserved.length}.`,
@@ -10778,6 +10779,7 @@ function renderRevisionTechnical(revision, state) {
     `- Bloqueadas: ${progress.blocked}`,
     `- En curso: ${progress.inFlight}`,
     `- Fallidas: ${progress.failed}`,
+    ...revision.actions && revision.actions.length > 0 ? ["", "### Estado por acción", ...revision.actions.map(actionStateLine)] : [],
     "",
     "### Delta firmado",
     ...revisionDeltaTechnicalLines("Preservadas", delta.preserved),
@@ -10787,6 +10789,9 @@ function renderRevisionTechnical(revision, state) {
     `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}`
   ].join(`
 `);
+}
+function actionStateLine(action) {
+  return `- ${action.key}: ${action.state}${action.dependsOn.length > 0 ? ` (depende de: ${action.dependsOn.join(", ")})` : ""}`;
 }
 function revisionDeltaTechnicalLines(label, actionIDs) {
   return actionIDs.length > 0 ? [`- ${label}:`, ...actionIDs.map((actionID) => `  - ${actionID}`)] : [`- ${label}: ninguna`];
@@ -10832,6 +10837,9 @@ function renderSummaryView(state) {
   ];
   if (presentation.steps.length > 0) {
     lines.push("", "## Ruta", ...presentation.steps.map((step, index) => `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`));
+  }
+  if (state.plan.actions.length > 0) {
+    lines.push("", "## Acciones", ...state.plan.actions.map(({ action, key, dependsOn }) => `- ${key ?? "sin-clave"}: ${action}${dependsOn && dependsOn.length > 0 ? ` (depende de: ${dependsOn.join(", ")})` : " (sin dependencias)"}`));
   }
   if (presentation.impact.length > 0) {
     lines.push("", "## Impacto", ...impactLines(presentation.impact));
@@ -10908,7 +10916,7 @@ function technicalBody(state) {
     lines.push("", "### Dependencias", ...state.plan.dependencies.map(({ planID, revision }) => `- ${planID}@${revision}`));
   }
   if (state.plan.actions.length > 0) {
-    lines.push("", "### Acciones exactas", ...state.plan.actions.map(({ action, resource }) => `- ${action}: ${safeJson(resource)}`));
+    lines.push("", "### Acciones exactas", ...state.plan.actions.map(({ action, resource, key, dependsOn }) => `- ${action}: ${safeJson(resource)} (clave: ${key ?? "sin-clave"}${dependsOn && dependsOn.length > 0 ? `; depende de: ${dependsOn.join(", ")}` : "; sin dependencias"})`));
   }
   if (state.version === 5 && state.actionIntents.length > 0) {
     lines.push("", "### Intents firmados", ...state.actionIntents.map((intent, index) => `- ${index + 1}. ${intent.kind}: ${intent.actionID}`));
@@ -15698,10 +15706,17 @@ function revisionPresentationContext(revision, checkpoint) {
     else if (node.state === "failed")
       counts.failed++;
   }
+  const keyByActionID = new Map(actionGraphForPlan(revision.candidate).map((node) => [node.actionID, node.key]));
+  const actions = Object.values(checkpoint.nodes).map((node) => ({
+    key: keyByActionID.get(node.actionID) ?? node.actionID,
+    state: node.state,
+    dependsOn: node.dependsOn.map((actionID) => keyByActionID.get(actionID) ?? actionID)
+  }));
   return {
     parentRevision: revision.parent.revision,
     progress: counts,
-    delta: revision.delta
+    delta: revision.delta,
+    actions
   };
 }
 function foregroundPlanRevisionResult(revision, checkpoint) {
