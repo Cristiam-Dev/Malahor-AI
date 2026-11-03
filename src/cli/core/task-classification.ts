@@ -6,7 +6,7 @@ export const TASK_CLASSIFICATION_SCHEMA = 1 as const;
 export const TASK_DECISION_SCHEMA = 1 as const;
 
 export type SignalLevel = "low" | "medium" | "high" | "unknown";
-export type TaskRouteV1 = "inspect" | "direct" | "recognize" | "diagnose" | "sdd" | "clarify";
+export type TaskRouteV1 = "inspect" | "direct" | "recognize" | "diagnose" | "sdd" | "clarify" | "commit";
 export type TaskRequestedEffect = "none" | "mutation" | "unknown";
 export type TaskMode = "advisor" | "assistant" | "executor";
 
@@ -199,9 +199,27 @@ export function deriveTaskDecision(
   };
 }
 
+export function commitTaskDecision(context: TaskClassificationContext): TaskDecisionV1 {
+  const decision = {
+    schema: TASK_DECISION_SCHEMA,
+    route: "commit" as const,
+    reasonCodes: ["explicit-commit"],
+    riskGate: "policy-evaluation-required" as const,
+  };
+  return {
+    ...decision,
+    decisionRef: sha256(JSON.stringify({
+      schema: TASK_CLASSIFICATION_SCHEMA,
+      context: normalizeContext(context),
+      operation: "commit",
+      decision,
+    })),
+  };
+}
+
 export function isTaskRoute(value: unknown): value is TaskRouteV1 {
   return value === "inspect" || value === "direct" || value === "recognize"
-    || value === "diagnose" || value === "sdd" || value === "clarify";
+    || value === "diagnose" || value === "sdd" || value === "clarify" || value === "commit";
 }
 
 export function taskRouteLabel(route: TaskRouteV1): string {
@@ -212,6 +230,7 @@ export function taskRouteLabel(route: TaskRouteV1): string {
     case "diagnose": return "diagnóstico";
     case "sdd": return "especificación y plan";
     case "clarify": return "aclaración";
+    case "commit": return "commit";
   }
 }
 

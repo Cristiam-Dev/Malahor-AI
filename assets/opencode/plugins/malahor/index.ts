@@ -3569,6 +3569,23 @@ function deriveTaskDecision(assessment, context3) {
     }))
   };
 }
+function commitTaskDecision(context3) {
+  const decision = {
+    schema: TASK_DECISION_SCHEMA,
+    route: "commit",
+    reasonCodes: ["explicit-commit"],
+    riskGate: "policy-evaluation-required"
+  };
+  return {
+    ...decision,
+    decisionRef: sha2564(JSON.stringify({
+      schema: TASK_CLASSIFICATION_SCHEMA,
+      context: normalizeContext(context3),
+      operation: "commit",
+      decision
+    }))
+  };
+}
 function parseSignals(value3) {
   const record5 = exactRecord4(value3, [
     "specification",
@@ -3731,6 +3748,23 @@ function createTaskClassifier() {
         decision,
         scope: normalizeScope3(scope3),
         messageID: call.messageID
+      });
+      return decision;
+    },
+    recordCommit(scope3, messageID) {
+      const context3 = {
+        sessionID: scope3.sessionID,
+        messageID,
+        project: scope3.project,
+        root: scope3.root,
+        mode: scope3.mode,
+        policyRevision: scope3.policyRevision
+      };
+      const decision = commitTaskDecision(context3);
+      decisions.set(scope3.sessionID, {
+        decision,
+        scope: normalizeScope3(scope3),
+        messageID
       });
       return decision;
     },

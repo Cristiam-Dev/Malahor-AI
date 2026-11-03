@@ -1,5 +1,6 @@
 import {
   TaskClassificationError,
+  commitTaskDecision,
   deriveTaskDecision,
   parseTaskAssessment,
   type TaskClassificationContext,
@@ -31,6 +32,7 @@ export interface TaskClassificationRecord {
 
 export interface TaskClassifier {
   classify(value: unknown, scope: TaskClassificationScope, call: TaskClassificationCall): TaskDecisionV1;
+  recordCommit(scope: TaskClassificationScope, messageID: string): TaskDecisionV1;
   current(sessionID: string, route?: TaskRouteV1): TaskClassificationRecord | undefined;
   requireRoute(sessionID: string, route: TaskRouteV1, scope: TaskClassificationScope): TaskDecisionV1;
   invalidate(sessionID: string): void;
@@ -58,6 +60,24 @@ export function createTaskClassifier(): TaskClassifier {
         decision,
         scope: normalizeScope(scope),
         messageID: call.messageID,
+      });
+      return decision;
+    },
+
+    recordCommit(scope, messageID) {
+      const context: TaskClassificationContext = {
+        sessionID: scope.sessionID,
+        messageID,
+        project: scope.project,
+        root: scope.root,
+        mode: scope.mode,
+        policyRevision: scope.policyRevision,
+      };
+      const decision = commitTaskDecision(context);
+      decisions.set(scope.sessionID, {
+        decision,
+        scope: normalizeScope(scope),
+        messageID,
       });
       return decision;
     },

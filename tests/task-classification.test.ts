@@ -50,6 +50,25 @@ function assessment(overrides: Partial<TaskAssessmentV1> = {}): TaskAssessmentV1
 }
 
 describe("clasificación de tareas", () => {
+  test("registra una decisión commit firmada", async () => {
+    const { createTaskClassifier } = await import("../src/plugin/task-classification");
+    const classifier = createTaskClassifier();
+    const scope = {
+      sessionID: context.sessionID,
+      project: context.project,
+      policyRevision: context.policyRevision,
+      mode: context.mode,
+      root: context.root,
+    } as const;
+    const decision = classifier.recordCommit(scope, context.messageID);
+
+    expect(decision).toMatchObject({ schema: 1, route: "commit", riskGate: "policy-evaluation-required" });
+    expect(decision.reasonCodes).toContain("explicit-commit");
+    expect(decision.decisionRef).toMatch(/^[a-f0-9]{64}$/);
+    expect(classifier.current(context.sessionID, "commit")?.decision).toEqual(decision);
+    expect(classifier.requireRoute(context.sessionID, "commit", scope)).toEqual(decision);
+  });
+
   test("acepta una evaluación cerrada y deriva ejecución directa", () => {
     const parsed = parseTaskAssessment(assessment());
     const decision = deriveTaskDecision(parsed, context);
