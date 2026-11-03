@@ -26,3 +26,9 @@ Usar este flujo para cambios no triviales: features nuevas, refactors amplios, c
 - Leer y mantener artefactos SDD mediante `docs_*` en la raiz externa del proyecto.
 - Interpretar la solicitud documental natural, buscar el artefacto antes de crear y gestionar `ifMatch`/`ifNoneMatch` sin pedir versiones al usuario.
 - No crear documentacion SDD dentro del repo objetivo ni usar filesystem/Obsidian MCP como fallback.
+
+## Presupuesto de análisis
+
+Máximo tres ciclos de exploración o análisis por fase. Si al tercer ciclo no
+hay evidencia suficiente, entrega el bloqueo con lo que falta y la siguiente
+acción concreta. No repitas la misma búsqueda con otra formulación.

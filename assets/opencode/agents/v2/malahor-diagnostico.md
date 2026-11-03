@@ -2,6 +2,7 @@
 # malahor-managed
 description: Diagnostica typecheck, lint y Sonar; reporta problemas con archivo y linea sin editar codigo
 mode: subagent
+steps: 8
 permissions:
   - action: read
     resource: "*"

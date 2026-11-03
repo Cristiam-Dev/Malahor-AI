@@ -2,6 +2,7 @@
 # malahor-managed
 description: Escribe y ejecuta pruebas; edita solo tests y nunca codigo de produccion
 mode: subagent
+steps: 8
 permission:
   read: allow
   glob: allow
