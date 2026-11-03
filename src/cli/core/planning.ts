@@ -22,6 +22,16 @@ import {
 export interface PlannedAction {
   action: string;
   resource: string;
+  /** Clave lógica firmada; las revisiones antiguas pueden no incluirla. */
+  key?: string;
+  /** Dependencias por clave lógica; nunca se infieren desde texto. */
+  dependsOn?: string[];
+}
+
+export interface PlanActionGraphNodeV1 {
+  key: string;
+  actionID: string;
+  dependsOn: string[];
 }
 
 export type PlanLevel = 0 | 1 | 2;
@@ -29,6 +39,13 @@ export type PlanLevel = 0 | 1 | 2;
 export interface PlanDependency {
   planID: string;
   revision: string;
+}
+
+/** Gates explícitos: se firman con el plan y no constituyen autorización de shell. */
+export interface PlanVerificationV1 {
+  cwd: string;
+  tests: Array<{ command: string; targets: string[]; rationale: string }>;
+  build: string;
 }
 
 export interface PlanInput {
@@ -39,10 +56,12 @@ export interface PlanInput {
   presentation: PlanPresentationInput;
   actions: PlannedAction[];
   dependencies?: PlanDependency[];
+  verification?: PlanVerificationV1;
   /** Campos internos V5; la tool visible los deriva en el host. */
   contractVersion?: 5;
   canonicalizerVersion?: typeof ACTION_INTENT_CANONICALIZER;
   actionIntents?: ActionIntentV1[];
+  actionGraph?: PlanActionGraphNodeV1[];
   specRef?: string;
   specHash?: string;
 }
@@ -54,6 +73,7 @@ export interface NormalizedPlanInput {
   presentation: PlanPresentationInput;
   actions: PlannedAction[];
   dependencies: PlanDependency[];
+  verification?: PlanVerificationV1;
 }
 
 export type PlanPhase = "presented" | "reviewed" | "running" | "paused" | "blocked"
@@ -95,8 +115,12 @@ export interface PlanStateV5 extends PlanStateBase {
   canonicalizerVersion: typeof ACTION_INTENT_CANONICALIZER;
   actionIntentSource: "canonical" | "compatibility";
   actionIntents: ActionIntentV1[];
+  /** Ausente únicamente en estados V5 creados antes de PLANNING-RECOVERY-01. */
+  actionGraph?: PlanActionGraphNodeV1[];
   specRef?: string;
   specHash?: string;
+  /** Firma de la fase previa al primer checkpoint; inmutable al pausar o reanudar. */
+  executionAnchor?: string;
 }
 
 export type PlanState = LegacyPlanState | PlanStateV5;
@@ -208,7 +232,8 @@ export async function controlPlan(
     }
     if (command === "pause") {
       if (stored.phase !== "running") throw new Error("Solo un plan en ejecucion puede pausarse.");
-      const next = seal({ ...stored, phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
+      const next = seal({ ...stored, executionAnchor: planExecutionProofHash(stored),
+        phase: "paused", pausedAt: Date.now(), updatedAt: Date.now() }, authority);
       await adapter.save(next);
       return next;
     }
@@ -277,12 +302,13 @@ export function proposePlan(
   }
   const plan = normalizePlan(scope.mode, input);
   const actionIntents = normalizeActionIntents(input.actionIntents, plan.actions, scope.project);
+  const actionGraph = normalizeActionGraph(input.actionGraph, plan.actions, actionIntents);
   const actionIntentSource = input.actionIntents === undefined ? "compatibility" : "canonical";
   const spec = normalizeSpecReference(input.specRef, input.specHash);
   const revision = randomID();
   const digest = digestPlanV5(
     scope, plan, planID, revision, presentationInteractionID,
-    actionIntents, actionIntentSource, spec,
+    actionIntents, actionIntentSource, spec, actionGraph,
   );
   return seal({
     version: 5,
@@ -290,6 +316,7 @@ export function proposePlan(
     canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
     actionIntentSource,
     actionIntents,
+    actionGraph,
     ...spec,
     planID, ...scope, presentationInteractionID, plan, digest, revision,
     phase: "presented", createdAt: now, updatedAt: now, proof: "",
@@ -340,6 +367,11 @@ function startPlan(state: PlanStateV5, now: number, authority: PlanningAuthority
   return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
 }
 
+/** El checkpoint se vincula a la revisión firmada previa a sus cambios de fase. */
+export function planExecutionProofHash(state: PlanStateV5): string {
+  return state.executionAnchor ?? createHash("sha256").update(state.proof).digest("hex");
+}
+
 export function planAllows(
   state: unknown,
   scope: PlanScope,
@@ -381,7 +413,11 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
       || !Array.isArray(value.actionIntents)
       || !value.actionIntents.every(validActionIntentV1)
       || value.actionIntents.some((intent) => intent.project !== value.project)
-      || !validSpecReference(value.specRef, value.specHash)) return false;
+      || (value.executionAnchor !== undefined
+        && (typeof value.executionAnchor !== "string" || !/^[a-f0-9]{64}$/.test(value.executionAnchor)))
+      || !validSpecReference(value.specRef, value.specHash)
+      || (value.actionGraph !== undefined
+        && !validActionGraph(value.actionGraph, value.actionIntents as ActionIntentV1[]))) return false;
     if ((plan.actions.length === 0) !== (value.actionIntents.length === 0)) return false;
     expected = digestPlanV5(
       scope,
@@ -392,6 +428,7 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
       value.actionIntents as ActionIntentV1[],
       value.actionIntentSource,
       specReferenceFromState(value),
+      value.actionGraph as PlanActionGraphNodeV1[] | undefined,
     );
   } else {
     expected = digestPlanV4(scope, plan, value.planID, value.revision, value.presentationInteractionID as string);
@@ -437,18 +474,82 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput
     presentation: input.presentation,
     actions: input.actions,
     dependencies,
+    verification: input.verification,
     specRef: input.specRef,
     specHash: input.specHash,
   };
   if (JSON.stringify(visibleInput).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
   const presentation = normalizePlanPresentation(input.presentation, mode, level);
-  const actions = uniqueSorted(input.actions, (item) => `${item.action}\0${item.resource}`);
+  const actions = normalizePlannedActions(input.actions);
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\0${item.revision}`);
   validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
   const normalized = {
     summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies,
+    ...(input.verification === undefined ? {} : { verification: normalizePlanVerification(input.verification) }),
   };
   return input.level === undefined ? normalized : { level, ...normalized };
+}
+
+export function normalizePlannedActions(actions: PlannedAction[]): PlannedAction[] {
+  const normalized = actions.map((item) => {
+    const key = item.key === undefined
+      ? derivedActionKey(item.action, item.resource)
+      : normalizeActionKey(item.key);
+    const dependsOn = item.dependsOn === undefined
+      ? []
+      : [...new Set(item.dependsOn.map(normalizeActionKey))].sort(compareText);
+    return { action: item.action, resource: item.resource, key, dependsOn };
+  });
+  const unique = new Map<string, PlannedAction>();
+  for (const item of normalized) {
+    const identity = `${item.action}\0${item.resource}`;
+    const previous = unique.get(identity);
+    if (previous && (previous.key !== item.key || !sameStrings(previous.dependsOn ?? [], item.dependsOn ?? []))) {
+      throw new Error("Una acción duplicada no puede declarar claves o dependencias distintas.");
+    }
+    unique.set(identity, item);
+  }
+  const result = [...unique.values()].sort((left, right) => compareText(
+    `${left.action}\0${left.resource}`,
+    `${right.action}\0${right.resource}`,
+  ));
+  validateLogicalActionGraph(result);
+  return result;
+}
+
+function normalizeActionKey(value: string): string {
+  if (typeof value !== "string") throw new Error("Clave lógica de acción inválida.");
+  const normalized = value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-");
+  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(normalized)) {
+    throw new Error("Clave lógica de acción inválida.");
+  }
+  return normalized;
+}
+
+function derivedActionKey(action: string, resource: string): string {
+  const prefix = action === "subagent" ? "delegate" : action;
+  return `${prefix}-${createHash("sha256").update(`${action}\0${resource}`).digest("hex").slice(0, 16)}`;
+}
+
+function validateLogicalActionGraph(actions: PlannedAction[]): void {
+  const keys = actions.map((action) => action.key!);
+  if (new Set(keys).size !== keys.length) throw new Error("Las claves lógicas de acción deben ser únicas.");
+  const known = new Set(keys);
+  if (actions.some((action) => (action.dependsOn ?? []).some((dependency) => !known.has(dependency)))) {
+    throw new Error("Una dependencia de acción no existe en el plan.");
+  }
+  const byKey = new Map(actions.map((action) => [action.key!, action]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (key: string): void => {
+    if (visited.has(key)) return;
+    if (visiting.has(key)) throw new Error("Ciclo de dependencias entre acciones detectado.");
+    visiting.add(key);
+    for (const dependency of byKey.get(key)?.dependsOn ?? []) visit(dependency);
+    visiting.delete(key);
+    visited.add(key);
+  };
+  for (const key of keys) visit(key);
 }
 
 function normalizeActionIntents(
@@ -467,6 +568,80 @@ function normalizeActionIntents(
     throw new Error("Los intents pertenecen a otro proyecto.");
   }
   return structuredClone(value);
+}
+
+function normalizeActionGraph(
+  value: PlanActionGraphNodeV1[] | undefined,
+  actions: PlannedAction[],
+  intents: ActionIntentV1[],
+): PlanActionGraphNodeV1[] {
+  if (value !== undefined) {
+    if (!validActionGraph(value, intents)) throw new Error("Grafo de acciones firmado inválido.");
+    return structuredClone(value);
+  }
+  if (actions.length === intents.length && actions.every((action) => action.key)) {
+    const actionIDByKey = new Map(actions.map((action, index) => [action.key!, intents[index]!.actionID]));
+    return actions.map((action, index) => ({
+      key: action.key!,
+      actionID: intents[index]!.actionID,
+      dependsOn: (action.dependsOn ?? []).map((key) => actionIDByKey.get(key)!),
+    }));
+  }
+  return intents.map((intent, index) => ({
+    key: `legacy-${index + 1}-${intent.actionID.slice(0, 12)}`,
+    actionID: intent.actionID,
+    dependsOn: [],
+  }));
+}
+
+function validActionGraph(value: unknown, intents: ActionIntentV1[]): value is PlanActionGraphNodeV1[] {
+  if (!Array.isArray(value) || value.length !== intents.length) return false;
+  const intentIDs = new Set(intents.map((intent) => intent.actionID));
+  const nodes: PlanActionGraphNodeV1[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const node = raw as Record<string, unknown>;
+    if (typeof node.key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(node.key)
+      || typeof node.actionID !== "string" || !intentIDs.has(node.actionID)
+      || !Array.isArray(node.dependsOn)
+      || node.dependsOn.some((dependency) => typeof dependency !== "string" || !intentIDs.has(dependency))) return false;
+    nodes.push({ key: node.key, actionID: node.actionID, dependsOn: node.dependsOn as string[] });
+  }
+  if (new Set(nodes.map((node) => node.key)).size !== nodes.length
+    || new Set(nodes.map((node) => node.actionID)).size !== nodes.length) return false;
+  try {
+    validateActionIDGraph(nodes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateActionIDGraph(nodes: PlanActionGraphNodeV1[]): void {
+  const byID = new Map(nodes.map((node) => [node.actionID, node]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (actionID: string): void => {
+    if (visited.has(actionID)) return;
+    if (visiting.has(actionID)) throw new Error("Ciclo de dependencias entre intents detectado.");
+    visiting.add(actionID);
+    for (const dependency of byID.get(actionID)?.dependsOn ?? []) {
+      if (!byID.has(dependency)) throw new Error("Dependencia de intent inexistente.");
+      visit(dependency);
+    }
+    visiting.delete(actionID);
+    visited.add(actionID);
+  };
+  for (const node of nodes) visit(node.actionID);
+}
+
+export function actionGraphForPlan(state: PlanStateV5): PlanActionGraphNodeV1[] {
+  if (state.actionGraph) return structuredClone(state.actionGraph);
+  return state.actionIntents.map((intent, index) => ({
+    key: `legacy-${index + 1}-${intent.actionID.slice(0, 12)}`,
+    actionID: intent.actionID,
+    dependsOn: [],
+  }));
 }
 
 function normalizeSpecReference(specRef: unknown, specHash: unknown): Pick<PlanStateV5, "specRef" | "specHash"> {
@@ -584,6 +759,7 @@ function digestPlanV5(
   actionIntents: ActionIntentV1[],
   actionIntentSource: PlanStateV5["actionIntentSource"],
   spec: Pick<PlanStateV5, "specRef" | "specHash">,
+  actionGraph?: PlanActionGraphNodeV1[],
 ): string {
   return createHash("sha256").update(canonical({
     contractVersion: PLAN_CONTRACT_VERSION,
@@ -595,6 +771,7 @@ function digestPlanV5(
     presentationInteractionID,
     actionIntentSource,
     actionIntents,
+    ...(actionGraph ? { actionGraph } : {}),
     ...spec,
   })).digest("hex");
 }
@@ -618,9 +795,8 @@ function validPlan(value: unknown, mode: MalahorMode): value is NormalizedPlanIn
   const structurallyValid = typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions)
     && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string")
     && validPlanPresentation(plan.presentation, mode, level)
-    && plan.actions.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
-      && ACTIONS.has(String((entry as Record<string, unknown>).action))
-      && typeof (entry as Record<string, unknown>).resource === "string")
+    && validPlannedActions(plan.actions)
+    && (plan.verification === undefined || validPlanVerification(plan.verification))
     && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
       && /^[a-f0-9]{32}$/.test(String((entry as Record<string, unknown>).planID))
       && /^[a-f0-9]{32}$/.test(String((entry as Record<string, unknown>).revision)));
@@ -634,6 +810,59 @@ function validPlan(value: unknown, mode: MalahorMode): value is NormalizedPlanIn
       plan.actions as PlannedAction[],
       plan.dependencies as PlanDependency[],
     );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePlanVerification(value: PlanVerificationV1): PlanVerificationV1 {
+  if (!validPlanVerification(value)) throw new Error("Verificación del plan inválida: requiere tests pertinentes y build.");
+  return structuredClone(value);
+}
+
+function validPlanVerification(value: unknown): value is PlanVerificationV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const { cwd, tests, build } = value as Record<string, unknown>;
+  if (!Array.isArray(tests) || tests.length === 0 || tests.length > 12
+    || typeof cwd !== "string" || !cwd.trim() || cwd.length > 4096
+    || typeof build !== "string" || !build.trim() || build.length > 4096) return false;
+  const commands = new Set<string>();
+  for (const entry of tests) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const { command, targets, rationale } = entry as Record<string, unknown>;
+    if (typeof command !== "string" || !command.trim() || command.length > 4096
+      || commands.has(command) || typeof rationale !== "string" || !rationale.trim() || rationale.length > 1000
+      || !Array.isArray(targets) || targets.length === 0 || targets.length > 50
+      || targets.some((target) => typeof target !== "string" || !target.trim() || target.length > 4096)) return false;
+    commands.add(command);
+  }
+  return !commands.has(build);
+}
+
+function validPlannedActions(value: unknown[]): boolean {
+  const actions: PlannedAction[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const action = entry as Record<string, unknown>;
+    if (!ACTIONS.has(String(action.action)) || typeof action.resource !== "string") return false;
+    if (action.key !== undefined && (typeof action.key !== "string"
+      || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(action.key))) return false;
+    if (action.dependsOn !== undefined && (!Array.isArray(action.dependsOn)
+      || action.dependsOn.some((dependency) => typeof dependency !== "string"
+        || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(dependency)))) return false;
+    actions.push({
+      action: action.action as string,
+      resource: action.resource,
+      ...(typeof action.key === "string" ? { key: action.key } : {}),
+      ...(Array.isArray(action.dependsOn) ? { dependsOn: action.dependsOn as string[] } : {}),
+    });
+  }
+  const legacy = actions.every((action) => action.key === undefined && action.dependsOn === undefined);
+  if (legacy) return true;
+  if (actions.some((action) => action.key === undefined || action.dependsOn === undefined)) return false;
+  try {
+    validateLogicalActionGraph(actions);
     return true;
   } catch {
     return false;
@@ -718,4 +947,8 @@ function canonical(value: unknown): string {
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
 }

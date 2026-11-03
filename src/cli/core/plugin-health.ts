@@ -254,6 +254,16 @@ export function inspectPluginState(context: PluginHealthContext): PluginHealthCh
     issues.push(`criticalGaps=${state.criticalGaps.join(",")}`);
   }
 
+  if (state.host === "v2" && state.capabilities["code-mode.read-only"] !== true) {
+    escalate("fail");
+    issues.push("code-mode.read-only=false");
+  }
+
+  if (state.host === "v2" && state.capabilities["planning.recovery"] !== true) {
+    escalate("fail");
+    issues.push("planning.recovery=false");
+  }
+
   if (state.degraded.length > 0) {
     escalate("warn");
     issues.push(`degraded=${state.degraded.join(",")}`);

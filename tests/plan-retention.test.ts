@@ -3,13 +3,18 @@ import { createHash } from "node:crypto";
 
 import { createPlanningAuthority, type PlanningAuthority } from "../src/cli/core/planning-authority";
 import {
+  actionGraphForPlan,
+  authorizePlan,
   controlPlan,
   presentPlan,
+  proposePlan,
   requestPlanExecution,
+  validState,
   type PlanInput,
   type PlanningAdapter,
   type PlanScope,
   type PlanState,
+  type PlanStateV5,
 } from "../src/cli/core/planning";
 import {
   compactTerminalPlans,
@@ -26,6 +31,11 @@ import {
   planRevisionKey,
   type PlanningRetentionStorage,
 } from "../src/plugin/plan-retention";
+import {
+  createPlanRecovery,
+  validPlanExecutionCheckpoint,
+  type PlanExecutionCheckpointV1,
+} from "../src/plugin/plan-recovery";
 
 const POLICY = "a".repeat(32);
 const authority = createPlanningAuthority(Buffer.alloc(32, 23));
@@ -34,6 +44,50 @@ interface StorageFixture {
   records: Map<string, unknown>;
   events: string[];
   storage: PlanningRetentionStorage;
+}
+
+interface TerminalRecoveryEvidence {
+  lineage: PlanStateV5[];
+  delta: {
+    parentRevision: string;
+    childRevision: string;
+    preserved: string[];
+    changed: string[];
+    added: string[];
+    removed: string[];
+  };
+  checkpoints: PlanExecutionCheckpointV1[];
+}
+
+interface TerminalArchiveBundle {
+  state: PlanStateV5;
+  lineage: PlanStateV5[];
+  delta: TerminalRecoveryEvidence["delta"];
+  checkpoints: PlanExecutionCheckpointV1[];
+}
+
+interface RecoveryRetentionApi {
+  persistPlanState(
+    storage: PlanningRetentionStorage,
+    state: PlanState,
+    authority: PlanningAuthority,
+    evidence?: TerminalRecoveryEvidence,
+  ): Promise<{ status: string; removed: number }>;
+  loadPlanArchiveBundle(
+    storage: PlanningRetentionStorage,
+    planID: string,
+    revision: string,
+    authority: PlanningAuthority,
+  ): Promise<TerminalArchiveBundle | undefined>;
+}
+
+async function loadRecoveryRetentionApi(): Promise<RecoveryRetentionApi> {
+  const modulePath = "../src/plugin/plan-retention";
+  const api = await import(modulePath) as unknown as Partial<RecoveryRetentionApi>;
+  if (typeof api.persistPlanState !== "function" || typeof api.loadPlanArchiveBundle !== "function") {
+    throw new Error(`API normativa ausente: ${modulePath} (archivo terminal con lineage y checkpoints).`);
+  }
+  return api as RecoveryRetentionApi;
 }
 
 function fixtureStorage(options: {
@@ -166,7 +220,156 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
+function sealRetentionState(
+  state: PlanStateV5,
+  patch: Partial<PlanStateV5>,
+  targetAuthority: PlanningAuthority,
+): PlanStateV5 {
+  const unsigned = { ...state, ...patch, proof: "" } as PlanStateV5;
+  const { proof: _proof, ...payload } = unsigned;
+  return { ...unsigned, proof: targetAuthority.sign(canonical(payload)) };
+}
+
+async function terminalRecoveryFixture(fixture: StorageFixture): Promise<{
+  state: PlanStateV5;
+  evidence: TerminalRecoveryEvidence;
+  graph: ReturnType<typeof actionGraphForPlan>;
+}> {
+  const planID = "d".repeat(32);
+  const parentInput = {
+    ...input(),
+    summary: "Revisión padre archivada",
+    actions: [{
+      action: "edit",
+      resource: "/tmp/opencode/retention-fixture.ts",
+      key: "root",
+      dependsOn: [],
+    }],
+  } satisfies PlanInput;
+  const childInput = {
+    ...input(),
+    summary: "Revisión hija terminal",
+    actions: [
+      ...parentInput.actions,
+      { action: "shell", resource: "echo retained", key: "added", dependsOn: [] },
+    ],
+  } satisfies PlanInput;
+  const parentPresented = proposePlan(
+    scope(), parentInput, 100, "msg-retention-lineage-parent", planID, authority,
+  );
+  const parentRunning = authorizePlan(parentPresented, parentPresented.digest, 101, authority);
+  const parent = sealRetentionState(parentRunning, {
+    phase: "superseded",
+    supersededAt: 102,
+    updatedAt: 102,
+  }, authority);
+  const childPresented = proposePlan(
+    scope(), childInput, 103, "msg-retention-lineage-child", planID, authority,
+  );
+  const childRunning = authorizePlan(childPresented, childPresented.digest, 104, authority);
+  const graph = actionGraphForPlan(childRunning);
+  const recovery = createPlanRecovery({
+    plan: {
+      planID: childRunning.planID,
+      revision: childRunning.revision,
+      digest: childRunning.digest,
+      proofHash: createHash("sha256").update(childRunning.proof).digest("hex"),
+      phase: "running",
+    },
+    graph,
+    authority,
+    storage: fixture.storage,
+    now: () => 105,
+  });
+  for (const node of graph) {
+    await recovery.recordAttempt({
+      actionID: node.actionID,
+      outcome: "success",
+      canonicalInputHash: `sha256:${node.key}`,
+      resourceDigests: { before: [`sha256:${node.key}-before`], after: [`sha256:${node.key}-after`] },
+    });
+  }
+  const checkpoint = await recovery.snapshot();
+  const state = sealRetentionState(childRunning, {
+    phase: "completed",
+    completedAt: 106,
+    updatedAt: 106,
+  }, authority);
+  const parentIDs = new Set(actionGraphForPlan(parent).map((node) => node.actionID));
+  const childIDs = new Set(graph.map((node) => node.actionID));
+  const preserved = [...childIDs].filter((actionID) => parentIDs.has(actionID));
+  const added = [...childIDs].filter((actionID) => !parentIDs.has(actionID));
+
+  expect(validState(parent, authority)).toBe(true);
+  expect(validState(childRunning, authority)).toBe(true);
+  expect(validState(state, authority)).toBe(true);
+  expect(validPlanExecutionCheckpoint(checkpoint, {
+    planID: childRunning.planID,
+    revision: childRunning.revision,
+    digest: childRunning.digest,
+    proofHash: createHash("sha256").update(childRunning.proof).digest("hex"),
+    phase: "running",
+  }, graph, authority)).toBe(true);
+
+  return {
+    state,
+    graph,
+    evidence: {
+      lineage: [parent, childRunning, state],
+      delta: {
+        parentRevision: parent.revision,
+        childRevision: state.revision,
+        preserved,
+        changed: [],
+        added,
+        removed: [],
+      },
+      checkpoints: [checkpoint],
+    },
+  };
+}
+
 describe("retención de planes terminales", () => {
+  test("el ancla de pausa conserva un checkpoint firmado durante ejecución y sobrevive la reanudación", async () => {
+    const presented = proposePlan(
+      scope("ses_retention_pause_anchor"), input(), 100, "msg_retention_pause_anchor", "7".repeat(32), authority,
+    );
+    const running = authorizePlan(presented, presented.digest, 101, authority);
+    let active: PlanState = running;
+    const adapter: PlanningAdapter = {
+      loadActive: async () => active,
+      loadPlan: async () => active,
+      save: async (value) => { active = value; },
+      confirm: async () => undefined,
+    };
+    const graph = actionGraphForPlan(running);
+    const fixture = fixtureStorage();
+    const proofHash = createHash("sha256").update(running.proof).digest("hex");
+    const recovery = createPlanRecovery({
+      plan: { planID: running.planID, revision: running.revision, digest: running.digest,
+        proofHash, phase: "running" },
+      graph, authority, storage: fixture.storage,
+    });
+    await recovery.recordAttempt({
+      actionID: graph[0]!.actionID, outcome: "success", canonicalInputHash: "sha256:anchor-test",
+      resourceDigests: { before: ["sha256:old"], after: ["sha256:new"] },
+    });
+    const checkpoint = await recovery.snapshot();
+    const paused = await controlPlan(scope("ses_retention_pause_anchor"), "pause", adapter, authority);
+    expect(paused.version).toBe(5);
+    if (paused.version !== 5) throw new Error("se esperaba V5");
+    expect(paused.proof).not.toBe(running.proof);
+    expect(paused.executionAnchor).toBe(proofHash);
+    expect(validPlanExecutionCheckpoint(checkpoint, {
+      planID: paused.planID, revision: paused.revision, digest: paused.digest,
+      proofHash: paused.executionAnchor!, phase: "paused",
+    }, graph, authority)).toBe(true);
+    const resumed = await controlPlan(scope("ses_retention_pause_anchor"), "resume", adapter, authority);
+    expect(resumed.version).toBe(5);
+    if (resumed.version !== 5) throw new Error("se esperaba V5");
+    expect(resumed.executionAnchor).toBe(proofHash);
+    expect(resumed.proof).not.toBe(paused.proof);
+  });
   test("archiva y verifica antes de retirar las tres copias vivas", async () => {
     const state = await completedState();
     const fixture = fixtureStorage();
@@ -309,5 +512,44 @@ describe("retención de planes terminales", () => {
 
     expect(result).toMatchObject({ supported: false, compacted: 0, removed: 0 });
     expect([...fixture.records]).toEqual(before);
+  });
+
+  test("PLANNING-RECOVERY-01 archiva lineage, delta y checkpoint verificable antes de retirar copias", async () => {
+    const fixture = fixtureStorage();
+    const terminal = await terminalRecoveryFixture(fixture);
+    const api = await loadRecoveryRetentionApi();
+
+    const result = await api.persistPlanState(fixture.storage, terminal.state, authority, terminal.evidence);
+    const bundle = await api.loadPlanArchiveBundle(
+      fixture.storage,
+      terminal.state.planID,
+      terminal.state.revision,
+      authority,
+    );
+
+    expect(result).toMatchObject({ status: "archived" });
+    expect(bundle).toBeDefined();
+    if (!bundle) throw new Error("El archivo terminal no devolvió el bundle de recuperación.");
+    expect(bundle.state).toEqual(terminal.state);
+    expect(bundle.lineage).toEqual(terminal.evidence.lineage);
+    expect(bundle.delta).toEqual(terminal.evidence.delta);
+    expect(bundle.checkpoints).toHaveLength(1);
+    expect(bundle.lineage.every((state) => validState(state, authority))).toBe(true);
+
+    const running = bundle.lineage.find((state) =>
+      state.revision === bundle.checkpoints[0]?.plan.revision && state.phase === "running");
+    expect(running).toBeDefined();
+    expect(validPlanExecutionCheckpoint(
+      bundle.checkpoints[0],
+      {
+        planID: running!.planID,
+        revision: running!.revision,
+        digest: running!.digest,
+        proofHash: createHash("sha256").update(running!.proof).digest("hex"),
+        phase: "running",
+      },
+      actionGraphForPlan(running!),
+      authority,
+    )).toBe(true);
   });
 });

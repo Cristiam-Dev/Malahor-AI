@@ -1,8 +1,19 @@
 import { createHash } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { validState, type PlanState } from "../cli/core/planning";
+import {
+  actionGraphForPlan,
+  validState,
+  type PlanState,
+  type PlanStateV5,
+} from "../cli/core/planning";
 import type { PlanningAuthority } from "../cli/core/planning-authority";
+import {
+  loadPlanRevisionLineage,
+  validPlanExecutionCheckpoint,
+  type PlanExecutionCheckpointV1,
+  type PlanRevisionLineageV1,
+} from "./plan-recovery";
 
 const ARCHIVE_SCHEMA = 1;
 const ARCHIVE_KIND = "malahor.plan.archive";
@@ -10,9 +21,10 @@ const POINTER_KIND = "malahor.plan.archive-pointer";
 const LIVE_PREFIX = "planning/v5/";
 const LEGACY_LIVE_PREFIX = "planning/v4/";
 const ARCHIVE_PREFIX = "planning/archive/v1/plans";
-const MAX_ARCHIVE_BYTES = 64 * 1024;
+const MAX_ARCHIVE_BYTES = 256 * 1024;
 const DEFAULT_SCAN_LIMIT = 500;
 const SCAN_PAGE_SIZE = 100;
+const MAX_LINEAGE_TRANSITIONS = 40;
 const TERMINAL_PHASES = new Set<PlanState["phase"]>(["completed", "revoked", "superseded"]);
 
 export interface PlanningStorageScanOptions {
@@ -60,6 +72,7 @@ interface PlanArchiveEnvelope {
   sha256: string;
   compressedSha256: string;
   uncompressedBytes: number;
+  payloadKind?: "state" | "recovery-bundle";
   payload: string;
 }
 
@@ -72,6 +85,29 @@ interface PlanArchivePointer {
   phase: PlanState["phase"];
   digest: string;
   archiveKey: string;
+}
+
+export interface TerminalPlanRevisionDeltaV1 {
+  parentRevision: string;
+  childRevision: string;
+  preserved: string[];
+  changed: string[];
+  added: string[];
+  removed: string[];
+  planChanged?: boolean;
+}
+
+export interface TerminalRecoveryEvidenceV1 {
+  lineage: PlanStateV5[];
+  delta: TerminalPlanRevisionDeltaV1;
+  checkpoints: PlanExecutionCheckpointV1[];
+}
+
+export interface PlanArchiveBundleV1 {
+  state: PlanStateV5;
+  lineage: PlanStateV5[];
+  delta: TerminalPlanRevisionDeltaV1;
+  checkpoints: PlanExecutionCheckpointV1[];
 }
 
 export function planKey(sessionID: string): string {
@@ -120,14 +156,117 @@ export async function persistPlanState(
   storage: PlanningRetentionStorage,
   state: PlanState,
   authority: PlanningAuthority,
+  evidence?: TerminalRecoveryEvidenceV1,
 ): Promise<PlanPersistenceResult> {
   await writeLiveState(storage, state);
   if (!TERMINAL_PHASES.has(state.phase)) return { status: "live", removed: 0 };
 
-  const result = await archiveAndPrune(storage, state, authority);
+  let terminalEvidence = evidence;
+  if (terminalEvidence === undefined && state.version === 5) {
+    try {
+      terminalEvidence = await loadTerminalRecoveryEvidence(storage, state, authority);
+    } catch (error) {
+      return {
+        status: "retained",
+        removed: 0,
+        reason: `evidencia de recovery no verificable: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  const result = await archiveAndPrune(storage, state, authority, terminalEvidence);
   return result.ok && result.removed === 3
     ? { status: "archived", removed: result.removed }
     : { status: "retained", removed: result.removed, reason: result.reason ?? "compactacion incompleta" };
+}
+
+export async function loadTerminalRecoveryEvidence(
+  storage: PlanningRetentionStorage,
+  state: PlanStateV5,
+  authority: PlanningAuthority,
+): Promise<TerminalRecoveryEvidenceV1 | undefined> {
+  if (!TERMINAL_PHASES.has(state.phase)) return undefined;
+  const newestFirst: PlanRevisionLineageV1[] = [];
+  const seen = new Set<string>();
+  let revision = state.revision;
+  while (newestFirst.length < MAX_LINEAGE_TRANSITIONS) {
+    if (seen.has(revision)) throw new Error("ciclo en el lineage de revisiones");
+    seen.add(revision);
+    const record = await loadPlanRevisionLineage(storage, state.planID, revision, authority);
+    if (!record) break;
+    if (record.child.project !== state.project || record.child.sessionID !== state.sessionID) {
+      throw new Error("lineage perteneciente a otro scope");
+    }
+    newestFirst.push(record);
+    revision = record.parentActive.revision;
+  }
+  if (newestFirst.length === 0) return undefined;
+  if (newestFirst.length === MAX_LINEAGE_TRANSITIONS) {
+    const previous = await loadPlanRevisionLineage(storage, state.planID, revision, authority);
+    if (previous) throw new Error("lineage demasiado extenso para archivar de forma acotada");
+  }
+
+  const records = newestFirst.reverse();
+  const lineage: PlanStateV5[] = [];
+  const checkpoints: PlanExecutionCheckpointV1[] = [];
+  const lineageProofs = new Set<string>();
+  const checkpointProofs = new Set<string>();
+  const appendState = (entry: PlanStateV5) => {
+    if (lineageProofs.has(entry.proof)) return;
+    lineageProofs.add(entry.proof);
+    lineage.push(structuredClone(entry));
+  };
+  const appendCheckpoint = async (
+    key: string,
+    plan: PlanStateV5,
+  ): Promise<void> => {
+    const raw = await storage.get(key);
+    if (!validPlanExecutionCheckpoint(raw, {
+      planID: plan.planID,
+      revision: plan.revision,
+      digest: plan.digest,
+      proofHash: createHash("sha256").update(plan.proof).digest("hex"),
+      phase: plan.phase === "paused" || plan.phase === "blocked" ? plan.phase : "running",
+    }, actionGraphForPlan(plan), authority)) {
+      throw new Error(`checkpoint no verificable para la revisión ${plan.revision}`);
+    }
+    if (!checkpointProofs.has(raw.proof)) {
+      checkpointProofs.add(raw.proof);
+      checkpoints.push(structuredClone(raw));
+    }
+  };
+
+  for (const record of records) {
+    appendState(record.parentActive);
+    appendState(record.parentSuperseded);
+    appendState(record.child);
+    await appendCheckpoint(record.parentCheckpointRef, record.parentActive);
+    await appendCheckpoint(record.childCheckpointRef, record.child);
+  }
+  appendState(state);
+  const latest = records.at(-1)!;
+  return {
+    lineage,
+    delta: {
+      parentRevision: latest.parentActive.revision,
+      childRevision: latest.child.revision,
+      ...structuredClone(latest.delta),
+    },
+    checkpoints,
+  };
+}
+
+export async function loadPlanArchiveBundle(
+  storage: PlanningRetentionStorage,
+  planID: string,
+  revision: string,
+  authority: PlanningAuthority,
+): Promise<PlanArchiveBundleV1 | undefined> {
+  const decoded = decodeArchivePayload(
+    await safeGet(storage, planArchiveRevisionKey(planID, revision)),
+    authority,
+  );
+  return decoded?.bundle ? structuredClone(decoded.bundle) : undefined;
 }
 
 /** V5 prevalece. Un registro V5 presente pero inválido nunca cae a V4. */
@@ -251,10 +390,11 @@ async function archiveAndPrune(
   storage: PlanningRetentionStorage,
   state: PlanState,
   authority: PlanningAuthority,
+  evidence?: TerminalRecoveryEvidenceV1,
 ): Promise<{ ok: boolean; removed: number; reason?: string }> {
   try {
     const archiveKey = planArchiveRevisionKey(state.planID, state.revision);
-    const envelope = encodeArchive(state);
+    const envelope = encodeArchive(state, authority, evidence);
     await storage.set(archiveKey, envelope);
     const verifiedArchive = decodeArchive(await storage.get(archiveKey), authority);
     if (!verifiedArchive || !sameRevision(verifiedArchive, state)) {
@@ -337,8 +477,13 @@ async function restoreRemovedRecords(
   return restored;
 }
 
-function encodeArchive(state: PlanState): PlanArchiveEnvelope {
-  const serialized = JSON.stringify(state);
+function encodeArchive(
+  state: PlanState,
+  authority: PlanningAuthority,
+  evidence?: TerminalRecoveryEvidenceV1,
+): PlanArchiveEnvelope {
+  const bundle = evidence === undefined ? undefined : createArchiveBundle(state, evidence, authority);
+  const serialized = JSON.stringify(bundle ?? state);
   const raw = Buffer.from(serialized, "utf8");
   if (raw.byteLength > MAX_ARCHIVE_BYTES) throw new Error("Plan terminal demasiado grande para archivar.");
   const compressed = gzipSync(raw, { level: 9 });
@@ -354,11 +499,19 @@ function encodeArchive(state: PlanState): PlanArchiveEnvelope {
     sha256: createHash("sha256").update(raw).digest("hex"),
     compressedSha256: createHash("sha256").update(compressed).digest("hex"),
     uncompressedBytes: raw.byteLength,
+    payloadKind: bundle ? "recovery-bundle" : "state",
     payload: compressed.toString("base64"),
   };
 }
 
 function decodeArchive(value: unknown, authority: PlanningAuthority): PlanState | undefined {
+  return decodeArchivePayload(value, authority)?.state;
+}
+
+function decodeArchivePayload(
+  value: unknown,
+  authority: PlanningAuthority,
+): { state: PlanState; bundle?: PlanArchiveBundleV1 } | undefined {
   if (!isArchiveEnvelope(value) || !canonicalBase64(value.payload)) return undefined;
   try {
     const compressed = Buffer.from(value.payload, "base64");
@@ -366,12 +519,91 @@ function decodeArchive(value: unknown, authority: PlanningAuthority): PlanState 
     const raw = gunzipSync(compressed, { maxOutputLength: MAX_ARCHIVE_BYTES });
     if (raw.byteLength !== value.uncompressedBytes
       || createHash("sha256").update(raw).digest("hex") !== value.sha256) return undefined;
-    const state = JSON.parse(raw.toString("utf8")) as unknown;
-    if (!validState(state, authority) || !archiveMatchesState(value, state)) return undefined;
-    return state;
+    const decoded = JSON.parse(raw.toString("utf8")) as unknown;
+    if (value.payloadKind === "recovery-bundle") {
+      const bundle = parseArchiveBundle(decoded, authority);
+      if (!bundle || !archiveMatchesState(value, bundle.state)) return undefined;
+      return { state: bundle.state, bundle };
+    }
+    if (!validState(decoded, authority) || !archiveMatchesState(value, decoded)) return undefined;
+    return { state: decoded };
   } catch {
     return undefined;
   }
+}
+
+function createArchiveBundle(
+  state: PlanState,
+  evidence: TerminalRecoveryEvidenceV1,
+  authority: PlanningAuthority,
+): PlanArchiveBundleV1 {
+  if (state.version !== 5) throw new Error("La evidencia de recovery solo puede archivarse con un estado V5.");
+  const candidate: PlanArchiveBundleV1 = {
+    state: structuredClone(state),
+    lineage: structuredClone(evidence.lineage),
+    delta: structuredClone(evidence.delta),
+    checkpoints: structuredClone(evidence.checkpoints),
+  };
+  const verified = parseArchiveBundle(candidate, authority);
+  if (!verified || !sameRevision(verified.state, state)) {
+    throw new Error("El bundle terminal de recovery no es verificable.");
+  }
+  return verified;
+}
+
+function parseArchiveBundle(
+  value: unknown,
+  authority: PlanningAuthority,
+): PlanArchiveBundleV1 | undefined {
+  if (!isRecord(value) || !validState(value.state, authority) || value.state.version !== 5
+    || !TERMINAL_PHASES.has(value.state.phase) || !Array.isArray(value.lineage)
+    || value.lineage.length === 0 || value.lineage.length > 128
+    || !value.lineage.every((entry) => validState(entry, authority) && entry.version === 5)
+    || !validTerminalDelta(value.delta) || !Array.isArray(value.checkpoints)
+    || value.checkpoints.length > 128) return undefined;
+  const state = value.state as PlanStateV5;
+  const lineage = value.lineage as PlanStateV5[];
+  const delta = value.delta as unknown as TerminalPlanRevisionDeltaV1;
+  const checkpoints = value.checkpoints as unknown[];
+  if (!lineage.every((entry) => entry.planID === state.planID && entry.project === state.project)
+    || !lineage.some((entry) => sameRevision(entry, state))
+    || !lineage.some((entry) => entry.revision === delta.parentRevision)
+    || delta.childRevision !== state.revision) return undefined;
+
+  const verifiedCheckpoints: PlanExecutionCheckpointV1[] = [];
+  for (const checkpoint of checkpoints) {
+    if (!isRecord(checkpoint) || !isRecord(checkpoint.plan)) return undefined;
+    const checkpointPlan = checkpoint.plan;
+    const active = lineage.find((entry) => (entry.phase === "running" || entry.phase === "blocked"
+      || entry.phase === "paused") && entry.revision === checkpointPlan.revision
+      && createHash("sha256").update(entry.proof).digest("hex") === checkpointPlan.proofHash);
+    if (!active || !validPlanExecutionCheckpoint(checkpoint, {
+      planID: active.planID,
+      revision: active.revision,
+      digest: active.digest,
+      proofHash: createHash("sha256").update(active.proof).digest("hex"),
+      phase: active.phase === "blocked" ? "blocked" : active.phase === "paused" ? "paused" : "running",
+    }, actionGraphForPlan(active), authority)) return undefined;
+    verifiedCheckpoints.push(structuredClone(checkpoint));
+  }
+  return {
+    state: structuredClone(state),
+    lineage: structuredClone(lineage),
+    delta: structuredClone(delta),
+    checkpoints: verifiedCheckpoints,
+  };
+}
+
+function validTerminalDelta(value: unknown): value is TerminalPlanRevisionDeltaV1 {
+  if (!isRecord(value) || typeof value.parentRevision !== "string"
+    || !/^[a-f0-9]{32}$/.test(value.parentRevision)
+    || typeof value.childRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.childRevision)) return false;
+  const groups = [value.preserved, value.changed, value.added, value.removed];
+  if (groups.some((group) => !Array.isArray(group)
+    || group.some((actionID) => typeof actionID !== "string" || !/^[a-f0-9]{64}$/.test(actionID))
+    || new Set(group).size !== group.length)) return false;
+  return new Set(groups.flat()).size === groups.flat().length
+    && (value.planChanged === undefined || typeof value.planChanged === "boolean");
 }
 
 function archivePointer(state: PlanState, archiveKey: string): PlanArchivePointer {
@@ -408,6 +640,7 @@ function isArchiveEnvelope(value: unknown): value is PlanArchiveEnvelope {
     && typeof value.compressedSha256 === "string" && /^[a-f0-9]{64}$/.test(value.compressedSha256)
     && typeof value.uncompressedBytes === "number" && Number.isInteger(value.uncompressedBytes)
     && value.uncompressedBytes > 0 && value.uncompressedBytes <= MAX_ARCHIVE_BYTES
+    && (value.payloadKind === undefined || value.payloadKind === "state" || value.payloadKind === "recovery-bundle")
     && typeof value.payload === "string" && value.payload.length <= MAX_ARCHIVE_BYTES * 2;
 }
 

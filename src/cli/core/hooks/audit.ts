@@ -27,6 +27,56 @@ export interface AuditEntry {
   engineVersion: string;
 }
 
+export type CodeModeAuditPhase = "execution.before" | "execution.after" | "call.before" | "call.after";
+
+export interface CodeModeAuditInput {
+  phase: CodeModeAuditPhase;
+  sessionID: string;
+  messageID: string;
+  executionRef: string;
+  programHash: string;
+  decision: "allow" | "deny" | "error" | "completed" | "cancelled";
+  tool?: string;
+  index?: number;
+  inputHash?: string;
+  outputHash?: string;
+  ruleIds?: string[];
+  resultClass?: string;
+  quota?: string;
+  inputBytes?: number;
+  outputBytes?: number;
+  callCount?: number;
+  redacted?: boolean;
+}
+
+export interface CodeModeAuditEntry {
+  auditVersion: 1;
+  kind: "code-mode";
+  timestamp: string;
+  phase: CodeModeAuditPhase;
+  sessionRef: string;
+  messageRef: string;
+  executionRef: string;
+  programRef: string;
+  project: string | null;
+  policyVersion: string;
+  policyHash: string;
+  decision: CodeModeAuditInput["decision"];
+  tool: string | null;
+  index: number | null;
+  inputRef: string | null;
+  outputRef: string | null;
+  ruleIds: string[];
+  resultClass: string | null;
+  quota: string | null;
+  inputBytes: number;
+  outputBytes: number;
+  callCount: number;
+  redacted: boolean;
+  host: string;
+  engineVersion: string;
+}
+
 export interface AuditOptions {
   enabled?: boolean;
   required?: boolean;
@@ -49,39 +99,46 @@ export function writeAudit(context: HookContext, result: HookResult, options: Au
   const enabled = required || (options.enabled ?? context.audit?.enabled ?? true);
   const filePath = auditFilePath(context.malahorHome, context.security?.audit?.path, context.cwd);
 
-  if (!enabled) {
-    return { ok: true, skipped: true, required, path: filePath };
-  }
+  if (!enabled) return { ok: true, skipped: true, required, path: filePath };
+  return appendAuditRecord(context, buildAuditEntry(context, result, options.now ?? new Date()), options, required);
+}
 
-  try {
-    const directory = path.dirname(filePath);
-    const directoryMode = parseMode(context.security?.audit?.directoryMode, 0o700);
-    const fileMode = parseMode(context.security?.audit?.fileMode, 0o600);
-    const prefix = auditFilePrefix(filePath);
-    ensureAuditDirectory(directory, directoryMode, context.malahorHome);
-    rotateIfNeeded(filePath, directory, options.now ?? new Date(), fileMode, prefix);
-
-    const entry = buildAuditEntry(context, result, options.now ?? new Date());
-    fs.appendFileSync(filePath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: fileMode, flag: "a" });
-    secureChmod(filePath, fileMode);
-    pruneAuditFiles(
-      directory,
-      options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES,
-      options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS,
-      options.now ?? new Date(),
-      path.basename(filePath),
-      prefix,
-    );
-    return { ok: true, skipped: false, required, path: filePath };
-  } catch (error) {
-    return {
-      ok: false,
-      skipped: false,
-      required,
-      path: filePath,
-      error: error instanceof Error ? error.message : "fallo de auditoria",
-    };
-  }
+/** Auditoria A4: solo refs/hash y clases; nunca codigo, argumentos, contenido ni rutas. */
+export function writeCodeModeAudit(
+  context: HookContext,
+  input: CodeModeAuditInput,
+  options: AuditOptions = {},
+): AuditWriteResult {
+  const now = options.now ?? new Date();
+  const policy = context.policyMeta;
+  const entry: CodeModeAuditEntry = {
+    auditVersion: AUDIT_VERSION,
+    kind: "code-mode",
+    timestamp: now.toISOString().replace(/\.\d{3}Z$/, "Z"),
+    phase: input.phase,
+    sessionRef: auditRef(input.sessionID),
+    messageRef: auditRef(input.messageID),
+    executionRef: auditRef(input.executionRef),
+    programRef: hashRef(input.programHash),
+    project: context.project ?? null,
+    policyVersion: policy?.policyVersion ?? "unknown",
+    policyHash: policy?.policyHash ? hashRef(policy.policyHash) : "sha256:unknown",
+    decision: input.decision,
+    tool: input.tool ?? null,
+    index: safeCount(input.index),
+    inputRef: input.inputHash ? hashRef(input.inputHash) : null,
+    outputRef: input.outputHash ? hashRef(input.outputHash) : null,
+    ruleIds: [...new Set(input.ruleIds ?? [])].sort(),
+    resultClass: safeAuditLabel(input.resultClass),
+    quota: safeAuditLabel(input.quota),
+    inputBytes: safeCount(input.inputBytes) ?? 0,
+    outputBytes: safeCount(input.outputBytes) ?? 0,
+    callCount: safeCount(input.callCount) ?? 0,
+    redacted: input.redacted === true,
+    host: auditHost(),
+    engineVersion: ENGINE_VERSION,
+  };
+  return appendAuditRecord(context, entry, { ...options, required: true }, true);
 }
 
 export function approvalRefForAudit(nonce: string): string {
@@ -122,6 +179,58 @@ export function buildAuditEntry(context: HookContext, result: HookResult, now: D
     host: auditHost(),
     engineVersion: ENGINE_VERSION,
   };
+}
+
+function appendAuditRecord(
+  context: HookContext,
+  entry: AuditEntry | CodeModeAuditEntry,
+  options: AuditOptions,
+  required: boolean,
+): AuditWriteResult {
+  const filePath = auditFilePath(context.malahorHome, context.security?.audit?.path, context.cwd);
+  try {
+    const directory = path.dirname(filePath);
+    const directoryMode = parseMode(context.security?.audit?.directoryMode, 0o700);
+    const fileMode = parseMode(context.security?.audit?.fileMode, 0o600);
+    const prefix = auditFilePrefix(filePath);
+    ensureAuditDirectory(directory, directoryMode, context.malahorHome);
+    rotateIfNeeded(filePath, directory, options.now ?? new Date(), fileMode, prefix);
+    fs.appendFileSync(filePath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: fileMode, flag: "a" });
+    secureChmod(filePath, fileMode);
+    pruneAuditFiles(
+      directory,
+      options.maxFiles ?? context.security?.audit?.maxFiles ?? DEFAULT_MAX_FILES,
+      options.retentionDays ?? context.security?.audit?.retentionDays ?? DEFAULT_RETENTION_DAYS,
+      options.now ?? new Date(),
+      path.basename(filePath),
+      prefix,
+    );
+    return { ok: true, skipped: false, required, path: filePath };
+  } catch (error) {
+    return {
+      ok: false,
+      skipped: false,
+      required,
+      path: filePath,
+      error: error instanceof Error ? error.message : "fallo de auditoria",
+    };
+  }
+}
+
+function auditRef(value: string): string {
+  return `sha256:${sha256(value)}`;
+}
+
+function hashRef(value: string): string {
+  return `sha256:${/^[a-f0-9]{64}$/.test(value) ? value : sha256(value)}`;
+}
+
+function safeCount(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function safeAuditLabel(value: string | undefined): string | null {
+  return value && /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : null;
 }
 
 function operationForEvent(event: string): string {

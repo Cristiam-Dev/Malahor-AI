@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import type { HookRemediation } from "./types";
 
@@ -25,6 +26,23 @@ export interface SecretPatchSummary {
   version: 1;
   evaluable: boolean;
   files: SecretPatchFileSummary[];
+  failure?: SecretPatchDiagnostic;
+}
+
+export interface SecretPatchDiagnostic {
+  code: "PATCH_NOT_EVALUABLE" | "SECRET_PRESENT" | "SECURITY_CONTROL_UNAVAILABLE";
+  reason: "invalid-structure" | "unsupported-operation" | "invalid-path" | "duplicate-target"
+    | "file-unavailable" | "context-mismatch" | "ambiguous-context" | "missing-evidence";
+  operation?: SecretPatchFileSummary["operation"];
+  /** Ruta relativa verificada; nunca una ruta proporcionada sin canonicalizar. */
+  path?: string;
+  hunk?: number;
+}
+
+export interface SecretPatchBinding {
+  projectRoot: string;
+  project?: string;
+  policyHash?: string;
 }
 
 export interface SecretFileFinding {
@@ -32,6 +50,11 @@ export interface SecretFileFinding {
   path: string;
   line: number;
   remediation?: HookRemediation;
+}
+
+export interface SecretRedactionResult {
+  value: string;
+  kinds: SecretKind[];
 }
 
 interface SecretPattern {
@@ -44,7 +67,15 @@ interface PatchSection {
   operation: SecretPatchFileSummary["operation"];
   path: string;
   added: string[];
-  removed: string[];
+  hunks: Array<{ before: string[]; after: string[] }>;
+}
+
+interface PatchEvidence {
+  root: string;
+  binding?: SecretPatchBinding;
+  patchHash: string;
+  summaryHash: string;
+  prestate: Array<{ absolute: string; hash: string | null }>;
 }
 
 const PRIVATE_KEY_SOURCE = ["-----BEGIN", "(RSA |OPENSSH |EC |DSA )?PRIVATE", "KEY-----"].join(" ");
@@ -58,13 +89,17 @@ const FILE_PATTERNS: SecretPattern[] = [
     source: CREDENTIAL_ASSIGNMENT_SOURCE,
     flags: "i",
   },
-];
-const PAYLOAD_PATTERNS: SecretPattern[] = [
-  ...FILE_PATTERNS,
   { kind: "bearer-token", source: "\\bBearer\\s+[A-Za-z0-9._~+/=-]{20,}" },
 ];
+const PAYLOAD_PATTERNS: SecretPattern[] = FILE_PATTERNS;
+const PRIVATE_KEY_BLOCK = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g;
+const PRIVATE_KEY_HEADER = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g;
+const AWS_ACCESS_KEY = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g;
+const BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g;
+const CREDENTIAL_ASSIGNMENT = new RegExp(CREDENTIAL_ASSIGNMENT_SOURCE, "gi");
 const SECRET_KIND_SET = new Set<string>(SECRET_KINDS);
 const SECRET_PATCH_SUMMARY_BRAND = Symbol("malahor.secret-patch-summary");
+const PATCH_EVIDENCE = new WeakMap<SecretPatchSummary, PatchEvidence>();
 const MAX_SCANNED_FILE_BYTES = 512 * 1024;
 const MAX_PATCH_FILES = 100;
 const MAX_FINDINGS_PER_KIND = 1_000_000;
@@ -95,30 +130,43 @@ export function detectFileSecretFindings(
 ): SecretFileFinding[] {
   const findings: SecretFileFinding[] = [];
   const lines = content.split(/\r?\n/);
-
-  for (let index = 0; index < lines.length && findings.length < MAX_EXPORTED_FINDINGS; index += 1) {
-    const line = lines[index] ?? "";
-    const matchesByPattern = FILE_PATTERNS.map((pattern) => {
-      const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
-      return { pattern, matches: [...line.matchAll(new RegExp(pattern.source, flags))] };
-    });
-    const lineFindingCount = matchesByPattern.reduce((count, item) => count + item.matches.length, 0);
-
-    for (const { pattern, matches } of matchesByPattern) {
-      for (const match of matches) {
-        const remediation = pattern.kind === "credential-assignment"
-          ? buildSyntheticFixtureRemediation(line, filePath, displayPath, index + 1, match, lineFindingCount)
-          : undefined;
-        findings.push({
-          kind: pattern.kind,
-          path: displayPath,
-          line: index + 1,
-          ...(remediation ? { remediation } : {}),
-        });
-        if (findings.length >= MAX_EXPORTED_FINDINGS) break;
-      }
-      if (findings.length >= MAX_EXPORTED_FINDINGS) break;
+  const starts = [0];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] === "\n") starts.push(index + 1);
+  }
+  const lineAt = (offset: number): number => {
+    let low = 0;
+    let high = starts.length;
+    while (low + 1 < high) {
+      const middle = (low + high) >>> 1;
+      if (starts[middle]! <= offset) low = middle;
+      else high = middle;
     }
+    return low;
+  };
+  const matched = FILE_PATTERNS.flatMap((pattern) => {
+    const flags = pattern.flags?.includes("g") ? pattern.flags : `${pattern.flags ?? ""}g`;
+    return [...content.matchAll(new RegExp(pattern.source, flags))]
+      .map((match) => ({ pattern, match, startLine: lineAt(match.index ?? 0) }));
+  }).sort((a, b) => (a.match.index ?? 0) - (b.match.index ?? 0));
+  for (const item of matched.slice(0, MAX_EXPORTED_FINDINGS)) {
+    const index = item.startLine;
+    const line = lines[index] ?? "";
+    const match = item.match;
+    // Nunca crear una receta de sustitución desde una coincidencia multilinea.
+    const onOneLine = !match[0].includes("\n") && !match[0].includes("\r");
+    const localMatch = onOneLine ? Object.assign([...match] as unknown as RegExpMatchArray, {
+      index: (match.index ?? 0) - starts[index]!, input: line,
+    }) : undefined;
+    const lineFindingCount = matched.filter((other) => other.startLine === index).length;
+    const remediation = item.pattern.kind === "credential-assignment"
+      ? localMatch && line.includes(match[0])
+        ? buildSyntheticFixtureRemediation(line, filePath, displayPath, index + 1, localMatch, lineFindingCount)
+        : removalRemediation(displayPath, index + 1, "unsupported-syntax")
+      : undefined;
+    findings.push({ kind: item.pattern.kind, path: displayPath, line: index + 1,
+      ...(remediation ? { remediation } : {}),
+    });
   }
 
   if (/^\.env(\.|$)/.test(path.basename(filePath))
@@ -132,62 +180,117 @@ export function detectPayloadSecretKinds(content: string): string[] {
   return secretKinds(countPatterns(content, PAYLOAD_PATTERNS));
 }
 
+/** Redacta valores detectables sin conservarlos en el resultado ni en metadata. */
+export function redactPayloadSecrets(content: string): SecretRedactionResult {
+  const kinds = new Set<SecretKind>();
+  let value = content.replace(PRIVATE_KEY_BLOCK, () => {
+    kinds.add("private-key");
+    return "<redacted:private-key>";
+  });
+  value = value.replace(PRIVATE_KEY_HEADER, () => {
+    kinds.add("private-key");
+    return "<redacted:private-key>";
+  });
+  value = value.replace(AWS_ACCESS_KEY, () => {
+    kinds.add("aws-access-key");
+    return "<redacted:aws-access-key>";
+  });
+  value = value.replace(BEARER_TOKEN, () => {
+    kinds.add("bearer-token");
+    return "Bearer <redacted:bearer-token>";
+  });
+  value = value.replace(CREDENTIAL_ASSIGNMENT, (_match, name: string, operator: string, quote: string) => {
+    kinds.add("credential-assignment");
+    return `${name}${operator}${quote}<redacted:credential-assignment>${quote}`;
+  });
+  return { value, kinds: SECRET_KINDS.filter((kind) => kinds.has(kind)) };
+}
+
+export function isPotentialSecretPath(target: string): boolean {
+  const normalized = target.replaceAll("\\", "/");
+  const base = path.basename(normalized);
+  if (base === ".env.example") return false;
+  return /(^|\/)\.env(\.|$)/.test(normalized)
+    || /(^|\/)\.ssh\//.test(normalized)
+    || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized)
+    || /\.(pem|p12|pfx|key)$/i.test(base);
+}
+
 export function secretKinds(counts: SecretCounts): SecretKind[] {
   return SECRET_KINDS.filter((kind) => (counts[kind] ?? 0) > 0);
 }
 
-export function buildSecretPatchSummary(patchText: string, cwd: string): SecretPatchSummary {
+export function buildSecretPatchSummary(
+  patchText: string,
+  cwd: string,
+  binding?: SecretPatchBinding,
+): SecretPatchSummary {
   const parsed = parsePatchSections(patchText);
-  if (!parsed.evaluable || parsed.sections.length === 0 || parsed.sections.length > MAX_PATCH_FILES) {
-    return brandedSummary(false, []);
-  }
-
   const root = path.resolve(cwd);
+  const patchHash = digest(patchText);
+  const fail = (reason: SecretPatchDiagnostic["reason"], code: SecretPatchDiagnostic["code"] = "PATCH_NOT_EVALUABLE",
+    section?: PatchSection, safePath?: string, hunk?: number): SecretPatchSummary => {
+    const failure: SecretPatchDiagnostic = { code, reason,
+      ...(section ? { operation: section.operation } : {}),
+      ...(safePath ? { path: safePath } : {}),
+      ...(hunk ? { hunk } : {}),
+    };
+    return brandedSummary(false, [], { root, binding, patchHash, prestate: [] }, failure);
+  };
+  if (parsed.failure) return fail(parsed.failure,
+    parsed.failure === "file-unavailable" ? "SECURITY_CONTROL_UNAVAILABLE" : "PATCH_NOT_EVALUABLE");
+  if (parsed.sections.length === 0 || parsed.sections.length > MAX_PATCH_FILES) return fail("invalid-structure");
+
   const seen = new Set<string>();
   const files: SecretPatchFileSummary[] = [];
+  const prestate: PatchEvidence["prestate"] = [];
   for (const section of parsed.sections) {
     const absolute = path.resolve(root, section.path);
-    if (!isWithin(absolute, root) || seen.has(absolute)) return brandedSummary(false, []);
+    if (!section.path || path.isAbsolute(section.path) || /[\\\u0000-\u001f\u007f]/.test(section.path)
+      || !isWithin(absolute, root) || absolute === root) return fail("invalid-path", "PATCH_NOT_EVALUABLE", section);
+    const relative = path.relative(root, absolute).split(path.sep).join("/");
+    if (seen.has(absolute)) return fail("duplicate-target", "PATCH_NOT_EVALUABLE", section, relative);
     seen.add(absolute);
-
-    if (section.operation === "delete") {
-      files.push({ path: section.path, operation: section.operation, before: {}, after: {} });
-      continue;
-    }
-
+    if (!pathComponentsAreRegular(root, absolute)) return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
     if (section.operation === "add") {
-      if (fs.existsSync(absolute)) return brandedSummary(false, []);
+      if (lstatIfExists(absolute) !== null) return fail("file-unavailable", "PATCH_NOT_EVALUABLE", section, relative);
+      const added = section.added.join("\n");
+      if (Buffer.byteLength(added) > MAX_SCANNED_FILE_BYTES) return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
       files.push({
-        path: section.path,
+        path: relative,
         operation: section.operation,
         before: {},
-        after: detectFileSecretCounts(section.added.join("\n"), absolute),
+        after: detectFileSecretCounts(added, absolute),
       });
+      prestate.push({ absolute, hash: null });
       continue;
     }
-
     const current = readRegularTextFile(absolute);
-    if (current === null || section.added.length + section.removed.length === 0
-      || !removedLinesExist(current, section.removed)) {
-      return brandedSummary(false, []);
+    if (current === null) return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
+    const before = detectFileSecretCounts(current.content, absolute);
+    let after: SecretCounts = {};
+    if (section.operation === "update") {
+      const simulated = simulateHunks(current.content, section.hunks);
+      if (!simulated.ok) return fail(simulated.reason, "PATCH_NOT_EVALUABLE", section, relative, simulated.hunk);
+      if (Buffer.byteLength(simulated.content) > MAX_SCANNED_FILE_BYTES) {
+        return fail("file-unavailable", "SECURITY_CONTROL_UNAVAILABLE", section, relative);
+      }
+      after = detectFileSecretCounts(simulated.content, absolute);
     }
-    const before = detectFileSecretCounts(current, absolute);
-    const removed = detectFileSecretCounts(section.removed.join("\n"));
-    const added = detectFileSecretCounts(section.added.join("\n"));
-    const after = applySecretDelta(before, removed, added);
-    if (!after) return brandedSummary(false, []);
-    files.push({ path: section.path, operation: section.operation, before, after });
+    files.push({ path: relative, operation: section.operation, before, after });
+    prestate.push({ absolute, hash: current.hash });
   }
-
-  return brandedSummary(true, files);
+  return brandedSummary(true, files, { root, binding, patchHash, prestate });
 }
 
 export function parseSecretPatchSummary(value: unknown): SecretPatchSummary | null {
-  if (typeof value !== "object" || value === null
+  if (typeof value !== "object" || value === null || !PATCH_EVIDENCE.has(value as SecretPatchSummary)
     || (value as Record<PropertyKey, unknown>)[SECRET_PATCH_SUMMARY_BRAND] !== true) return null;
   const record = objectValue(value);
+  const evidence = PATCH_EVIDENCE.get(value as SecretPatchSummary);
+  if (!evidence || digest(JSON.stringify(value)) !== evidence.summaryHash) return null;
   if (!record || record.version !== 1 || typeof record.evaluable !== "boolean" || !Array.isArray(record.files)
-    || record.files.length === 0 || record.files.length > MAX_PATCH_FILES) return null;
+    || record.files.length > MAX_PATCH_FILES || (record.evaluable && record.files.length === 0)) return null;
 
   const seen = new Set<string>();
   const files: SecretPatchFileSummary[] = [];
@@ -208,7 +311,30 @@ export function parseSecretPatchSummary(value: unknown): SecretPatchSummary | nu
     });
   }
 
-  return { version: 1, evaluable: record.evaluable, files };
+  const failure = objectValue(record.failure);
+  return { version: 1, evaluable: record.evaluable, files,
+    ...(failure && typeof failure.code === "string" && typeof failure.reason === "string"
+      ? { failure: failure as unknown as SecretPatchDiagnostic } : {}),
+  };
+}
+
+/** Evidencia privada: nunca confiar en un resumen suministrado por el caller. */
+export function revalidateSecretPatchSummary(
+  value: unknown,
+  cwd: string,
+  binding?: SecretPatchBinding,
+): boolean {
+  const summary = parseSecretPatchSummary(value);
+  const evidence = PATCH_EVIDENCE.get(value as SecretPatchSummary);
+  if (!summary?.evaluable || !evidence || evidence.root !== path.resolve(cwd)) return false;
+  if (JSON.stringify(evidence.binding ?? null) !== JSON.stringify(binding ?? null)) return false;
+  for (const item of evidence.prestate) {
+    if (!pathComponentsAreRegular(evidence.root, item.absolute)) return false;
+    if (item.hash === null) {
+      if (lstatIfExists(item.absolute) !== null) return false;
+    } else if (readRegularTextFile(item.absolute)?.hash !== item.hash) return false;
+  }
+  return true;
 }
 
 function countPatterns(content: string, patterns: SecretPattern[]): SecretCounts {
@@ -221,80 +347,127 @@ function countPatterns(content: string, patterns: SecretPattern[]): SecretCounts
   return counts;
 }
 
-function parsePatchSections(patchText: string): { evaluable: boolean; sections: PatchSection[] } {
+function parsePatchSections(patchText: string): { sections: PatchSection[]; failure?: SecretPatchDiagnostic["reason"] } {
   const sections: PatchSection[] = [];
+  if (Buffer.byteLength(patchText) > MAX_SCANNED_FILE_BYTES) return { sections, failure: "file-unavailable" };
+  const lines = patchText.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  if (lines.shift() !== "*** Begin Patch" || lines.pop() !== "*** End Patch") {
+    return { sections, failure: "invalid-structure" };
+  }
   let current: PatchSection | undefined;
-  let evaluable = true;
-  const flush = () => {
-    if (current) sections.push(current);
-    current = undefined;
-  };
-
-  for (const line of patchText.split(/\r?\n/)) {
+  let hunk: PatchSection["hunks"][number] | undefined;
+  for (const line of lines) {
     let match = line.match(/^\*\*\* (Add|Update|Delete) File: (.+)$/);
     if (match) {
-      flush();
+      if (current) sections.push(current);
       current = {
         operation: match[1]!.toLowerCase() as PatchSection["operation"],
         path: match[2]!.trim(),
         added: [],
-        removed: [],
+        hunks: [],
       };
-      if (!current.path) evaluable = false;
+      hunk = undefined;
+      if (!current.path) return { sections, failure: "invalid-structure" };
       continue;
     }
-    if (/^\*\*\* Move to: /.test(line)) {
-      evaluable = false;
+    if (!current) return { sections, failure: "invalid-structure" };
+    if (line.startsWith("***")) return { sections, failure: "unsupported-operation" };
+    if (current.operation === "delete") return { sections, failure: "invalid-structure" };
+    if (current.operation === "add") {
+      if (!line.startsWith("+")) return { sections, failure: "invalid-structure" };
+      current.added.push(line.slice(1));
       continue;
     }
-    if (line === "*** Begin Patch" || line === "*** End Patch" || line.startsWith("@@")) continue;
-    if (!current) {
-      if (line.trim()) evaluable = false;
+    if (line === "@@" || line.startsWith("@@ ")) {
+      hunk = { before: [], after: [] };
+      current.hunks.push(hunk);
       continue;
     }
-    if (current.operation === "delete") {
-      if (line.trim()) evaluable = false;
-      continue;
-    }
-    if (line.startsWith("+")) current.added.push(line.slice(1));
-    else if (line.startsWith("-")) current.removed.push(line.slice(1));
-    else if (current.operation === "add" && line.trim()) evaluable = false;
+    if (!hunk) return { sections, failure: "invalid-structure" };
+    if (line.startsWith("+")) hunk.after.push(line.slice(1));
+    else if (line.startsWith("-")) hunk.before.push(line.slice(1));
+    else if (line.startsWith(" ")) {
+      hunk.before.push(line.slice(1));
+      hunk.after.push(line.slice(1));
+    } else return { sections, failure: "invalid-structure" };
   }
-  flush();
-  return { evaluable, sections };
+  if (current) sections.push(current);
+  if (sections.some((section) => section.operation === "update" && (
+    section.hunks.length === 0 || section.hunks.some((item) => item.before.length === 0)))) {
+    return { sections, failure: "invalid-structure" };
+  }
+  return { sections };
 }
 
-function readRegularTextFile(filePath: string): string | null {
+function readRegularTextFile(filePath: string): { content: string; hash: string } | null {
+  let fd: number | undefined;
   try {
-    const stat = fs.lstatSync(filePath);
-    if (!stat.isFile() || stat.size > MAX_SCANNED_FILE_BYTES) return null;
-    return fs.readFileSync(filePath, "utf8");
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const before = fs.fstatSync(fd);
+    if (!before.isFile() || before.size > MAX_SCANNED_FILE_BYTES) return null;
+    const bytes = fs.readFileSync(fd);
+    const after = fs.fstatSync(fd);
+    const byPath = fs.lstatSync(filePath);
+    if (!byPath.isFile() || before.dev !== after.dev || before.ino !== after.ino
+      || before.mtimeMs !== after.mtimeMs || before.size !== after.size
+      || before.dev !== byPath.dev || before.ino !== byPath.ino || bytes.length > MAX_SCANNED_FILE_BYTES) return null;
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (content.includes("\u0000") || content.includes("\r")) return null;
+    return { content, hash: digest(bytes) };
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 
-function removedLinesExist(content: string, removed: string[]): boolean {
-  const available = new Map<string, number>();
-  for (const line of content.split(/\r?\n/)) available.set(line, (available.get(line) ?? 0) + 1);
-  for (const line of removed) {
-    const count = available.get(line) ?? 0;
-    if (count === 0) return false;
-    available.set(line, count - 1);
+function simulateHunks(content: string, hunks: PatchSection["hunks"]):
+  | { ok: true; content: string }
+  | { ok: false; reason: "context-mismatch" | "ambiguous-context"; hunk: number } {
+  const lines = content.split("\n");
+  let cursor = 0;
+  for (let index = 0; index < hunks.length; index += 1) {
+    const hunk = hunks[index]!;
+    const matches: number[] = [];
+    for (let offset = cursor; offset <= lines.length - hunk.before.length; offset += 1) {
+      if (hunk.before.every((line, position) => lines[offset + position] === line)) matches.push(offset);
+      if (matches.length > 1) break;
+    }
+    if (matches.length !== 1) return { ok: false, reason: matches.length ? "ambiguous-context" : "context-mismatch", hunk: index + 1 };
+    const at = matches[0]!;
+    lines.splice(at, hunk.before.length, ...hunk.after);
+    cursor = at + hunk.after.length;
   }
-  return true;
+  return { ok: true, content: lines.join("\n") };
 }
 
-function applySecretDelta(before: SecretCounts, removed: SecretCounts, added: SecretCounts): SecretCounts | null {
-  const after: SecretCounts = {};
-  for (const kind of SECRET_KINDS) {
-    const existing = before[kind] ?? 0;
-    const removedCount = removed[kind] ?? 0;
-    if (removedCount > existing) return null;
-    const remaining = existing - removedCount + (added[kind] ?? 0);
-    if (remaining > 0) after[kind] = remaining;
+function pathComponentsAreRegular(root: string, target: string): boolean {
+  try {
+    if (!fs.lstatSync(root).isDirectory()) return false;
+    if (fs.realpathSync(root) !== root) return false;
+    let directory = root;
+    const components = path.relative(root, path.dirname(target)).split(path.sep).filter(Boolean);
+    for (const component of components) {
+      directory = path.join(directory, component);
+      if (!fs.lstatSync(directory).isDirectory()) return false;
+    }
+    const targetStat = lstatIfExists(target);
+    return targetStat === null || targetStat.isFile();
+  } catch {
+    return false;
   }
-  return after;
+}
+
+function lstatIfExists(target: string): fs.Stats | null {
+  try { return fs.lstatSync(target); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function digest(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function parseSecretCounts(value: unknown): SecretCounts | null {
@@ -307,6 +480,13 @@ function parseSecretCounts(value: unknown): SecretCounts | null {
     if (count > 0) counts[kind as SecretKind] = count;
   }
   return counts;
+}
+
+/** El marcador es una referencia saneada, no un segundo valor de credencial. */
+function containsOtherPayloadSecret(before: string, replacement: string): boolean {
+  const withoutMarker = before.replaceAll("[VALOR SINTETICO OCULTO]", "x");
+  return detectPayloadSecretKinds(withoutMarker).length > 0
+    || detectPayloadSecretKinds(replacement).length > 0;
 }
 
 function buildSyntheticFixtureRemediation(
@@ -335,12 +515,17 @@ function buildSyntheticFixtureRemediation(
   const direct = DIRECT_SYNTHETIC_ASSIGNMENT.exec(line);
   if (direct) {
     const [, prefix = "", credentialName = "", operator = "", quote = "", , suffix = ""] = direct;
+    const before = `${prefix}${credentialName}${operator}${quote}[VALOR SINTETICO OCULTO]${quote}${suffix}`;
+    const replacement = `${prefix}${credentialName}${operator}${SYNTHETIC_VALUE_EXPRESSION}${suffix}`;
+    if (containsOtherPayloadSecret(before, replacement)) {
+      return removalRemediation(displayPath, lineNumber, "multiple-findings");
+    }
     return replacementRemediation({
       path: displayPath,
       line: lineNumber,
       anchor: credentialName,
-      before: `${prefix}${credentialName}${operator}${quote}[VALOR SINTETICO OCULTO]${quote}${suffix}`,
-      replacement: `${prefix}${credentialName}${operator}${SYNTHETIC_VALUE_EXPRESSION}${suffix}`,
+      before,
+      replacement,
     });
   }
 
@@ -359,12 +544,17 @@ function buildSyntheticFixtureRemediation(
           JSON.stringify(innerQuote),
         ].join(", ");
 
+        const before = `${prefix}${outerQuote}${credentialName}${operator}${innerQuote}[VALOR SINTETICO OCULTO]${innerQuote}${outerQuote}${suffix}`;
+        const replacement = `${prefix}[${replacementExpression}].join("")${suffix}`;
+        if (containsOtherPayloadSecret(before, replacement)) {
+          return removalRemediation(displayPath, lineNumber, "multiple-findings");
+        }
         return replacementRemediation({
           path: displayPath,
           line: lineNumber,
           anchor: variableName,
-          before: `${prefix}${outerQuote}${credentialName}${operator}${innerQuote}[VALOR SINTETICO OCULTO]${innerQuote}${outerQuote}${suffix}`,
-          replacement: `${prefix}[${replacementExpression}].join("")${suffix}`,
+          before,
+          replacement,
         });
       }
     }
@@ -419,7 +609,7 @@ function buildComplexStringRemediation(
   ].join(", ");
   const replacement = `${line.slice(0, literal.start)}[${expression}].join("")${line.slice(literal.end)}`;
   if (before.includes(detectedValue) || replacement.includes(detectedValue)
-    || secretKinds(detectFileSecretCounts(replacement)).length > 0) return undefined;
+    || containsOtherPayloadSecret(before, replacement)) return undefined;
 
   return replacementRemediation({
     path: displayPath,
@@ -631,9 +821,15 @@ function isSyntheticFixturePath(filePath: string): boolean {
     || /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(basename);
 }
 
-function brandedSummary(evaluable: boolean, files: SecretPatchFileSummary[]): SecretPatchSummary {
-  const summary: SecretPatchSummary = { version: 1, evaluable, files };
+function brandedSummary(
+  evaluable: boolean,
+  files: SecretPatchFileSummary[],
+  evidence: Omit<PatchEvidence, "summaryHash">,
+  failure?: SecretPatchDiagnostic,
+): SecretPatchSummary {
+  const summary: SecretPatchSummary = { version: 1, evaluable, files, ...(failure ? { failure } : {}) };
   Object.defineProperty(summary, SECRET_PATCH_SUMMARY_BRAND, { value: true, enumerable: false });
+  PATCH_EVIDENCE.set(summary, { ...evidence, summaryHash: digest(JSON.stringify(summary)) });
   return summary;
 }
 

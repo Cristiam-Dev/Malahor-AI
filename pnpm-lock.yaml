@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@opencode/codemode':
+        specifier: 2.2.5
+        version: 2.2.5
+      effect:
+        specifier: 4.0.6
+        version: 4.0.6
       jsonc-parser:
         specifier: 3.3.1
         version: 3.3.1
@@ -21,8 +27,19 @@ importers:
 
 packages:
 
+  '@opencode/codemode@2.2.5':
+    resolution: {integrity: sha512-oqZXynEO71nOpM9kOVacyRY6qOceYdk2p9Q0667kwSP4ZXgKSKtxV2HkI0iUBh3ci+TueO88BxIb2CgL1slpGw==}
+
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
+
+  acorn@8.15.0:
+    resolution: {integrity: sha512-NZyJarBfL7nWwIq+FDL6Zp/yHEhePMNnnJ0y3qfieCrmNvYct8uvtiV41UvlSe6apAfk0fY1FbWx+NwfmpvtTg==}
+    engines: {node: '>=0.4.0'}
+    hasBin: true
+
+  effect@4.0.6:
+    resolution: {integrity: sha512-Tc3mkzuLR6t6P9dhLt0D2GrxYtmU5td4XEJEiXCmILz53IRIfJyHsKZWjTA3xEjiwpNTtXBgI4iqYPxMztBDrw==}
 
   jsonc-parser@3.3.1:
     resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
@@ -37,9 +54,18 @@ packages:
 
 snapshots:
 
+  '@opencode/codemode@2.2.5':
+    dependencies:
+      acorn: 8.15.0
+      effect: 4.0.6
+
   '@types/node@22.20.1':
     dependencies:
       undici-types: 6.21.0
+
+  acorn@8.15.0: {}
+
+  effect@4.0.6: {}
 
   jsonc-parser@3.3.1: {}
 

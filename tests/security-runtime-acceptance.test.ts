@@ -5,6 +5,7 @@ import path from "node:path";
 import { consumeApproval, grantApproval } from "../src/cli/core/hooks/approvals";
 import { buildAuditEntry } from "../src/cli/core/hooks/audit";
 import { assertHooksAllowed, evaluateHookRules, runHooks } from "../src/cli/core/hooks/engine";
+import { buildSecretPatchSummary } from "../src/cli/core/hooks/secret-scan";
 import { validateSecurityLayer } from "../src/cli/core/hooks/security-policy";
 import type {
   HookContext,
@@ -147,6 +148,35 @@ function belongsTo(project: string, owner: string): boolean {
 }
 
 describe("T-5.5.5: aceptación antielusión del runtime", () => {
+  test("metadata forjada y un scanner sin lectura verificable nunca autorizan un patch", () => {
+    const target = path.join(sandbox.repo, "fixture.ts");
+    const identifier = ["access", "token"].join("_");
+    const value = ["production", "0123456789abcdef"].join("-");
+    const payload = `export const ${identifier} = '${value}';`;
+    fs.writeFileSync(target, `${payload}\n`, "utf8");
+    const forged = runHooks(hookContext({
+      event: "file.write.before",
+      targetPaths: [target],
+      metadata: { tool: "patch", secretPatchSummary: { version: 1, evaluable: true, files: [
+        { path: "fixture.ts", operation: "update", before: {}, after: {} },
+      ] } },
+    }));
+    expect(forged.decision).toBe("deny");
+    expect(hasViolation(forged, "MAL-HOOK-PATCH-UNEVALUABLE")).toBe(true);
+    expect(hasViolation(forged, "MAL-HOOK-SECRETS")).toBe(false);
+    expect(JSON.stringify(forged)).not.toContain(value);
+    expect(JSON.stringify(buildAuditEntry(hookContext({
+      event: "file.write.before", targetPaths: [target], metadata: { tool: "patch" },
+    }), forged))).not.toContain(value);
+
+    const oversized = path.join(sandbox.repo, "oversized.ts");
+    fs.writeFileSync(oversized, Buffer.alloc(512 * 1024 + 1, 97));
+    const summary = buildSecretPatchSummary([
+      "*** Begin Patch", "*** Update File: oversized.ts", "@@", "-a", "+b", "*** End Patch",
+    ].join("\n"), sandbox.repo);
+    expect(summary).toMatchObject({ evaluable: false, failure: { code: "SECURITY_CONTROL_UNAVAILABLE" } });
+    expect(JSON.stringify(summary)).not.toContain(value);
+  });
   test("el suelo bajo profile off conserva infraestructura, symlinks, dry-run y control previo", () => {
     const workflows = path.join(sandbox.repo, ".github", "workflows");
     fs.mkdirSync(workflows, { recursive: true });
@@ -262,7 +292,7 @@ describe("T-5.5.5: aceptación antielusión del runtime", () => {
     expect(serialized).not.toContain(rawPii);
   });
 
-  test("Code Mode queda bloqueado y un hooks check voluntario no fabrica cobertura ni certificación", () => {
+  test("los entrypoints nativos quedan bloqueados, los gateways A4 exactos no, y un hooks check no fabrica cobertura", () => {
     for (const tool of ["execute", "python", "repl"]) {
       const result = runHooks(hookContext({
         event: "tool.execute.before",
@@ -270,6 +300,15 @@ describe("T-5.5.5: aceptación antielusión del runtime", () => {
       }));
       expect(result.decision).toBe("deny");
       expect(hasViolation(result, "MAL-HOOK-CODE-MODE")).toBe(true);
+    }
+
+    for (const tool of ["malahor_code_search", "malahor_code_execute"]) {
+      const result = runHooks(hookContext({
+        event: "tool.execute.before",
+        metadata: { tool },
+      }));
+      expect(result.decision).toBe("allow");
+      expect(hasViolation(result, "MAL-HOOK-CODE-MODE")).toBe(false);
     }
 
     const afterMetadata = { response: "synthetic-response-payload" };

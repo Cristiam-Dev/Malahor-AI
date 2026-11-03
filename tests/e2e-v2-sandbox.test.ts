@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  pluginReportFromEvidence,
   runV2SandboxE2E,
   type V2SandboxReport,
 } from "./fixtures/e2e-v2-sandbox";
@@ -13,6 +14,7 @@ const CRITICAL_CAPABILITIES = [
   "permission.evaluate",
   "shell.create.before",
   "tool.execute.before",
+  "code-mode.read-only",
   "commit.workflow",
   "point-action.approval",
   "planning.v4",
@@ -29,6 +31,31 @@ function isAtOrWithin(parent: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate));
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 }
+
+test("AUTH-01 A4 rechaza estado persistido sano cuando el inventario vivo marca Malahor failed", () => {
+  const report = pluginReportFromEvidence({
+    data: [{
+      id: "malahor",
+      state: {
+        status: "failed",
+        error: { reference: "failure_synthetic", detail: "sensitive host stack must not escape" },
+      },
+    }],
+  }, {
+    host: "v2",
+    criticalGaps: [],
+    capabilities: { "code-mode.read-only": true, "planning.v4": true },
+  });
+
+  expect(report.loaded, "plugin-state.json no puede ocultar un fallo del inventario vivo").toBe(false);
+  expect(report.live).toEqual({ present: true, status: "failed", failureReference: true });
+  expect(report.persisted).toEqual({
+    host: "v2",
+    criticalGaps: [],
+    capabilities: { "code-mode.read-only": true, "planning.v4": true },
+  });
+  expect(JSON.stringify(report)).not.toContain("sensitive host stack must not escape");
+});
 
 test("T-5.5.2 valida Malahor completo en un host OpenCode V2 real y aislado", async () => {
   const rootOverride = process.env.MALAHOR_E2E_ROOT?.trim();
@@ -54,14 +81,29 @@ test("T-5.5.2 valida Malahor completo en un host OpenCode V2 real y aislado", as
   expect(report.sandbox.realDataTouched, "el E2E tocó datos reales fuera del sandbox").toBe(false);
   expect(report.sandbox.networkDownloads, "el E2E no debe descargar nada de la red").toBe(0);
   expect(report.sandbox.persistedCredentials, "el E2E dejó credenciales persistidas").toEqual([]);
+  expect(report.sandbox.nodeModules.before, "falta fingerprint inicial de node_modules").toMatch(/^[a-f0-9]{64}$/);
+  expect(report.sandbox.nodeModules.after, "falta fingerprint final de node_modules").toBe(report.sandbox.nodeModules.before);
+  expect(report.sandbox.nodeModules.unchanged, "build/tests escribieron bajo node_modules").toBe(true);
 
   expect(report.host.real, "se requiere un proceso OpenCode real, no un host simulado").toBe(true);
   expect(report.host.kind, `host OpenCode inesperado: ${report.host.kind}`).toBe("v2");
   expect(report.host.version, "el host real debe informar una versión semántica").toMatch(/^2\.[0-9]+\.[0-9]+/);
-  expect(report.plugin.loaded, "el host V2 real no cargó el plugin Malahor").toBe(true);
-  expect(report.plugin.criticalGaps, `capacidades críticas ausentes: ${report.plugin.criticalGaps.join(", ")}`).toEqual([]);
+  expect(
+    report.plugin.loaded,
+    `el host V2 real no cargó el plugin Malahor; inventario=${JSON.stringify(report.plugin.inventory)}`,
+  ).toBe(true);
+  expect(report.plugin.live, "el inventario vivo no mantuvo Malahor activo tras reconciliar tools").toEqual({
+    present: true,
+    status: "active",
+    failureReference: false,
+  });
+  expect(report.plugin.persisted.host, "el diagnóstico persistido no corresponde a V2").toBe("v2");
+  expect(
+    report.plugin.persisted.criticalGaps,
+    `capacidades críticas ausentes: ${report.plugin.persisted.criticalGaps.join(", ")}`,
+  ).toEqual([]);
   for (const capability of CRITICAL_CAPABILITIES) {
-    expect(report.plugin.capabilities[capability], `capacidad crítica inactiva: ${capability}`).toBe(true);
+    expect(report.plugin.persisted.capabilities[capability], `capacidad crítica inactiva: ${capability}`).toBe(true);
   }
 
   expect(report.agents.primary, "contrato runtime del agente primario inválido").toMatchObject({
@@ -136,6 +178,36 @@ test("T-5.5.2 valida Malahor completo en un host OpenCode V2 real y aislado", as
     reindexWrites: 0,
   });
 
+  expect(report.codeMode.result, "el recorrido A4 no produjo el resultado equivalente").toEqual({
+    fileCount: 1,
+    matchCount: 1,
+    hasSymbol: true,
+  });
+  expect(report.codeMode.internalCalls, "A4 debe auditar exactamente glob, grep y read internos").toEqual([
+    { tool: "repo.glob", status: "completed" },
+    { tool: "repo.grep", status: "completed" },
+    { tool: "repo.read", status: "completed" },
+  ]);
+  expect(report.codeMode.permissionCalls, "cada llamada interna debe cruzar permission.assert").toBe(3);
+  expect(report.codeMode.permissionsPersisted, "A4 no puede guardar permisos con save").toBe(false);
+  expect(report.codeMode.auditedCalls, "faltan auditorías call.after para llamadas internas").toBeGreaterThanOrEqual(3);
+
+  expect(report.economy.baseline.modelRounds).toBe(3);
+  expect(report.economy.baseline.outerCalls).toBe(3);
+  expect(report.economy.codeMode.modelRounds).toBeLessThanOrEqual(2);
+  expect(report.economy.codeMode.outerCalls).toBeLessThanOrEqual(2);
+  expect(report.economy.intermediateReductionPercent, "A4 no redujo al menos 30 % de bytes intermedios").toBeGreaterThanOrEqual(30);
+  expect(report.economy.codeMode.estimatedTokens, "la estimación reproducible de A4 supera el baseline").toBeLessThanOrEqual(
+    report.economy.baseline.estimatedTokens,
+  );
+  expect(report.economy.equivalentResult, "baseline y A4 no son funcionalmente equivalentes").toBe(true);
+  expect(report.economy.realTokens, "no deben inventarse tokens reales cuando el host no los reporta").toEqual({
+    available: false,
+    baseline: null,
+    codeMode: null,
+    savingsClaimed: false,
+  });
+
   expect(report.git.performed, "el modo de commit del reporte no coincide con MALAHOR_E2E_COMMIT").toBe(commitRequested);
   expect(isAtOrWithin(sandboxRoot, report.git.repository), "Git operó fuera del repositorio sandbox").toBe(true);
   expect(report.git.pushes, "el E2E nunca debe ejecutar push").toBe(0);
@@ -154,8 +226,8 @@ test("T-5.5.2 valida Malahor completo en un host OpenCode V2 real y aislado", as
   expect(fs.existsSync(report.reportPath), `no existe el reporte E2E: ${report.reportPath}`).toBe(true);
   const persistedReport = fs.readFileSync(report.reportPath, "utf8");
   expect(persistedReport.length, "el reporte E2E persistido está vacío").toBeGreaterThan(0);
-  expect(persistedReport, "el reporte E2E contiene nombres de secretos prohibidos").not.toMatch(
-    /token|password|authorization/i,
+  expect(persistedReport, "el reporte E2E contiene credenciales o payloads secretos").not.toMatch(
+    /password|authorization|bearer|synthetic-secret/i,
   );
 
   expect(report.cleanup.processesRemaining, "quedaron procesos del host o MCP vivos").toBe(0);

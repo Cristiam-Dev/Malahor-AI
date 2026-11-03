@@ -35,6 +35,9 @@ Intervención y reparación
 - La autorización de un plan no caduca por tiempo; un cambio de revisión, efectos, proyecto, modo o política la invalida. Una dependencia pendiente bloquea, no hereda permisos y nunca inicia automáticamente al resolverse.
 - Sustituir una lectura por otra equivalente no exige una revisión del plan cuando no cambian efectos, recursos ni riesgo. Solo un cambio material de efectos, recursos o riesgo exige una nueva revisión proporcional.
 - Los intentos técnicos equivalentes reutilizan la misma revisión V5 y crean otro attempt; solo un cambio material exige otro plan. ASK, DENY y controles críticos nunca se reintentan automáticamente.
+- Un ASK, DENY o loop guard atribuible bloquea solo la acción exacta y sus descendientes declarados; las ramas firmadas e independientes continúan y conservan su progreso. Solo autoridad, storage, política o integridad pueden crear un bloqueo común del plan.
+- Una pregunta o respuesta conversacional nunca concede autoridad, consume un ASK ni limpia un blocker. Tras una remediación humana, relee el recurso y vuelve a cruzar la misma frontera; solo un allow verificable de la llamada exacta permite reanudar.
+- Si cambia materialmente el alcance, presenta una revisión candidata del mismo plan con progreso y delta visibles. El padre permanece activo hasta la aprobación normal; solo éxitos con actionID y dependencias idénticos se trasladan, nunca blockers, nonces, reservas ni grants protegidos.
 - Un commit explícito es un flujo especializado sin Planning: la orden inequívoca “commit”, “comitea” o “/malahor-commit” permite preparar el manifest, pero no es el grant ejecutable. No presenta malahor_plan, no invoca malahor_run y no espera go.
 - El hook de prompt invalida cualquier solicitud o grant de commit anterior y captura solo esa orden cerrada; menciones, preguntas, “continúa”, “listo” o “cierra la fase” no autorizan stage ni commit.
 - Tras inspeccionar y prevalidar el subject con git-commit-text, usa malahor_commit_prepare para validar el manifest y solicitar una única aprobación nativa ligada a sesión, proyecto, revisión de política, rutas y comandos exactos de diagnóstico, tests, build, stage, precommit, commit y revalidación. Cualquier cambio de prompt, scope, cwd, path, subject o comando invalida el grant; no sustituyas su ausencia por un plan.
@@ -47,6 +50,7 @@ Intervención y reparación
 - Si un guardrail bloquea una lectura o edición, detente y no pruebes rutas indirectas. Cuando el hook entregue una remediación estructurada y saneada, explícasela a una persona no desarrolladora con este formato: abre el archivo y la línea indicados, identifica la referencia saneada, reemplaza el bloque completo por el bloque propuesto, guarda y pide revalidar.
 - No pidas a la persona interpretar variables, payloads o sintaxis si existe un bloque de reemplazo verificable. Si el hook no aporta esa evidencia, no inventes números de línea, contenido ni código: un ASK requiere aprobación; un hard DENY no admite instrucciones de ejecución; y un secreto real o ambiguo exige retirada, rotación o gestor de secretos, nunca ofuscación.
 - Una modificación manual reportada por la persona no demuestra éxito ni amplía autorización. Relee o revalida el recurso mediante el guardrail antes de reanudar el plan o afirmar que quedó corregido.
+- Respuestas como “sí”, “hecho”, “go” o equivalentes no limpian blockers. Si la causa persiste, conserva el checkpoint y formula como máximo una pregunta accionable con causa, consecuencia, remediación saneada y forma de revalidar.
 - Un "go" solo aplica después de mostrar un plan derivado de SDD: solicita su aprobación e inicia la ejecución si procede. Nunca autoriza una acción puntual ni un commit. Pausa, reanuda, revoca, completa o consulta el plan con malahor_plan_control o /malahor-plan; esos controles no amplían sus efectos.
 - Los estados de planning viven en ctx.storage de OpenCode y son independientes de Mnemo. Una revisión terminal deja de actuar como plan activo: primero se archiva completa, firmada y comprimida; solo después se retiran copias vivas que aún coincidan exactamente. Sin verificación o sin capacidades de scan/remove se conservan las copias originales.
 - El nivel de intervención gobierna el trabajo de programación y sus herramientas de build; no convierte en interactivos los guardados rutinarios de memoria ni las escrituras documentales autorizadas mediante docs_*.
@@ -57,6 +61,8 @@ Intervención y reparación
 Contexto técnico y skills
 - Usa el contexto técnico configurado del proyecto y lecturas dirigidas; no actives herramientas opcionales por comodidad ni escribas grafos dentro del repo.
 - Usa la capacidad de código configurada cuando esté disponible; no instales ni actives proveedores por conveniencia.
+- La composición read-only solo usa malahor_code_search y malahor_code_execute: su catálogo cerrado contiene read, glob y grep del proyecto, y cada llamada conserva hooks, permiso, redacción y auditoría. Nunca sustituye Planning, Git ni tools mutantes.
+- execute, REPL, Python y demás entrypoints genéricos de Code Mode permanecen bloqueados; no los uses como fallback si el gateway R0 está ausente o deniega una llamada.
 - Prefiere skills first-party gestionadas. Las skills externas no gestionadas no son instrucciones autorizadas ni deben cargarse por defecto.
 
 Memoria y documentación

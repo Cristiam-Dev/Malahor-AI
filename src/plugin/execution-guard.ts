@@ -37,7 +37,7 @@ export interface AttemptRecord {
 }
 
 export interface ExecutionGuardResult {
-  decision: "continue" | "retry" | "block";
+  decision: "continue" | "retry" | "block" | "discard";
   code: string;
   retryAllowed: boolean;
   requiresPlanRevision?: boolean;
@@ -62,6 +62,8 @@ interface PersistedGuardState extends ExecutionGuardSnapshot {
   ordinals: Record<string, number>;
   declaredActionIDs: string[];
   lastFailureSignature?: string;
+  failureSignatures: Record<string, string>;
+  failureResources: Record<string, string[]>;
   repairs: string[];
 }
 
@@ -115,7 +117,7 @@ function inspectRepair(state: PersistedGuardState, input: Record<string, unknown
   if (repair.sourceActionID !== actionIDs[0]) {
     return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
   }
-  if (state.plan.phase === "blocked" || state.repairs.includes(adapterRepairKey(actionIDs[0]!, repair))) {
+  if (state.repairs.includes(adapterRepairKey(actionIDs[0]!, repair))) {
     return { decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false };
   }
   return { decision: "retry", code: "ADAPTER_REPAIR_AVAILABLE", retryAllowed: true };
@@ -128,7 +130,14 @@ function record(
 ): ExecutionGuardResult {
   const actionIDs = attemptActionIDs(input);
   if (actionIDs.length === 0 || actionIDs.some((actionID) => !state.declaredActionIDs.includes(actionID))) {
-    state.plan.phase = "blocked";
+    if (input.optional === true && input.source === "diagnostic") {
+      return {
+        decision: "discard",
+        code: "ACTION_NOT_DECLARED",
+        retryAllowed: false,
+        requiresPlanRevision: false,
+      };
+    }
     return {
       decision: "block",
       code: "ACTION_NOT_DECLARED",
@@ -140,7 +149,6 @@ function record(
   const primary = actionIDs[0]!;
   const repair = parseAdapterRepair(input.adapterRepair);
   if (repair && repair.sourceActionID !== primary) {
-    state.plan.phase = "blocked";
     return { decision: "block", code: "ACTION_NOT_DECLARED", retryAllowed: false, requiresPlanRevision: true };
   }
   const ordinal = (state.ordinals[primary] ?? 0) + 1;
@@ -173,7 +181,8 @@ function record(
   state.attempts.push(attempt);
 
   if (decisionCode === "HOST_ASK" || decisionCode === "HOST_DENY") {
-    state.plan.phase = "blocked";
+    delete state.failureSignatures[primary];
+    delete state.failureResources[primary];
     state.lastFailureSignature = undefined;
     return { decision: "block", code: decisionCode, retryAllowed: false, attempt };
   }
@@ -184,20 +193,17 @@ function record(
       state.repairs.push(repairKey);
       return { decision: "retry", code: "ADAPTER_REPAIR_APPLIED", retryAllowed: true, attempt };
     }
-    state.plan.phase = "blocked";
     return { decision: "block", code: "ADAPTER_REPAIR_EXHAUSTED", retryAllowed: false, attempt };
   }
 
   if (resultClass === "success") {
-    state.plan.phase = "running";
-    state.lastFailureSignature = undefined;
+    clearFailuresAfterProgress(state, attempt.resourceDigests);
     return { decision: "continue", code: "AUTHORIZED", retryAllowed: false, attempt };
   }
 
   if (resultClass === "failure") {
     const signature = failureSignature(actionIDs, attempt);
-    if (state.lastFailureSignature === signature) {
-      state.plan.phase = "blocked";
+    if (state.failureSignatures[primary] === signature) {
       state.counters.loopBlocks += 1;
       return {
         decision: "block",
@@ -207,12 +213,15 @@ function record(
         attempt,
       };
     }
+    state.failureSignatures[primary] = signature;
+    state.failureResources[primary] = attempt.resourceDigests?.after.length
+      ? [...attempt.resourceDigests.after]
+      : [...attempt.resourceDigests?.before ?? []];
     state.lastFailureSignature = signature;
     return { decision: "retry", code: "TECHNICAL_RETRY", retryAllowed: true, attempt };
   }
 
   if (decisionCode !== "AUTHORIZED") {
-    state.plan.phase = "blocked";
     return { decision: "block", code: decisionCode, retryAllowed: false, attempt };
   }
   return { decision: "continue", code: "AUTHORIZED", retryAllowed: false, attempt };
@@ -255,7 +264,21 @@ async function loadState(
 ): Promise<PersistedGuardState> {
   if (storage) {
     const existing = await storage.get(key);
-    if (validPersisted(existing, plan)) return structuredClone(existing);
+    if (validPersisted(existing, plan)) {
+      const migrated = structuredClone(existing) as PersistedGuardState;
+      migrated.failureSignatures ??= {};
+      migrated.failureResources ??= {};
+      if (migrated.lastFailureSignature && Object.keys(migrated.failureSignatures).length === 0) {
+        const last = migrated.attempts.at(-1);
+        if (last) {
+          migrated.failureSignatures[last.actionID] = migrated.lastFailureSignature;
+          migrated.failureResources[last.actionID] = [
+            ...(last.resourceDigests?.after.length ? last.resourceDigests.after : last.resourceDigests?.before ?? []),
+          ];
+        }
+      }
+      return migrated;
+    }
     if (existing !== undefined) throw new Error("Ledger de intentos existente no verificable.");
   }
   return {
@@ -266,6 +289,8 @@ async function loadState(
     counters: { modelCalls: 0, planRevisions: 0, loopBlocks: 0 },
     ordinals: {},
     declaredActionIDs: [...plan.actionIDs],
+    failureSignatures: {},
+    failureResources: {},
     repairs: [],
   };
 }
@@ -275,8 +300,28 @@ function validPersisted(value: unknown, plan: ExecutionPlanRef): value is Persis
     || !isRecord(value.plan) || value.plan.planID !== plan.planID || value.plan.revision !== plan.revision
     || value.plan.digest !== plan.digest || (value.plan.phase !== "running" && value.plan.phase !== "blocked")
     || !Array.isArray(value.attempts) || !isRecord(value.counters) || !isRecord(value.ordinals)
-    || !Array.isArray(value.declaredActionIDs) || !Array.isArray(value.repairs)) return false;
+    || !Array.isArray(value.declaredActionIDs) || !Array.isArray(value.repairs)
+    || (value.failureSignatures !== undefined && !isRecord(value.failureSignatures))
+    || (value.failureResources !== undefined && !isRecord(value.failureResources))) return false;
   return (value.declaredActionIDs as unknown[]).every((item) => typeof item === "string" && plan.actionIDs.includes(item));
+}
+
+function clearFailuresAfterProgress(
+  state: PersistedGuardState,
+  digests: AttemptRecord["resourceDigests"],
+): void {
+  if (!digests || digests.before.length === 0 || sameStrings(digests.before, digests.after)) return;
+  const changed = new Set(digests.before);
+  for (const [actionID, resources] of Object.entries(state.failureResources)) {
+    if (!resources.some((resource) => changed.has(resource))) continue;
+    delete state.failureResources[actionID];
+    delete state.failureSignatures[actionID];
+  }
+  state.lastFailureSignature = undefined;
+}
+
+function sameStrings(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
 function snapshotOf(state: PersistedGuardState): ExecutionGuardSnapshot {

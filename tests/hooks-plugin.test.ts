@@ -11,6 +11,7 @@ import {
   evaluateToolHook,
   formatPluginBlock,
 } from "../src/cli/core/hooks/plugin-adapter";
+import { buildSecretPatchSummary, revalidateSecretPatchSummary } from "../src/cli/core/hooks/secret-scan";
 import {
   MALAHOR_COMPACTION_MARKER,
   checkpointBeforeCompaction,
@@ -24,8 +25,8 @@ import {
 import { startEventCapture } from "../src/plugin/events";
 import { MALAHOR_PROTOCOL_MARKER, injectMalahorProtocol } from "../src/plugin/protocol";
 import { createGitIntentRegistry } from "../src/cli/core/git-intent";
-import { isMcpToolName } from "../src/cli/core/hooks/types";
-import { evaluatePlanningTool } from "../src/plugin/planning";
+import { isMcpToolName, type HookResult, type HookViolation } from "../src/cli/core/hooks/types";
+import { evaluatePlanningPermission, evaluatePlanningTool } from "../src/plugin/planning";
 
 let root: string;
 let repo: string;
@@ -95,6 +96,12 @@ function toolHookOptions() {
     toolRegistered: true,
     env,
   };
+}
+
+function pluginViolation(result: HookResult, id: string): (HookViolation & { blockClass?: unknown }) | undefined {
+  return result.violations.find((violation) => violation.id === id) as
+    | (HookViolation & { blockClass?: unknown })
+    | undefined;
 }
 
 describe("adaptador de plugin V2", () => {
@@ -588,6 +595,41 @@ describe("adaptador de plugin V2", () => {
     }
   });
 
+  test("Planning trata solo los dos gateways A4 exactos como lectura directa", async () => {
+    writeProjectPolicy({ integrations: { blockUnapprovedIntegrations: true } });
+    const options = {
+      cwd: repo,
+      permissionRegistered: true,
+      shellRegistered: true,
+      toolRegistered: true,
+      resolveSessionProject: async () => ({ canonicalKey: "demo", root: repo }),
+      env,
+    };
+
+    for (const tool of ["malahor_code_search", "malahor_code_execute"]) {
+      await expect(evaluatePlanningTool({ sessionID: "ses_a4", tool, input: {} }, options)).resolves.toBeUndefined();
+      const permission: Record<string, unknown> = {
+        sessionID: "ses_a4",
+        action: tool,
+        resources: [],
+        effect: "allow",
+      };
+      await evaluatePlanningPermission(permission, options);
+      expect(permission.effect).toBe("allow");
+
+      const hook = await evaluateToolHook({ sessionID: "ses_a4", tool, input: {} }, options);
+      expect(hook.decision).toBe("allow");
+      expect(hook.violations.some((violation) => violation.id === "MAL-HOOK-CODE-MODE")).toBe(false);
+    }
+
+    for (const alias of ["code_search", "code_execute"]) {
+      await expect(evaluatePlanningTool({ sessionID: "ses_a4", tool: alias, input: {} }, options)).rejects.toThrow();
+      const hook = await evaluateToolHook({ sessionID: "ses_a4", tool: alias, input: {} }, options);
+      expect(hook.decision).toBe("deny");
+      expect(hook.violations.some((violation) => violation.id === "MAL-HOOK-TOOL-UNKNOWN")).toBe(true);
+    }
+  });
+
   test("permission.evaluate no pregunta por tools conocidas sin efecto propio", async () => {
     const input: Record<string, unknown> = {
       action: "todowrite",
@@ -722,6 +764,7 @@ describe("adaptador de plugin V2", () => {
   });
 
   test("tool patch permite delete documental y bloquea update", async () => {
+    writeSourceFixture("docs/security/operation-matrix.md", "# Documento de fixture");
     const options = {
       cwd: repo,
       permissionRegistered: true,
@@ -786,6 +829,148 @@ describe("adaptador de plugin V2", () => {
 
     expect(result.decision).toBe("allow");
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+  });
+
+  test("un hunk mal indentado da diagnóstico de contexto sin afirmar que hay secretos ni filtrar el patch", async () => {
+    const relativePath = "src/misaligned.ts";
+    const value = ["synthetic", "0123456789abcdef"].join("-");
+    writeSourceFixture(relativePath, "  export const ready = true;");
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: { patchText: [
+        "*** Begin Patch", `*** Update File: ${relativePath}`, "@@",
+        "- export const ready = true;", `+export const ready = '${value}';`, "*** End Patch",
+      ].join("\n"), secretPatchSummary: { evaluable: true, files: [] } },
+    }, toolHookOptions());
+    const output = formatPluginBlock(result);
+    const violation = pluginViolation(result, "MAL-HOOK-PATCH-UNEVALUABLE");
+
+    expect(result.decision).toBe("deny");
+    expect(violation?.diagnostic).toMatchObject({
+      code: "PATCH_NOT_EVALUABLE", reason: "context-mismatch", operation: "update", path: relativePath,
+    });
+    expect(output).toMatch(/no se pudo evaluar.*contexto/is);
+    expect(output).not.toMatch(/secretos detectados/i);
+    expect(output).not.toContain(value);
+    expect(fs.readFileSync(path.join(repo, relativePath), "utf8")).toBe("  export const ready = true;\n");
+  });
+
+  test("move, add existente, delete ausente y symlink conservan DENY sin revelar rutas externas", async () => {
+    writeSourceFixture("src/fixture.ts", "export const ready = true;");
+    const linked = path.join(repo, "src", "linked.ts");
+    fs.symlinkSync(path.join(repo, "src", "fixture.ts"), linked);
+    const patches = [
+      ["*** Update File: src/fixture.ts", "*** Move to: src/moved.ts", "@@", "-export const ready = true;", "+export const ready = false;"],
+      ["*** Add File: src/fixture.ts", "+export const ready = false;"],
+      ["*** Delete File: src/missing.ts"],
+      ["*** Update File: src/linked.ts", "@@", "-export const ready = true;", "+export const ready = false;"],
+    ];
+    for (const section of patches) {
+      const result = await evaluateToolHook({
+        tool: "patch", input: { patchText: ["*** Begin Patch", ...section, "*** End Patch"].join("\n") },
+      }, toolHookOptions());
+      expect(result.decision).toBe("deny");
+      expect(pluginViolation(result, "MAL-HOOK-PATCH-UNEVALUABLE")).toBeDefined();
+      expect(formatPluginBlock(result)).not.toContain(repo);
+    }
+  });
+
+  test("postimagen con secreto real sigue en DENY; evidencia de preestado cambiada no se reutiliza", async () => {
+    const relativePath = "src/credential.ts";
+    const identifier = ["access", "token"].join("_");
+    const value = ["production", "0123456789abcdef"].join("-");
+    writeSourceFixture(relativePath, "export const ready = false;");
+    const secretPatch = ["*** Begin Patch", `*** Update File: ${relativePath}`, "@@",
+      "-export const ready = false;", `+export const ${identifier} = '${value}';`, "*** End Patch"].join("\n");
+    const result = await evaluateToolHook({ tool: "patch", input: { patchText: secretPatch } }, toolHookOptions());
+    expect(result.decision).toBe("deny");
+    expect(pluginViolation(result, "MAL-HOOK-SECRETS")?.diagnostic?.code).toBe("SECRET_PRESENT");
+    expect(formatPluginBlock(result)).not.toContain(value);
+
+    const cleanPatch = secretPatch.replace(`+export const ${identifier} = '${value}';`, "+export const ready = true;");
+    const summary = buildSecretPatchSummary(cleanPatch, repo);
+    expect(summary.evaluable).toBe(true);
+    expect(revalidateSecretPatchSummary(summary, repo)).toBe(true);
+    writeSourceFixture(relativePath, "export const ready = false;\nexport const changed = true;");
+    expect(revalidateSecretPatchSummary(summary, repo)).toBe(false);
+    expect(fs.readFileSync(path.join(repo, relativePath), "utf8")).toContain("changed = true");
+  });
+
+  test("un patch con dos archivos deniega si uno introduce Bearer y no filtra el valor", async () => {
+    const token = ["abcdefghijklmnopqrstuvwxyz", "12345678"].join("");
+    writeSourceFixture("src/first.ts", "export const first = false;");
+    writeSourceFixture("src/second.ts", "export const second = false;");
+    const result = await evaluateToolHook({
+      tool: "patch", input: { patchText: [
+        "*** Begin Patch", "*** Update File: src/first.ts", "@@",
+        "-export const first = false;", "+export const first = true;",
+        "*** Update File: src/second.ts", "@@",
+        "-export const second = false;", `+export const header = "Bearer ${token}";`, "*** End Patch",
+      ].join("\n") },
+    }, toolHookOptions());
+    expect(result.decision).toBe("deny");
+    expect(pluginViolation(result, "MAL-HOOK-SECRETS")?.diagnostic?.code).toBe("SECRET_PRESENT");
+    expect(formatPluginBlock(result)).not.toContain(token);
+    expect(fs.readFileSync(path.join(repo, "src/first.ts"), "utf8")).toContain("first = false");
+    expect(fs.readFileSync(path.join(repo, "src/second.ts"), "utf8")).toContain("second = false");
+  });
+
+  // follow-up: clasificación DENY incremental
+  test.skip("un patch benigno que el parser no puede evaluar conserva fail-closed sin afirmar secreto", async () => {
+    const relativePath = "src/benign-move.ts";
+    const destination = "src/benign-moved.ts";
+    writeSourceFixture(relativePath, "export const digest = 'sha256:before';");
+
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          `*** Update File: ${relativePath}`,
+          `*** Move to: ${destination}`,
+          "@@",
+          "-export const digest = 'sha256:before';",
+          "+export const digest = 'sha256:after';",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, toolHookOptions());
+    const violation = pluginViolation(result, "MAL-HOOK-PATCH-UNEVALUABLE");
+    const output = formatPluginBlock(result);
+
+    expect(result.decision).toBe("deny");
+    expect(violation).toBeDefined();
+    expect(violation?.blockClass).toBe("control-unavailable");
+    expect(result.violations.some((item) => item.id === "MAL-HOOK-SECRETS")).toBe(false);
+    expect(result.violations.some((item) =>
+      (item as HookViolation & { blockClass?: unknown }).blockClass === "hard-deny")).toBe(false);
+    expect(output).toMatch(/control-unavailable/i);
+    expect(output).not.toMatch(/(?:secreto|credencial).*(?:detectad|confirmad)|(?:detectad|confirmad).*(?:secreto|credencial)/i);
+  });
+
+  test("un patch evaluable con digest, proof y secretPatchSummary no crea un falso positivo", async () => {
+    const relativePath = "src/signed-state.ts";
+    writeSourceFixture(relativePath, "export const ready = false;");
+
+    const result = await evaluateToolHook({
+      tool: "patch",
+      input: {
+        patchText: [
+          "*** Begin Patch",
+          `*** Update File: ${relativePath}`,
+          "@@",
+          "-export const ready = false;",
+          "+export const digest = 'sha256:fixture';",
+          "+export const proof = 'signed-fixture';",
+          "+export const secretPatchSummary = { evaluable: true };",
+          "*** End Patch",
+        ].join("\n"),
+      },
+    }, toolHookOptions());
+
+    expect(result.decision).toBe("allow");
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+    expect(result.violations.some((violation) => violation.id === "MAL-HOOK-PATCH-UNEVALUABLE")).toBe(false);
   });
 
   test("el adaptador entrega la receta saneada al mensaje visible de OpenCode", async () => {
@@ -1140,22 +1325,20 @@ describe("adaptador de plugin V2", () => {
     expect(result.result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(true);
   });
 
-  test("Code Mode/REPL queda bloqueado porque no es mediable", async () => {
-    const tool = await evaluateToolHook({ tool: "code", input: { code: "..." } }, {
-      cwd: repo,
-      permissionRegistered: true,
-      shellRegistered: true,
-      env,
-    });
-    const permission = await evaluatePermission({
-      action: "code",
-      resources: [],
-      effect: "allow",
-    }, { cwd: repo, permissionRegistered: true, env });
+  test("Code Mode nativo, execute, Python y REPL permanecen en hard DENY", async () => {
+    const options = { cwd: repo, permissionRegistered: true, shellRegistered: true, env };
+    for (const name of ["code", "execute", "python", "repl"]) {
+      const tool = await evaluateToolHook({ tool: name, input: { code: "..." } }, options);
+      const permission = await evaluatePermission({
+        action: name,
+        resources: [],
+        effect: "allow",
+      }, options);
 
-    expect(tool.decision).toBe("deny");
-    expect(tool.violations.some((violation) => violation.id === "MAL-HOOK-CODE-MODE")).toBe(true);
-    expect(permission.effect).toBe("deny");
+      expect(tool.decision, name).toBe("deny");
+      expect(tool.violations.some((violation) => violation.id === "MAL-HOOK-CODE-MODE"), name).toBe(true);
+      expect(permission.effect, name).toBe("deny");
+    }
   });
 
   test("reconoce malahor_plan_control sin abrir tools desconocidas", async () => {

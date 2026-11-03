@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { runCodegraph } from "../../src/cli/commands/codegraph";
 import { runMemory } from "../../src/cli/commands/memory";
@@ -39,10 +40,17 @@ const MUTATED_ENV = [
 interface SandboxOptions { root?: string; commit?: boolean; keep?: boolean }
 interface AgentRule { action: string; resource: string; effect: string }
 interface RuntimeAgent { id: string; mode: string; hidden: boolean }
+interface PersistedPluginDiagnostics {
+  host?: string;
+  criticalGaps?: string[];
+  capabilities?: Record<string, boolean>;
+}
+interface RuntimePlugin { id: string; status: string; failureReference: boolean }
 interface HostHandle {
   child: ChildProcessWithoutNullStreams;
   url: string;
   secret: string;
+  diagnostics(): string;
   stop(): Promise<void>;
 }
 
@@ -53,9 +61,15 @@ export interface V2SandboxReport {
     realDataTouched: boolean;
     networkDownloads: number;
     persistedCredentials: string[];
+    nodeModules: { before: string; after: string; unchanged: boolean };
   };
   host: { real: boolean; kind: string; version: string };
-  plugin: { loaded: boolean; criticalGaps: string[]; capabilities: Record<string, boolean> };
+  plugin: {
+    loaded: boolean;
+    live: { present: boolean; status: string; failureReference: boolean };
+    inventory: RuntimePlugin[];
+    persisted: { host: string; criticalGaps: string[]; capabilities: Record<string, boolean> };
+  };
   agents: {
     primary: { id: string; mode: string; visible: boolean; subagent: { denyAll: boolean; allowPatterns: string[] } };
     specialists: Array<{ id: string; mode: string; subagentDenied: boolean }>;
@@ -80,6 +94,20 @@ export interface V2SandboxReport {
     symbol: { synthetic: boolean; found: boolean; via: string; name: string };
     mcp: { readOnly: boolean; reindexWrites: number };
   };
+  codeMode: {
+    result: { fileCount: number; matchCount: number; hasSymbol: boolean };
+    internalCalls: Array<{ tool: string; status: string }>;
+    permissionCalls: number;
+    permissionsPersisted: boolean;
+    auditedCalls: number;
+  };
+  economy: {
+    baseline: { modelRounds: number; outerCalls: number; schemaBytes: number; intermediateBytes: number; estimatedTokens: number };
+    codeMode: { modelRounds: number; outerCalls: number; schemaBytes: number; intermediateBytes: number; estimatedTokens: number };
+    intermediateReductionPercent: number;
+    equivalentResult: boolean;
+    realTokens: { available: boolean; baseline: number | null; codeMode: number | null; savingsClaimed: boolean };
+  };
   git: { performed: boolean; repository: string; pushes: number; message?: string; head?: string; clean?: boolean };
   doctor: { ready: boolean; fails: number; warnings: number };
   reportPath: string;
@@ -96,6 +124,7 @@ export async function runV2SandboxE2E(options: SandboxOptions = {}): Promise<V2S
   const opencodeDir = path.join(xdgConfig, "opencode");
   const previousEnv = snapshotEnvironment();
   const env = sandboxEnvironment(root, malahorHome, xdgConfig, opencodeDir);
+  const nodeModulesBefore = fingerprintTree(path.join(REPO_ROOT, "node_modules"));
   let host: HostHandle | undefined;
   let report: V2SandboxReport | undefined;
   let failure: unknown;
@@ -109,19 +138,34 @@ export async function runV2SandboxE2E(options: SandboxOptions = {}): Promise<V2S
     const project = enableCodegraphProject(malahorHome, workspace);
     const memory = await exerciseMemory(malahorHome);
     const codegraph = await exerciseCodegraph(root, workspace, malahorHome, project);
+    const { codeMode, economy } = exerciseCodeMode(root, workspace, malahorHome, project, env);
     host = await startHost(workspace, env);
-    const runtime = await inspectRuntime(host, opencodeDir, malahorHome);
-    const doctor = exerciseDoctor(workspace, env);
+    const runtime = await inspectRuntime(host, workspace, opencodeDir, malahorHome);
+    let doctor: V2SandboxReport["doctor"];
+    try {
+      doctor = exerciseDoctor(workspace, env);
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\nHost stderr:\n${host.diagnostics()}`);
+    }
     const git = commit ? exerciseGit(workspace, env) : { performed: false, repository: workspace, pushes: 0 };
     const persistedCredentials = findSecret(root, host.secret);
 
     report = {
-      sandbox: { root, workspace, realDataTouched: false, networkDownloads: 0, persistedCredentials },
+      sandbox: {
+        root,
+        workspace,
+        realDataTouched: false,
+        networkDownloads: 0,
+        persistedCredentials,
+        nodeModules: { before: nodeModulesBefore, after: "", unchanged: false },
+      },
       host: runtime.host,
       plugin: runtime.plugin,
       agents: runtime.agents,
       memory,
       codegraph,
+      codeMode,
+      economy,
       git,
       doctor,
       reportPath: "",
@@ -140,6 +184,8 @@ export async function runV2SandboxE2E(options: SandboxOptions = {}): Promise<V2S
   }
   if (!report) throw new Error("El E2E no produjo reporte.");
 
+  report.sandbox.nodeModules.after = fingerprintTree(path.join(REPO_ROOT, "node_modules"));
+  report.sandbox.nodeModules.unchanged = report.sandbox.nodeModules.after === report.sandbox.nodeModules.before;
   report.cleanup.environmentRestored = environmentMatches(previousEnv);
   const reportPath = keep
     ? path.join(root, "report.json")
@@ -169,8 +215,12 @@ function copyPackage(workspace: string): void {
     fs.cpSync(source, path.join(workspace, directory), { recursive: true });
   }
   fs.copyFileSync(path.join(REPO_ROOT, "package.json"), path.join(workspace, "package.json"));
-  fs.writeFileSync(path.join(workspace, "src", "e2e-fixture.ts"),
-    "export function malahorE2ESyntheticSymbol() { return 552; }\n", { mode: 0o600 });
+  const fixture = [
+    "export function malahorE2ESyntheticSymbol() { return 552; }",
+    ...Array.from({ length: 320 }, (_value, index) => `export const syntheticEconomyLine${index} = "fixture-${index.toString().padStart(3, "0")}";`),
+    "",
+  ].join("\n");
+  fs.writeFileSync(path.join(workspace, "src", "e2e-fixture.ts"), fixture, { mode: 0o600 });
 }
 
 function sandboxEnvironment(root: string, malahorHome: string, xdgConfig: string, opencodeDir: string): NodeJS.ProcessEnv {
@@ -328,6 +378,185 @@ async function exerciseCodegraph(root: string, workspace: string, malahorHome: s
   };
 }
 
+function exerciseCodeMode(
+  root: string,
+  workspace: string,
+  malahorHome: string,
+  project: string,
+  env: NodeJS.ProcessEnv,
+): Pick<V2SandboxReport, "codeMode" | "economy"> {
+  const bundle = path.join(workspace, "assets", "opencode", "plugins", "malahor", "index.ts");
+  const instrumented = path.join(root, "code-mode", "malahor-bundle-api.mjs");
+  const runner = path.join(root, "code-mode", "exercise.mjs");
+  fs.mkdirSync(path.dirname(instrumented), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    instrumented,
+    `${fs.readFileSync(bundle, "utf8")}\nexport { registerReadOnlyCodeModeTools };\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  fs.writeFileSync(runner, codeModeE2ESource(pathToFileURL(instrumented).href), { encoding: "utf8", mode: 0o600 });
+  const execution = spawnSync("node", ["--no-warnings", runner, workspace, malahorHome, project], {
+    cwd: workspace,
+    env,
+    encoding: "utf8",
+    timeout: 60_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  if (execution.error) throw execution.error;
+  if (execution.status !== 0) throw new Error(`Code Mode E2E fallo (${execution.status}): ${execution.stderr}`);
+  return JSON.parse(execution.stdout) as Pick<V2SandboxReport, "codeMode" | "economy">;
+}
+
+function codeModeE2ESource(moduleURL: string): string {
+  return `
+    import fs from "node:fs";
+    import path from "node:path";
+    const { registerReadOnlyCodeModeTools } = await import(${JSON.stringify(moduleURL)});
+    const [workspace, malahorHome, project] = process.argv.slice(2);
+    const fixturePath = path.join(workspace, "src", "e2e-fixture.ts");
+    const fixtureContent = fs.readFileSync(fixturePath, "utf8");
+    const definitions = new Map();
+    const added = new Map();
+    const permissions = [];
+    const input = (name) => ({
+      type: "object",
+      properties: name === "read"
+        ? { path: { type: "string" }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 2000 } }
+        : name === "glob"
+          ? { pattern: { type: "string" }, path: { type: "string" }, hidden: { type: "boolean" }, limit: { type: "integer", minimum: 1, maximum: 100 } }
+          : { pattern: { type: "string" }, path: { type: "string" }, include: { type: "string" }, literal: { type: "boolean" }, caseSensitive: { type: "boolean" }, limit: { type: "integer", minimum: 1, maximum: 100 } },
+      required: [name === "read" ? "path" : "pattern"],
+      additionalProperties: false,
+    });
+    const grepOutput = {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { path: { type: "string" }, line: { type: "integer", minimum: 1 }, preview: { type: "string" } },
+        required: ["path", "line", "preview"],
+        additionalProperties: false,
+      },
+    };
+    for (const name of ["read", "glob", "grep"]) {
+      definitions.set(name, {
+        id: name,
+        name,
+        description: \`Host \${name} E2E sintético\`,
+        input: input(name),
+        output: name === "read" ? { type: "string" }
+          : name === "glob" ? { type: "array", items: { type: "string" } } : grepOutput,
+        options: { permission: name, codemode: false },
+        execute: () => name === "read" ? fixtureContent
+          : name === "glob" ? [fixturePath]
+            : [{ path: fixturePath, line: 1, preview: "malahorE2ESyntheticSymbol" }],
+      });
+    }
+    const projectDefinition = (definition) => {
+      const execute = definition.execute;
+      return {
+        ...definition,
+        options: { ...definition.options },
+        execute: (input, call) => execute(input, call),
+      };
+    };
+    const listDefinitions = () => [...definitions.values()].map(projectDefinition);
+    const getDefinition = (name) => {
+      const definition = definitions.get(name);
+      return definition ? projectDefinition(definition) : undefined;
+    };
+    const domain = {
+      list: async () => listDefinitions(),
+      transform: async (callback) => {
+        callback({
+          list: listDefinitions,
+          get: getDefinition,
+          namespace: () => undefined,
+          add: (value) => added.set(String(value.name), value),
+        });
+        return { dispose: () => undefined };
+      },
+    };
+    let ref = 0;
+    const registration = await registerReadOnlyCodeModeTools(
+      domain,
+      { assert: async (request) => { permissions.push(structuredClone(request)); } },
+      {},
+      {
+        cwd: workspace,
+        env: process.env,
+        permissionRegistered: true,
+        toolRegistered: true,
+        resolveSessionProject: async () => ({ canonicalKey: project, root: workspace }),
+      },
+      {
+        moduleURL: ${JSON.stringify(moduleURL)},
+        randomRef: (prefix) => \`\${prefix}_\${String(++ref).padStart(20, "0")}\`,
+      },
+    );
+    try {
+      const call = { sessionID: "ses_e2e_a4", agent: "malahor", messageID: "msg_e2e_a4", id: "call_search" };
+      const search = await added.get("code_search").execute({ query: "read glob grep" }, call);
+      const discovered = JSON.parse(search.content);
+      const code = [
+        "const files = await tools.repo.glob({ pattern: 'src/*.ts', path: '.', limit: 10 });",
+        "const matches = await tools.repo.grep({ pattern: 'malahorE2ESyntheticSymbol', path: 'src', include: '*.ts', literal: true, caseSensitive: true, limit: 10 });",
+        "const content = await tools.repo.read({ path: 'src/e2e-fixture.ts', offset: 0, limit: 2000 });",
+        "return { fileCount: files.length, matchCount: matches.length, hasSymbol: content.includes('malahorE2ESyntheticSymbol') };",
+      ].join(" ");
+      const execute = await added.get("code_execute").execute(
+        { catalogRef: discovered.catalogRef, code },
+        { ...call, id: "call_execute" },
+      );
+      const parsed = JSON.parse(execute.content);
+      if (parsed.ok !== true) throw new Error(\`Code Mode E2E denegado: \${execute.content}\`);
+
+      const baselineOutputs = [
+        ["src/e2e-fixture.ts"],
+        [{ path: "src/e2e-fixture.ts", line: 1, preview: "malahorE2ESyntheticSymbol" }],
+        fixtureContent,
+      ];
+      const expected = { fileCount: 1, matchCount: 1, hasSymbol: true };
+      const bytes = (value) => Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8");
+      const baselineSchema = [...definitions.values()].map(({ execute: _execute, ...definition }) => definition);
+      const codeModeSchema = [...added.values()].map(({ execute: _execute, ...definition }) => definition);
+      const baseline = {
+        modelRounds: 3,
+        outerCalls: 3,
+        schemaBytes: bytes(baselineSchema),
+        intermediateBytes: baselineOutputs.reduce((total, value) => total + bytes(value), 0),
+      };
+      const composed = {
+        modelRounds: 2,
+        outerCalls: 2,
+        schemaBytes: bytes(codeModeSchema),
+        intermediateBytes: bytes(search.content) + bytes(execute.content),
+      };
+      const auditFile = path.join(malahorHome, "audit", "security.jsonl");
+      const audit = fs.readFileSync(auditFile, "utf8").trim().split("\\n").filter(Boolean)
+        .map((line) => JSON.parse(line)).filter((entry) => entry.kind === "code-mode" && entry.phase === "call.after");
+      const equivalentResult = JSON.stringify(parsed.value) === JSON.stringify(expected);
+      process.stdout.write(JSON.stringify({
+        codeMode: {
+          result: parsed.value,
+          internalCalls: parsed.calls,
+          permissionCalls: permissions.length,
+          permissionsPersisted: permissions.some((request) => Array.isArray(request.save) && request.save.length > 0),
+          auditedCalls: audit.length,
+        },
+        economy: {
+          baseline: { ...baseline, estimatedTokens: Math.ceil((baseline.schemaBytes + baseline.intermediateBytes) / 4) },
+          codeMode: { ...composed, estimatedTokens: Math.ceil((composed.schemaBytes + composed.intermediateBytes) / 4) },
+          intermediateReductionPercent: Math.round((1 - composed.intermediateBytes / baseline.intermediateBytes) * 10000) / 100,
+          equivalentResult,
+          realTokens: { available: false, baseline: null, codeMode: null, savingsClaimed: false },
+        },
+      }));
+    } finally {
+      await registration.dispose?.();
+    }
+  `;
+}
+
 async function startHost(workspace: string, env: NodeJS.ProcessEnv): Promise<HostHandle> {
   const secret = randomBytes(32).toString("hex");
   const child = spawn("opencode", ["serve", "--stdio", "--hostname", "127.0.0.1", "--port", "0"], {
@@ -353,6 +582,7 @@ async function startHost(workspace: string, env: NodeJS.ProcessEnv): Promise<Hos
     child,
     url,
     secret,
+    diagnostics: () => stderr,
     stop: async () => {
       if (stopped) return;
       stopped = true;
@@ -367,7 +597,7 @@ async function startHost(workspace: string, env: NodeJS.ProcessEnv): Promise<Hos
   };
 }
 
-async function inspectRuntime(host: HostHandle, opencodeDir: string, malahorHome: string): Promise<{
+async function inspectRuntime(host: HostHandle, workspace: string, opencodeDir: string, malahorHome: string): Promise<{
   host: V2SandboxReport["host"];
   plugin: V2SandboxReport["plugin"];
   agents: V2SandboxReport["agents"];
@@ -375,14 +605,18 @@ async function inspectRuntime(host: HostHandle, opencodeDir: string, malahorHome
   const auth = `Basic ${Buffer.from(`opencode:${host.secret}`).toString("base64")}`;
   const headers = { Authorization: auth };
   const info = await fetchJson(new URL("/api/info", host.url), headers) as { version?: string };
-  const endpoint = `/api/agent?location%5Bdirectory%5D=${encodeURIComponent(path.dirname(path.join(opencodeDir, "..")))}`;
+  const version = String(info.version ?? "unknown");
+  const location = `location%5Bdirectory%5D=${encodeURIComponent(workspace)}`;
+  const endpoint = `/api/agent?${location}`;
   const payload = await fetchJson(new URL(endpoint, host.url), headers);
   const agents = normalizeAgents(payload);
   const stateFile = path.join(malahorHome, "plugin-state.json");
   await waitForFile(stateFile);
-  const state = JSON.parse(fs.readFileSync(stateFile, "utf8")) as {
-    host?: string; criticalGaps?: string[]; capabilities?: Record<string, boolean>;
-  };
+  const plugin = await waitForStablePluginEvidence(
+    new URL(`/api/plugin?${location}`, host.url),
+    stateFile,
+    headers,
+  );
   const primaryRuntime = requiredAgent(agents, "malahor");
   const diagnosticRuntime = requiredAgent(agents, "malahor-diagnostico");
   const testingRuntime = requiredAgent(agents, "malahor-testing");
@@ -391,8 +625,8 @@ async function inspectRuntime(host: HostHandle, opencodeDir: string, malahorHome
   const testingRules = parseAgentRules(path.join(opencodeDir, "agents", "malahor-testing.md"));
 
   return {
-    host: { real: true, kind: state.host ?? "unknown", version: String(info.version ?? "unknown") },
-    plugin: { loaded: state.host === "v2", criticalGaps: state.criticalGaps ?? ["state-missing"], capabilities: state.capabilities ?? {} },
+    host: { real: true, kind: hostKindFromVersion(version), version },
+    plugin,
     agents: {
       primary: {
         id: primaryRuntime.id,
@@ -496,6 +730,125 @@ function wildcard(pattern: string, value: string): boolean {
   return new RegExp(`^${expression}$`).test(value);
 }
 
+export function pluginReportFromEvidence(
+  inventoryPayload: unknown,
+  state: PersistedPluginDiagnostics,
+): V2SandboxReport["plugin"] {
+  const inventory = normalizePluginInventory(inventoryPayload);
+  const matching = inventory.filter((plugin) => plugin.id === "malahor");
+  const runtime = matching.length === 1 ? matching[0] : undefined;
+  const live = {
+    present: matching.length > 0,
+    status: matching.length > 1 ? "duplicate" : runtime?.status ?? "missing",
+    failureReference: matching.length > 1 || runtime?.failureReference === true,
+  };
+  return {
+    loaded: live.present && live.status === "active" && !live.failureReference,
+    live,
+    inventory: matching,
+    persisted: {
+      host: state.host ?? "unknown",
+      criticalGaps: state.criticalGaps ?? ["state-missing"],
+      capabilities: state.capabilities ?? {},
+    },
+  };
+}
+
+function normalizePluginInventory(payload: unknown): RuntimePlugin[] {
+  let normalized = payload;
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!isObjectRecord(normalized)) break;
+    if (Object.hasOwn(normalized, "data")) {
+      normalized = normalized.data;
+      continue;
+    }
+    if (Object.hasOwn(normalized, "plugins")) {
+      normalized = normalized.plugins;
+      continue;
+    }
+    break;
+  }
+  const source: Array<readonly [string | undefined, unknown]> = Array.isArray(normalized)
+    ? normalized.map((item) => [undefined, item] as const)
+    : isObjectRecord(normalized) && looksLikePluginEntry(normalized)
+      ? [[undefined, normalized] as const]
+      : isObjectRecord(normalized)
+        ? Object.entries(normalized)
+        : [];
+  return source.flatMap(([key, value]) => {
+    if (!isObjectRecord(value)) return [];
+    const embedded = isObjectRecord(value.plugin) ? value.plugin : undefined;
+    const candidate = value.id ?? value.name ?? embedded?.id ?? embedded?.name
+      ?? (typeof value.plugin === "string" ? value.plugin : key);
+    if (typeof candidate !== "string" || !candidate || candidate.length > 256
+      || /[\u0000-\u001f\u007f-\u009f]/.test(candidate)) return [];
+    const id = candidate;
+    const state = isObjectRecord(value.state) ? value.state : undefined;
+    const status = state?.status === "active" || state?.status === "failed" ? state.status : "invalid";
+    const failureReference = [
+      state?.failure,
+      state?.error,
+      state?.reason,
+      state?.ref,
+      state?.failureRef,
+      state?.failureReference,
+      value.failure,
+      value.error,
+      value.reason,
+      value.ref,
+      value.failureRef,
+      value.failureReference,
+    ].some(hasMeaningfulFailureReference) || status === "invalid";
+    return [{ id, status, failureReference }];
+  });
+}
+
+async function waitForStablePluginEvidence(
+  endpoint: URL,
+  stateFile: string,
+  headers: Record<string, string>,
+): Promise<V2SandboxReport["plugin"]> {
+  const deadline = Date.now() + 10_000;
+  let previous = "";
+  let stableObservations = 0;
+  let latest: V2SandboxReport["plugin"] | undefined;
+  while (Date.now() < deadline) {
+    try {
+      const state = JSON.parse(fs.readFileSync(stateFile, "utf8")) as PersistedPluginDiagnostics;
+      const inventory = await fetchJson(endpoint, headers);
+      latest = pluginReportFromEvidence(inventory, state);
+      const evidence = JSON.stringify(latest);
+      stableObservations = evidence === previous ? stableObservations + 1 : 1;
+      previous = evidence;
+      if (latest.live.present && stableObservations >= 5) return latest;
+    } catch {
+      stableObservations = 0;
+      previous = "";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const finalState = latest?.live.status ?? "sin-evidencia";
+  throw new Error(`No se obtuvo evidencia estable del inventario vivo de plugins (estado final: ${finalState}).`);
+}
+
+function looksLikePluginEntry(value: Record<string, unknown>): boolean {
+  return ["id", "name", "plugin", "state", "status"].some((key) => Object.hasOwn(value, key));
+}
+
+function hasMeaningfulFailureReference(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== false && value !== "";
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hostKindFromVersion(version: string): string {
+  if (/^2\./.test(version)) return "v2";
+  if (/^1\./.test(version)) return "v1";
+  return "unknown";
+}
+
 function normalizeAgents(payload: unknown): RuntimeAgent[] {
   const normalized = typeof payload === "object" && payload !== null
     && Array.isArray((payload as { data?: unknown }).data)
@@ -576,6 +929,32 @@ function writeJson(file: string, value: unknown, mode = 0o600): void {
 
 function sha256(file: string): string {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+function fingerprintTree(directory: string): string {
+  if (!fs.existsSync(directory)) throw new Error(`No existe el árbol a verificar: ${directory}`);
+  const digest = createHash("sha256");
+  const visit = (current: string): void => {
+    const relative = path.relative(directory, current).replaceAll("\\", "/") || ".";
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      digest.update(`L\0${relative}\0${fs.readlinkSync(current)}\0`);
+      return;
+    }
+    if (stat.isDirectory()) {
+      digest.update(`D\0${relative}\0`);
+      for (const entry of fs.readdirSync(current).sort()) visit(path.join(current, entry));
+      return;
+    }
+    if (stat.isFile()) {
+      digest.update(`F\0${relative}\0${stat.size}\0`);
+      digest.update(fs.readFileSync(current));
+      return;
+    }
+    digest.update(`O\0${relative}\0${stat.mode}\0`);
+  };
+  visit(directory);
+  return digest.digest("hex");
 }
 
 function isWithin(parent: string, candidate: string): boolean {

@@ -1,11 +1,26 @@
-import { controlPlan, renderPlan, type PlanControl, type PlanningAdapter } from "../cli/core/planning";
+import { createHash } from "node:crypto";
+
+import {
+  actionGraphForPlan,
+  controlPlan,
+  renderPlan,
+  type PlanControl,
+  type PlanningAdapter,
+} from "../cli/core/planning";
 import type { PlanningAuthority } from "../cli/core/planning-authority";
 import type { PluginAdapterOptions } from "../cli/core/hooks/plugin-adapter";
 import {
+  assertPlanningCompletionReady,
+  renderPlanRevision,
   resolvePlanningScope,
   type PlanningStorage,
 } from "./planning";
 import {
+  loadPlanRevisionCandidate,
+  validPlanExecutionCheckpoint,
+} from "./plan-recovery";
+import {
+  loadActivePlan,
   loadActivePlanRaw,
   loadPlanRecord,
   persistPlanState,
@@ -73,6 +88,33 @@ export async function registerPlanCommand(
           });
         },
       };
+      if (action === "complete") {
+        const active = await loadActivePlan(storage, sessionID, authority);
+        if (active) await assertPlanningCompletionReady(storage, active, authority);
+      }
+      if (action === "status") {
+        const active = await loadActivePlan(storage, sessionID, authority);
+        if (active?.version === 5 && (active.phase === "running" || active.phase === "paused")) {
+          const revision = await loadPlanRevisionCandidate(storage, active, authority);
+          if (revision) {
+            const checkpoint = await storage.get(revision.checkpointRef);
+            if (!validPlanExecutionCheckpoint(checkpoint, {
+              planID: active.planID,
+              revision: active.revision,
+              digest: active.digest,
+              proofHash: createHash("sha256").update(active.proof).digest("hex"),
+              phase: active.phase,
+            }, actionGraphForPlan(active), authority)) {
+              throw new Error("El checkpoint de la revisión candidata no es verificable.");
+            }
+            await host.session.synthetic({
+              sessionID,
+              text: renderPlanRevision(revision, checkpoint, technical ? "technical" : "summary"),
+            });
+            return;
+          }
+        }
+      }
       const state = await controlPlan(resolved.scope, action, adapter, authority);
       await host.session.synthetic({ sessionID, text: renderPlan(state, technical ? "technical" : "summary") });
     },

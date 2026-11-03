@@ -311,6 +311,9 @@ describe("A0: reproducción de la representación frágil actual", () => {
     expect(permission.effect).toBe("allow");
     await expect(evaluatePlanningTool({
       sessionID: SESSION,
+      agent: "malahor",
+      messageID: "msg_auth01_equivalent_sequence",
+      id: "call_auth01_equivalent_sequence",
       tool: "shell",
       input: { command: EQUIVALENT_SEQUENCE, workdir: repo },
     }, options, storage)).resolves.toBeUndefined();

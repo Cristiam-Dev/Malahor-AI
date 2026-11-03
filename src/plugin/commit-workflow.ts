@@ -218,14 +218,19 @@ export function createCommitWorkflowRegistry(): CommitWorkflowRegistry {
     async prepare(value, call, currentScope, approval, resolveScope) {
       if (call.agent !== "malahor") throw new Error("Solo el primario puede preparar un commit estructural.");
       const request = requests.get(call.sessionID);
-      requests.delete(call.sessionID); // Un intento consume la solicitud, incluso cuando falla cerrado.
-      grants.delete(call.sessionID);
       if (!request) throw new Error("No hay una orden explícita de commit vigente para esta sesión.");
       const scope = normalizeScope(currentScope);
       if (!sameScope(request.scope, scope) || call.sessionID !== scope.sessionID || scope.mode === "advisor") {
+        requests.delete(call.sessionID);
+        grants.delete(call.sessionID);
         throw new Error("La solicitud de commit ya no coincide con la sesión, proyecto, modo o política vigente.");
       }
+      grants.delete(call.sessionID);
+      // La validación estructural no consume autoridad: la orden sigue vigente
+      // para una corrección del mismo turno y scope. Solo un manifest válido
+      // consume la solicitud, justo antes de la aprobación nativa.
       const prepared = validatePreparation(value, scope.root);
+      requests.delete(call.sessionID);
       const key = commitCallKey(call);
       const evidence = commitApprovalEvidence(scope, call, prepared);
       const hostScope = hostAsks.get(key);
@@ -577,7 +582,11 @@ function validateStageCommand(command: string, paths: string[], root: string): v
     throw new Error("El stage debe usar `git add --` con rutas exactas.");
   }
   const staged = tokens.slice(3).map((candidate) => validateCommitPath(candidate, root));
-  if (staged.length !== paths.length || staged.some((candidate, index) => candidate !== paths[index])) {
+  // `git add --` actúa sobre un conjunto: el orden textual no cambia el efecto.
+  // Se exige el conjunto canónico exacto, sin duplicados ni rutas adicionales.
+  const stagedSet = new Set(staged);
+  if (staged.length !== paths.length || stagedSet.size !== staged.length
+    || !paths.every((candidate) => stagedSet.has(candidate))) {
     throw new Error("El comando de stage no coincide exactamente con las rutas selladas.");
   }
   const classification = classifyGitCommand(command, { aliases: loadGitAliases(root) });

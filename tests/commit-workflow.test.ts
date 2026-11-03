@@ -358,6 +358,53 @@ describe("autorización estructural del commit local", () => {
     }
   });
 
+  test("un manifest estructuralmente inválido no consume la orden y admite corrección en el mismo scope", async () => {
+    const { registry } = await request("comitea");
+
+    await expect(prepare(registry, preparation({ subject: "fix: sin emoji" }))).rejects.toThrow(/subject/i);
+    expect(approvalRequests).toHaveLength(0);
+
+    const corrected = await prepare(registry);
+    expect(corrected).toMatchObject({ paths: ["src/a.ts"], subject: SUBJECT });
+    expect(approvalRequests).toHaveLength(1);
+  });
+
+  test("el stage acepta el mismo conjunto exacto de rutas en cualquier orden", async () => {
+    fs.writeFileSync(path.join(repo, "src", "b.ts"), "export const b = 1;\n", "utf8");
+    const { registry } = await request("comitea");
+    const permuted = preparation({
+      paths: ["src/b.ts", "src/a.ts"],
+      commands: {
+        ...preparation().commands,
+        stage: "git add -- src/b.ts src/a.ts",
+      },
+    });
+
+    const result = await prepare(registry, permuted);
+
+    expect(result.paths).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(approvalRequests).toHaveLength(1);
+  });
+
+  test("rechaza duplicados y rutas ajenas al conjunto del stage sin consumir la orden", async () => {
+    fs.writeFileSync(path.join(repo, "src", "b.ts"), "export const b = 1;\n", "utf8");
+    const { registry } = await request("comitea");
+
+    await expect(prepare(registry, preparation({
+      commands: { ...preparation().commands, stage: "git add -- src/a.ts src/a.ts" },
+    }))).rejects.toThrow(/coincide|duplicad/i);
+    expect(approvalRequests).toHaveLength(0);
+
+    await expect(prepare(registry, preparation({
+      commands: { ...preparation().commands, stage: "git add -- src/a.ts src/b.ts" },
+    }))).rejects.toThrow(/coincide|duplicad/i);
+    expect(approvalRequests).toHaveLength(0);
+
+    const corrected = await prepare(registry);
+    expect(corrected).toMatchObject({ paths: ["src/a.ts"] });
+    expect(approvalRequests).toHaveLength(1);
+  });
+
   test("solo el primario y el mismo scope pueden consumir la solicitud", async () => {
     const { registry } = await request("comitea");
     await expect(registry.prepare(preparation(), {

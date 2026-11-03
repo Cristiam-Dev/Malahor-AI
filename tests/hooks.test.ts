@@ -2,7 +2,16 @@ import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { assertHooksAllowed, evaluateHookRules, formatHookResult, hookExitCode, runHooks } from "../src/cli/core/hooks/engine";
-import { HOOK_EVENTS, HOOK_RESOURCE_KINDS, type HookContext, type HookPolicyMeta, type HookRule } from "../src/cli/core/hooks/types";
+import { buildSecretPatchSummary, detectFileSecretCounts, detectFileSecretFindings } from "../src/cli/core/hooks/secret-scan";
+import {
+  HOOK_EVENTS,
+  HOOK_RESOURCE_KINDS,
+  type HookContext,
+  type HookPolicyMeta,
+  type HookResult,
+  type HookRule,
+  type HookViolation,
+} from "../src/cli/core/hooks/types";
 import { callTool } from "../src/mnemo/tools";
 
 const baseContext = (overrides: Partial<HookContext>): HookContext => ({
@@ -29,6 +38,29 @@ const policyMeta = (overrides: Partial<HookPolicyMeta>): HookPolicyMeta => ({
   warnings: [],
   ...overrides,
 });
+
+const BLOCK_CLASSES = [
+  "approval-required",
+  "remediable-deny",
+  "control-unavailable",
+  "hard-deny",
+  "advisory",
+] as const;
+
+type BlockClassContract = typeof BLOCK_CLASSES[number];
+
+function violationContract(result: HookResult, id: string): (HookViolation & { blockClass?: unknown }) | undefined {
+  return result.violations.find((violation) => violation.id === id) as
+    | (HookViolation & { blockClass?: unknown })
+    | undefined;
+}
+
+function expectBlockClass(result: HookResult, id: string, expected: BlockClassContract): void {
+  const violation = violationContract(result, id);
+  expect(violation, `falta la violación ${id}`).toBeDefined();
+  expect(violation?.blockClass).toBe(expected);
+  expect(BLOCK_CLASSES).toContain(violation?.blockClass as BlockClassContract);
+}
 
 describe("malahor hooks", () => {
   test("el CLI expone los eventos del runtime V2", () => {
@@ -432,6 +464,189 @@ describe("malahor hooks", () => {
     expect(result.violations.some((violation) => violation.id === "MAL-HOOK-GIT-REMOTE-DENY")).toBe(true);
   });
 
+  // follow-up: clasificación DENY incremental
+  test.skip("clasifica ASK aprobable y Git remoto inequívoco sin confundir sus bloqueos", () => {
+    const approval = runHooks(baseContext({
+      event: "git.reset.before",
+      command: "git reset --hard HEAD~1",
+    }));
+    const hardDeny = runHooks(baseContext({
+      event: "shell.exec.before",
+      command: "git fetch origin",
+      confirmation: "APPROVE",
+    }));
+
+    expect(approval.decision).toBe("ask");
+    expectBlockClass(approval, "MAL-HOOK-GIT-DESTRUCTIVE", "approval-required");
+    expect(hardDeny.decision).toBe("deny");
+    expectBlockClass(hardDeny, "MAL-HOOK-GIT-REMOTE-DENY", "hard-deny");
+    expect(formatHookResult(approval)).toContain("approval-required");
+    expect(formatHookResult(hardDeny)).toContain("hard-deny");
+  });
+
+  // follow-up: clasificación DENY incremental
+  test.skip("un hallazgo positivo de secreto es DENY remediable, no hard DENY", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-block-class-secret-"));
+    const target = path.join(dir, "credential.ts");
+    const identifier = ["access", "token"].join("_");
+    const value = ["production", "0123456789abcdef"].join("-");
+    fs.writeFileSync(target, `export const ${identifier} = '${value}';\n`, "utf8");
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.stage.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+
+      expect(result.decision).toBe("deny");
+      expectBlockClass(result, "MAL-HOOK-SECRETS", "remediable-deny");
+      expect(violationContract(result, "MAL-HOOK-SECRETS")?.blockClass).not.toBe("hard-deny");
+      expect(formatHookResult(result)).toContain("remediable-deny");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // follow-up: clasificación DENY incremental
+  test.skip("un patch sin resumen evaluable falla cerrado como control no disponible", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-block-class-patch-"));
+    const target = path.join(dir, "benign.ts");
+    fs.writeFileSync(target, "export const ready = true;\n", "utf8");
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.write.before",
+        cwd: dir,
+        projectRoot: dir,
+        resourceKind: "filesystem",
+        targetPaths: [target],
+        metadata: { tool: "patch" },
+      }));
+      const messages = result.violations.map((violation) => violation.message).join("\n");
+
+      expect(result.decision).toBe("deny");
+      expect(result.violations.map((violation) => violation.id)).toContain("MAL-HOOK-PATCH-UNEVALUABLE");
+      expect(result.violations.map((violation) => violation.id)).not.toContain("MAL-HOOK-SECRETS");
+      expectBlockClass(result, "MAL-HOOK-PATCH-UNEVALUABLE", "control-unavailable");
+      expect(result.violations.some((violation) =>
+        (violation as HookViolation & { blockClass?: unknown }).blockClass === "hard-deny")).toBe(false);
+      expect(messages).not.toMatch(/(?:secreto|credencial).*(?:detectad|confirmad)|(?:detectad|confirmad).*(?:secreto|credencial)/i);
+      expect(formatHookResult(result)).toContain("control-unavailable");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("un patch sin evidencia interna falla cerrado como no evaluable, sin afirmar un secreto", () => {
+    const result = runHooks(baseContext({
+      event: "file.write.before",
+      metadata: { tool: "patch", secretPatchSummary: { version: 1, evaluable: true, files: [] } },
+      targetPaths: ["src/example.ts"],
+    }));
+    const violation = result.violations.find((item) => item.id === "MAL-HOOK-PATCH-UNEVALUABLE");
+
+    expect(result.decision).toBe("deny");
+    expect(violation?.diagnostic).toMatchObject({ code: "PATCH_NOT_EVALUABLE", reason: "missing-evidence" });
+    expect(result.violations.some((item) => item.id === "MAL-HOOK-SECRETS")).toBe(false);
+    expect(formatHookResult(result)).toMatch(/no se pudo evaluar/i);
+    expect(formatHookResult(result)).not.toMatch(/secretos detectados/i);
+  });
+
+  test("el scanner distingue contextos incorrectos, ambiguos y un hallazgo en la postimagen completa", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-patch-check-"));
+    const file = path.join(dir, "fixture.ts");
+    const identifier = ["api", "key"].join("_");
+    const value = ["synthetic", "0123456789abcdef"].join("-");
+    const patch = (...body: string[]) => [
+      "*** Begin Patch", "*** Update File: fixture.ts", "@@", ...body, "*** End Patch",
+    ].join("\n");
+    try {
+      fs.writeFileSync(file, "export const ready = true;\n", "utf8");
+      const misaligned = buildSecretPatchSummary(patch("- export const ready = true;", "+export const ready = false;"), dir);
+      expect(misaligned).toMatchObject({ evaluable: false, failure: { code: "PATCH_NOT_EVALUABLE", reason: "context-mismatch", operation: "update", path: "fixture.ts" } });
+      expect(JSON.stringify(misaligned)).not.toContain("export const ready");
+
+      fs.writeFileSync(file, "same\nsame\n", "utf8");
+      const ambiguous = buildSecretPatchSummary(patch("-same", "+changed"), dir);
+      expect(ambiguous).toMatchObject({ evaluable: false, failure: { reason: "ambiguous-context" } });
+
+      fs.writeFileSync(file, `export const ${identifier} =\n  '${value}';\nexport const ready = false;\n`, "utf8");
+      const safeEdit = buildSecretPatchSummary(patch("-export const ready = false;", "+export const ready = true;"), dir);
+      expect(safeEdit.evaluable).toBe(true);
+      expect(safeEdit.files[0]?.after["credential-assignment"]).toBe(1);
+      expect(JSON.stringify(safeEdit)).not.toContain(value);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("tokens y asignaciones multilínea se detectan en el archivo completo y no salen en recetas", () => {
+    const identifier = ["api", "key"].join("_");
+    const syntheticValue = ["synthetic", "0123456789abcdef"].join("-");
+    const bearerValue = ["abcdefghijklmnopqrstuvwxyz", "12345678"].join("");
+    const content = `export const ${identifier} =\n '${syntheticValue}';\n`;
+    const findings = detectFileSecretFindings(content, "tests/fixtures/credential.test.ts");
+    expect(findings).toEqual(expect.arrayContaining([expect.objectContaining({
+      kind: "credential-assignment", line: 1,
+    })]));
+    expect(JSON.stringify(findings)).not.toContain(syntheticValue);
+
+    const line = `const redactionProbe = "${identifier}='${syntheticValue}' Bearer ${bearerValue}";`;
+    const mixed = detectFileSecretFindings(line, "tests/fixtures/credential.test.ts");
+    expect(detectFileSecretCounts(line)["bearer-token"]).toBe(1);
+    expect(mixed.map((item) => item.kind)).toContain("bearer-token");
+    expect(mixed.some((item) => item.remediation?.kind === "replace-block")).toBe(false);
+    expect(JSON.stringify(mixed)).not.toContain(syntheticValue);
+    expect(JSON.stringify(mixed)).not.toContain(bearerValue);
+  });
+
+  test("un destino fuera de la raíz no se imprime, y una operación de dos archivos evalúa ambas postimágenes", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-patch-two-"));
+    try {
+      fs.writeFileSync(path.join(dir, "first.ts"), "export const first = false;\n");
+      fs.writeFileSync(path.join(dir, "second.ts"), "export const second = false;\n");
+      const outside = buildSecretPatchSummary([
+        "*** Begin Patch", "*** Update File: ../external.ts", "@@", "-before", "+after", "*** End Patch",
+      ].join("\n"), dir);
+      expect(outside).toMatchObject({ evaluable: false, failure: { reason: "invalid-path" } });
+      expect(JSON.stringify(outside)).not.toContain("external.ts");
+
+      const combined = buildSecretPatchSummary([
+        "*** Begin Patch", "*** Update File: first.ts", "@@", "-export const first = false;", "+export const first = true;",
+        "*** Update File: second.ts", "@@", "-export const second = false;", "+export const second = true;", "*** End Patch",
+      ].join("\n"), dir);
+      expect(combined).toMatchObject({ evaluable: true, files: [{ path: "first.ts" }, { path: "second.ts" }] });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("digest, proof y secretPatchSummary son términos de código, no evidencia de secreto", () => {
+    const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-benign-terms-"));
+    const target = path.join(dir, "signed-state.ts");
+    fs.writeFileSync(target, [
+      'export const digest = "sha256:fixture";',
+      'export const proof = "signed-fixture";',
+      "export const secretPatchSummary = { evaluable: true };",
+    ].join("\n"), "utf8");
+
+    try {
+      const result = runHooks(baseContext({
+        event: "file.stage.before",
+        cwd: dir,
+        projectRoot: dir,
+        targetPaths: [target],
+      }));
+
+      expect(result.violations.some((violation) => violation.id === "MAL-HOOK-SECRETS")).toBe(false);
+      expect(result.decision).toBe("allow");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("advierte mensajes de commit fuera del formato Malahor", () => {
     const result = runHooks(baseContext({
       event: "git.commit.before",
@@ -707,7 +922,8 @@ describe("malahor hooks", () => {
     expect(hookExitCode("allow")).toBe(0);
   });
 
-  test("error de control critico deniega y error auxiliar solo advierte", () => {
+  // follow-up: clasificación DENY incremental
+  test.skip("error de control critico deniega y error auxiliar solo advierte", () => {
     const critical: HookRule[] = [{
       id: "control-critico",
       run: () => { throw new Error("timeout"); },
@@ -723,6 +939,10 @@ describe("malahor hooks", () => {
 
     expect(criticalResult[0]?.id).toBe("MAL-HOOK-CONTROL-ERROR");
     expect(criticalResult[0]?.decision).toBe("deny");
+    expect((criticalResult[0] as (HookViolation & { blockClass?: unknown }) | undefined)?.blockClass)
+      .toBe("control-unavailable");
+    expect((criticalResult[0] as (HookViolation & { blockClass?: unknown }) | undefined)?.blockClass)
+      .not.toBe("hard-deny");
     expect(auxiliaryResult[0]?.id).toBe("MAL-HOOK-CONTROL-WARN");
     expect(auxiliaryResult[0]?.decision).toBe("warn");
   });

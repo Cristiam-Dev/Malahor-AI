@@ -20,6 +20,12 @@ export const AUTHORIZATION_DENIAL_CODES = [
   "ACTION_NOT_CANONICALIZABLE",
   "ACTION_SERIALIZATION_MISMATCH",
   "ACTION_REPAIR_EXHAUSTED",
+  "DEPENDENCY_BLOCKED",
+  "ACTION_IN_FLIGHT",
+  "ACTION_ALREADY_COMPLETED",
+  "ACTION_REMOVED",
+  "PLAN_CHECKPOINT_INVALID",
+  "PLAN_CORRELATION_MISMATCH",
   "RESOURCE_OUTSIDE_SCOPE",
   "PROTECTED_APPROVAL_REQUIRED",
   "HOST_ASK",
@@ -46,6 +52,7 @@ export interface AuthorizationDecisionInput {
   protectedApproval?: { required?: boolean; approved?: boolean };
   host?: { effect?: "allow" | "warn" | "ask" | "deny" };
   criticalControls?: Record<string, boolean | undefined>;
+  checkpoint?: { effect?: "allow" | "deny"; code?: string };
   deferToToolHook?: boolean;
   now?: number;
   authority?: PlanningAuthority;
@@ -114,6 +121,9 @@ export function decideAuthorization(raw: AuthorizationDecisionInput | Record<str
   if (typeof actionID !== "string" || !/^[a-f0-9]{64}$/.test(actionID)) return deny("ACTION_NOT_DECLARED");
   const declared = input.declaredActionIDs ?? state.actionIntents.map((intent) => intent.actionID);
   if (!declared.includes(actionID)) return deny("ACTION_NOT_DECLARED");
+  if (input.checkpoint?.effect === "deny") {
+    return deny(isDenialCode(input.checkpoint.code) ? input.checkpoint.code : "PLAN_CHECKPOINT_INVALID");
+  }
   return { effect: "allow", code: "AUTHORIZED", actionID };
 }
 
@@ -138,6 +148,12 @@ export function authorizationMessage(code: AuthorizationDenialCode, detail?: str
     ACTION_NOT_CANONICALIZABLE: "Malahor: la acción no puede representarse con el canonicalizador cerrado.",
     ACTION_SERIALIZATION_MISMATCH: "Malahor: la representación técnica no coincide con los intents firmados.",
     ACTION_REPAIR_EXHAUSTED: "Malahor: la reparación técnica equivalente ya fue consumida o dejó de ser verificable.",
+    DEPENDENCY_BLOCKED: "Malahor: la acción espera a que termine una dependencia declarada.",
+    ACTION_IN_FLIGHT: "Malahor: la acción ya tiene una llamada en curso.",
+    ACTION_ALREADY_COMPLETED: "Malahor: la acción ya quedó completada en esta revisión.",
+    ACTION_REMOVED: "Malahor: la acción fue retirada por una revisión posterior.",
+    PLAN_CHECKPOINT_INVALID: "Malahor: el progreso firmado del plan no es verificable.",
+    PLAN_CORRELATION_MISMATCH: "Malahor: la llamada no coincide con la reserva firmada de la acción.",
     RESOURCE_OUTSIDE_SCOPE: "Malahor: un recurso queda fuera del alcance aprobado.",
     PROTECTED_APPROVAL_REQUIRED: "Malahor: la operación protegida requiere su aprobación específica.",
     HOST_ASK: "Malahor: el host requiere una aprobación humana específica.",

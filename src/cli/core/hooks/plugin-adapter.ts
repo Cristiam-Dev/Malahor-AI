@@ -9,6 +9,7 @@ import { loadHookPolicy } from "./policy-loader";
 import { usesFilesystemResources } from "./resources";
 import {
   CODE_MODE_TOOL_NAMES,
+  MALAHOR_CODE_MODE_TOOL_NAMES,
   HOOK_EVENTS,
   isMcpToolName,
   type HookContext,
@@ -147,9 +148,6 @@ export async function evaluateToolHook(
   const scope = await resolveEvaluationScope(
     input, options, mapped.cwd, mapped.targetPaths, mapped.resourceKind, allowUnbound,
   );
-  const secretPatchSummary = !scope.error && tool.toLowerCase() === "patch"
-    ? buildSecretPatchSummary(stringValue(recordValue(toolInput)?.patchText) ?? "", scope.options.cwd)
-    : undefined;
   const built = scope.error ? undefined : buildContext(mapped.event, scope.options, {
     command: mapped.command,
     resourceKind: mapped.resourceKind,
@@ -159,11 +157,30 @@ export async function evaluateToolHook(
     gitIntent: mapped.gitIntent,
     metadata: {
       ...mapped.metadata,
-      ...(secretPatchSummary ? { secretPatchSummary } : {}),
       origin: "opencode-v2",
       tool,
     },
   }, scope.project);
+  if (built?.context && tool.toLowerCase() === "patch") {
+    const context = built.context;
+    try {
+      context.metadata = {
+        ...context.metadata,
+        secretPatchSummary: buildSecretPatchSummary(
+          stringValue(recordValue(toolInput)?.patchText) ?? "",
+          context.cwd,
+          {
+            projectRoot: context.projectRoot,
+            ...(context.project ? { project: context.project } : {}),
+            ...(context.policyMeta?.policyHash ? { policyHash: context.policyMeta.policyHash } : {}),
+          },
+        ),
+      };
+    } catch {
+      // El motivo es interno y cerrado; nunca persistir excepciones ni contenido.
+      context.metadata = { ...context.metadata, secretPatchControlUnavailable: true };
+    }
+  }
 
   const result = built?.context
     ? evaluate(built.context)
@@ -774,6 +791,7 @@ const KNOWN_TOOLS = new Set([
   "list",
   "question",
   "invalid",
+  ...MALAHOR_CODE_MODE_TOOL_NAMES,
 ]);
 
 function hookEventValue(value: unknown): HookEvent | undefined {

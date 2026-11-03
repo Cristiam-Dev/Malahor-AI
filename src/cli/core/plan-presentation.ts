@@ -36,6 +36,30 @@ export interface PlanPresentationOptions {
   view?: PlanPresentationView;
 }
 
+export interface PlanExecutionProgressPresentation {
+  total: number;
+  succeeded: number;
+  ready: number;
+  waiting: number;
+  blocked: number;
+  inFlight: number;
+  failed: number;
+}
+
+export interface PlanRevisionDeltaPresentation {
+  preserved: readonly string[];
+  changed: readonly string[];
+  added: readonly string[];
+  removed: readonly string[];
+  planChanged?: boolean;
+}
+
+export interface PlanRevisionPresentationContext {
+  parentRevision: string;
+  progress: PlanExecutionProgressPresentation;
+  delta: PlanRevisionDeltaPresentation;
+}
+
 const MAX_STEPS = 5;
 const MAX_ITEMS = 30;
 const RISK_LEVELS = new Set<PlanRiskLevel>(["low", "medium", "high"]);
@@ -96,6 +120,95 @@ export function renderPlanPresentation(
 ): string {
   const view = typeof options === "string" ? options : options.view ?? "summary";
   return view === "technical" ? renderTechnicalView(state) : renderSummaryView(state);
+}
+
+export function renderPlanRevisionPresentation(
+  state: PlanState,
+  revision: PlanRevisionPresentationContext,
+  options: PlanPresentationOptions | PlanPresentationView = {},
+): string {
+  const view = typeof options === "string" ? options : options.view ?? "summary";
+  const base = renderPlanPresentation(state, view);
+  return view === "technical"
+    ? `${base}\n\n${renderRevisionTechnical(revision, state)}`
+    : insertBeforeNextAction(base, renderRevisionSummary(revision));
+}
+
+function renderRevisionSummary(revision: PlanRevisionPresentationContext): string {
+  const progress = revision.progress;
+  const delta = revision.delta;
+  return [
+    "## Progreso preservado",
+    `- Completadas: ${progress.succeeded}; listas: ${progress.ready}; esperando: ${progress.waiting}; bloqueadas: ${progress.blocked}.`,
+    `- En curso: ${progress.inFlight}; con fallo técnico pendiente: ${progress.failed}; total: ${progress.total}.`,
+    "- El trabajo independiente ya confirmado se mantiene; los bloqueos y permisos pendientes no se trasladan a la revisión nueva.",
+    "",
+    "## Cambios de esta revisión",
+    `- Preservadas: ${delta.preserved.length}.`,
+    `- Cambiadas: ${delta.changed.length}.`,
+    `- Añadidas: ${delta.added.length}.`,
+    `- Retiradas: ${delta.removed.length}.`,
+    `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}.`,
+    `- Punto de reanudación: ${revisionResumePoint(progress, delta)}.`,
+  ].join("\n");
+}
+
+function renderRevisionTechnical(
+  revision: PlanRevisionPresentationContext,
+  state: PlanState,
+): string {
+  const progress = revision.progress;
+  const delta = revision.delta;
+  return [
+    "## Recuperación incremental",
+    "### Lineage",
+    `- Revisión padre: ${revision.parentRevision}`,
+    `- Revisión candidata: ${state.revision}`,
+    `- Digest candidato: ${state.digest}`,
+    "",
+    "### Progreso del checkpoint padre",
+    `- Total: ${progress.total}`,
+    `- Completadas: ${progress.succeeded}`,
+    `- Listas: ${progress.ready}`,
+    `- Esperando: ${progress.waiting}`,
+    `- Bloqueadas: ${progress.blocked}`,
+    `- En curso: ${progress.inFlight}`,
+    `- Fallidas: ${progress.failed}`,
+    "",
+    "### Delta firmado",
+    ...revisionDeltaTechnicalLines("Preservadas", delta.preserved),
+    ...revisionDeltaTechnicalLines("Cambiadas", delta.changed),
+    ...revisionDeltaTechnicalLines("Añadidas", delta.added),
+    ...revisionDeltaTechnicalLines("Retiradas", delta.removed),
+    `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}`,
+  ].join("\n");
+}
+
+function revisionDeltaTechnicalLines(label: string, actionIDs: readonly string[]): string[] {
+  return actionIDs.length > 0
+    ? [`- ${label}:`, ...actionIDs.map((actionID) => `  - ${actionID}`)]
+    : [`- ${label}: ninguna`];
+}
+
+function revisionResumePoint(
+  progress: PlanExecutionProgressPresentation,
+  delta: PlanRevisionDeltaPresentation,
+): string {
+  if (progress.inFlight > 0) return "las llamadas en curso se reinician y vuelven a cruzar sus controles";
+  if (progress.blocked > 0 || progress.failed > 0) {
+    return "se conservan solo los éxitos idénticos y se reintentan las ramas cambiadas tras la aprobación";
+  }
+  if (delta.changed.length > 0 || delta.added.length > 0) {
+    return "continúa después de los éxitos idénticos y comienza las acciones cambiadas o añadidas";
+  }
+  return "continúa desde el último éxito verificable";
+}
+
+function insertBeforeNextAction(base: string, section: string): string {
+  const marker = "\n## Qué debes hacer ahora\n";
+  const index = base.indexOf(marker);
+  if (index < 0) return `${base}\n\n${section}`;
+  return `${base.slice(0, index)}\n\n${section}${base.slice(index)}`;
 }
 
 function renderSummaryView(state: PlanState): string {

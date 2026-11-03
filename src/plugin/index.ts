@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isMainThread, workerData } from "node:worker_threads";
 
 import { resolvePaths, type MalahorPaths } from "../cli/core/paths";
 import { loadPlanningAuthority, type PlanningAuthority } from "../cli/core/planning-authority";
@@ -33,7 +34,8 @@ import {
 import type { HookEvent, HookResult } from "../cli/core/hooks/types";
 import { injectMalahorProtocol } from "./protocol";
 import {
-  evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, readPlan, registerPlanningTools,
+  completePlanningTool, evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions,
+  observePlanningPermissionOutcome, readPlan, registerPlanningTools,
   resolvePlanningScope,
   type PlanningStorage, type PlanningTools,
 } from "./planning";
@@ -46,6 +48,8 @@ import { createPointActionMediator } from "./point-action-approval";
 import { registerModeCommand, type ModeCommandHost } from "./mode-command";
 import { registerPlanCommand, type PlanCommandHost } from "./plan-command";
 import { compactTerminalPlans } from "./plan-retention";
+import { registerReadOnlyCodeModeTools, type CodeModeToolDomain } from "./code-mode";
+import { isCodeModeWorkerData, runCodeModeWorker } from "./code-mode-worker";
 import {
   createProjectAffinityResolver,
   type ProjectAffinityResolver,
@@ -55,6 +59,10 @@ import {
 const PLUGIN_ID = "malahor";
 const PLUGIN_VERSION = "0.6.0";
 const STATE_SCHEMA = 1;
+
+if (!isMainThread && isCodeModeWorkerData(workerData)) {
+  void runCodeModeWorker(workerData).catch(() => { process.exit(1); });
+}
 
 type HostKind = "v1" | "v2" | "unknown";
 
@@ -135,6 +143,26 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   const capabilities: Record<string, boolean> = {};
   const degraded: string[] = [];
   const criticalGaps: string[] = [];
+  let stateRecorded = false;
+
+  const updateCodeModeAvailability = (available: boolean, reason?: string): void => {
+    const key = "code-mode.read-only";
+    const changed = capabilities[key] !== available;
+    capabilities[key] = available;
+    const index = criticalGaps.indexOf(key);
+    if (available && index >= 0) criticalGaps.splice(index, 1);
+    if (!available && index < 0) criticalGaps.push(key);
+    if (!changed) return;
+    if (!available && reason) warn(`Code Mode R0 degradado: ${reason}`);
+    if (!stateRecorded) return;
+    const recorded = recordState({
+      host: "v2",
+      capabilities,
+      degraded: unique(degraded),
+      criticalGaps: unique(criticalGaps),
+    });
+    if (!recorded) warn("estado dinamico de Code Mode no disponible (degradado auxiliar)");
+  };
 
   const domain = (name: string): HookDomain | undefined => {
     const value = context[name];
@@ -245,6 +273,13 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
   if (permission) {
     options.permissionRegistered = await registerHook(permission, "evaluate", async (input) => {
       const evaluated = await evaluatePermission(input, options);
+      await observePlanningPermissionOutcome(
+        input,
+        evaluated.effect,
+        options,
+        planningAuthority ? planStorage : undefined,
+        planningAuthority,
+      );
       if (evaluated.effect !== "deny") await evaluatePlanningPermission(
         input,
         options,
@@ -307,19 +342,28 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     capabilities["tool.execute.before"] = registered;
     if (!registered) criticalGaps.push("tool.execute.before");
 
-    const freshnessRegistered = storage && typeof storage.get === "function"
+    const toolAfterRegistered = (storage && typeof storage.get === "function") || (planStorage && planningAuthority)
       ? await registerHook(tool, "execute.after", async (input) => {
-        const marked = await markMemoryPersisted(input, storage, {
-          cwd,
-          env: process.env,
-          resolveSessionDirectory: options.resolveSessionDirectory,
-          resolveSessionProject: options.resolveSessionProject,
-        });
-        if (!marked.ok) warn(`freshness de memoria degradada${marked.reason ? `: ${marked.reason}` : ""}`);
+        if (planStorage && planningAuthority) {
+          const completed = await completePlanningTool(input, options, planStorage, planningAuthority);
+          if (!completed.ok) warn(`recuperación de Planning degradada${completed.reason ? `: ${completed.reason}` : ""}`);
+        }
+        if (storage && typeof storage.get === "function") {
+          const marked = await markMemoryPersisted(input, storage, {
+            cwd,
+            env: process.env,
+            resolveSessionDirectory: options.resolveSessionDirectory,
+            resolveSessionProject: options.resolveSessionProject,
+          });
+          if (!marked.ok) warn(`freshness de memoria degradada${marked.reason ? `: ${marked.reason}` : ""}`);
+        }
       }, cleanups)
       : false;
-    capabilities["memory.freshness"] = freshnessRegistered;
-    if (!freshnessRegistered) degraded.push("memory.freshness");
+    capabilities["tool.execute.after"] = toolAfterRegistered;
+    capabilities["memory.freshness"] = toolAfterRegistered && Boolean(storage && typeof storage.get === "function");
+    capabilities["planning.recovery"] = toolAfterRegistered && Boolean(planStorage && planningAuthority);
+    if (!capabilities["memory.freshness"]) degraded.push("memory.freshness");
+    if (!capabilities["planning.recovery"]) criticalGaps.push("planning.recovery");
 
     const planningTools = typeof (tool as Record<string, unknown>).transform === "function"
       ? tool as unknown as PlanningTools : undefined;
@@ -353,11 +397,35 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     } else {
       capabilities["commit.workflow.tool"] = false;
     }
+
+    const codeModeTools = typeof (tool as Record<string, unknown>).transform === "function"
+      && typeof (tool as Record<string, unknown>).list === "function"
+      ? tool as unknown as CodeModeToolDomain : undefined;
+    if (codeModeTools && approvalPort && storage && options.resolveSessionProject
+      && options.permissionRegistered && registered) {
+      try {
+        const registration = await registerReadOnlyCodeModeTools(
+          codeModeTools,
+          approvalPort,
+          storage,
+          options,
+          { moduleURL: import.meta.url, onAvailability: updateCodeModeAvailability },
+        );
+        if (registration.dispose) cleanups.push(() => registration.dispose?.());
+        updateCodeModeAvailability(registration.available);
+      } catch (error) {
+        updateCodeModeAvailability(false);
+        warn(`Code Mode R0 no registrado: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else {
+      updateCodeModeAvailability(false);
+    }
   } else {
     capabilities.tool = false;
     capabilities["tool.execute.before"] = false;
     capabilities["memory.freshness"] = false;
     capabilities["commit.workflow.tool"] = false;
+    updateCodeModeAvailability(false);
     criticalGaps.push("tool.hook");
     criticalGaps.push("planning.v5");
   }
@@ -526,6 +594,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     criticalGaps: unique(criticalGaps),
   };
   const recorded = recordState(inspection);
+  stateRecorded = true;
   if (!recorded) warn("estado de diagnostico no disponible (degradado auxiliar)");
   if (inspection.criticalGaps.length > 0) {
     warn(`controles criticos no disponibles: ${inspection.criticalGaps.join(", ")}; no se habilitan operaciones protegidas`);

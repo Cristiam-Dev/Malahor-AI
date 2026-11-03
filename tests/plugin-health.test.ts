@@ -89,7 +89,12 @@ function validState(overrides: Partial<PluginStateSnapshot> = {}): PluginStateSn
     plugin: "malahor",
     pluginVersion: PLUGIN_VERSION,
     host: "v2",
-    capabilities: { session: true, permission: true },
+    capabilities: {
+      session: true,
+      permission: true,
+      "code-mode.read-only": true,
+      "planning.recovery": true,
+    },
     degraded: [],
     criticalGaps: [],
     updatedAt: "2026-10-19T00:00:00.000Z",
@@ -269,7 +274,7 @@ describe("estado del plugin", () => {
     const check = inspectPluginState(ctx);
 
     expect(check.status).toBe("ok");
-    expect(check.message).toContain("caps 2/2");
+    expect(check.message).toContain("caps 4/4");
   });
 
   test("criticalGaps falla en V2 y solo avisa en V1", () => {

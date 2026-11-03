@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import plugin from "../assets/opencode/plugins/malahor/index";
 
@@ -44,6 +45,11 @@ function readState(): Record<string, unknown> {
 }
 
 function v2Context(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const definitions = new Map<string, Record<string, unknown>>([
+    ["read", hostToolDefinition("read")],
+    ["glob", hostToolDefinition("glob")],
+    ["grep", hostToolDefinition("grep")],
+  ]);
   return {
     session: { hook: () => undefined, get: async () => undefined, synthetic: async () => undefined },
     mcp: { transform: () => undefined },
@@ -51,7 +57,19 @@ function v2Context(overrides: Record<string, unknown> = {}): Record<string, unkn
     command: { transform: () => undefined },
     skill: { transform: () => undefined },
     permission: { hook: () => undefined, assert: async () => undefined },
-    tool: { hook: () => undefined, transform: () => undefined },
+    tool: {
+      hook: () => undefined,
+      list: async () => [...definitions.values()],
+      transform: async (callback: (editor: Record<string, unknown>) => void) => {
+        callback({
+          list: () => [...definitions.values()],
+          get: (name: string) => definitions.get(name),
+          namespace: () => undefined,
+          add: () => undefined,
+        });
+        return { dispose: () => undefined };
+      },
+    },
     shell: { hook: () => undefined },
     event: { subscribe: () => (async function* () {})() },
     storage: {
@@ -62,6 +80,101 @@ function v2Context(overrides: Record<string, unknown> = {}): Record<string, unkn
     },
     ...overrides,
   };
+}
+
+function hostToolDefinition(name: "read" | "glob" | "grep"): Record<string, unknown> {
+  const properties = name === "read"
+    ? {
+      path: { type: "string" },
+      offset: { type: "integer", minimum: 0 },
+      limit: { type: "integer", minimum: 1, maximum: 2_000 },
+    }
+    : name === "glob"
+      ? {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        hidden: { type: "boolean" },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+      }
+      : {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        include: { type: "string" },
+        literal: { type: "boolean" },
+        caseSensitive: { type: "boolean" },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+      };
+  return {
+    id: name,
+    name,
+    description: `Host ${name} sintético`,
+    input: {
+      type: "object",
+      properties,
+      required: [name === "read" ? "path" : "pattern"],
+      additionalProperties: false,
+    },
+    output: { type: "string" },
+    options: { permission: name, codemode: false },
+    execute: () => "synthetic",
+  };
+}
+
+function setupCompleteV2InNode(): void {
+  const pluginURL = pathToFileURL(path.resolve(import.meta.dir, "..", "assets", "opencode", "plugins", "malahor", "index.ts")).href;
+  const script = `
+    const { default: plugin } = await import(${JSON.stringify(pluginURL)});
+    const definitions = new Map();
+    const definition = (name) => ({
+      id: name,
+      name,
+      description: \`Host \${name} sintético\`,
+      input: {
+        type: "object",
+        properties: name === "read"
+          ? { path: { type: "string" }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 2000 } }
+          : name === "glob"
+            ? { pattern: { type: "string" }, path: { type: "string" }, hidden: { type: "boolean" }, limit: { type: "integer", minimum: 1, maximum: 100 } }
+            : { pattern: { type: "string" }, path: { type: "string" }, include: { type: "string" }, literal: { type: "boolean" }, caseSensitive: { type: "boolean" }, limit: { type: "integer", minimum: 1, maximum: 100 } },
+        required: [name === "read" ? "path" : "pattern"],
+        additionalProperties: false,
+      },
+      output: { type: "string" },
+      options: { permission: name, codemode: false },
+      execute: () => "synthetic",
+    });
+    for (const name of ["read", "glob", "grep"]) definitions.set(name, definition(name));
+    const transform = async (callback) => {
+      callback({
+        list: () => [...definitions.values()],
+        get: (name) => definitions.get(name),
+        namespace: () => undefined,
+        add: () => undefined,
+      });
+      return { dispose: () => undefined };
+    };
+    const cleanup = await plugin.setup({
+      session: { hook: () => undefined, get: async () => undefined, synthetic: async () => undefined },
+      mcp: { transform: () => undefined },
+      agent: { transform: () => undefined },
+      command: { transform: () => undefined },
+      skill: { transform: () => undefined },
+      permission: { hook: () => undefined, assert: async () => undefined },
+      tool: { hook: () => undefined, list: async () => [...definitions.values()], transform },
+      shell: { hook: () => undefined },
+      event: { subscribe: () => (async function* () {})() },
+      storage: { get: async () => undefined, set: async () => undefined, remove: async () => undefined, scan: async () => ({ entries: [] }) },
+    });
+    if (typeof cleanup === "function") await cleanup();
+  `;
+  const result = Bun.spawnSync(["node", "--no-warnings", "--input-type=module", "--eval", script], {
+    cwd: path.resolve(import.meta.dir, ".."),
+    env: { ...process.env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(result.stderr.toString(), result.stderr.toString()).not.toContain("Code Mode R0 no registrado");
 }
 
 async function withoutWarnings(run: () => Promise<void>): Promise<void> {
@@ -96,7 +209,7 @@ describe("scaffold del plugin", () => {
   });
 
   test("V2 completo registra hooks criticos y stream de eventos", async () => {
-    await plugin.setup(v2Context());
+    setupCompleteV2InNode();
 
     const state = readState();
     expect(state.host).toBe("v2");
@@ -116,6 +229,7 @@ describe("scaffold del plugin", () => {
       storage: true,
       "permission.evaluate": true,
       "tool.execute.before": true,
+      "code-mode.read-only": true,
       "planning.v5": true,
       "planning.v4": true,
       "planning.authority": true,
@@ -222,6 +336,7 @@ describe("scaffold del plugin", () => {
 
     const state = readState();
     expect(state.criticalGaps).toContain("planning.v5");
+    expect(state.criticalGaps).toContain("code-mode.read-only");
     expect(state.degraded).toContain("mcp");
     expect(state.degraded).toContain("storage");
   });
@@ -255,6 +370,7 @@ describe("scaffold del plugin", () => {
     expect(state.criticalGaps).toContain("v1.tool.hook");
     expect(state.criticalGaps).toContain("v1.shell.hook");
     expect(state.criticalGaps).toContain("v1.session.hook");
+    expect((state.capabilities as Record<string, unknown>)["code-mode.read-only"]).not.toBe(true);
     expect(state.capabilities).toMatchObject({
       client: true,
       project: true,

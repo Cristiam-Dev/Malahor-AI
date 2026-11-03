@@ -5,6 +5,7 @@ import { loadProjectsFile } from "../context";
 import { filesystemTargetPaths, hookResourceIssues } from "./resources";
 import {
   CODE_MODE_TOOL_NAMES,
+  MALAHOR_CODE_MODE_TOOL_NAMES,
   isMcpToolName,
   type HookContext,
   type HookEvent,
@@ -29,7 +30,9 @@ import { isValidCommitSubject } from "../git-commit-message";
 import {
   detectFileSecretCounts,
   detectFileSecretFindings,
+  isPotentialSecretPath,
   parseSecretPatchSummary,
+  revalidateSecretPatchSummary,
   secretKinds,
   type SecretFileFinding,
   type SecretPatchSummary,
@@ -621,10 +624,10 @@ function secretScanGuard(context: HookContext): HookViolation[] {
   const scan = context.security
     ? context.security.git?.scanStagedContent !== false || context.security.persistence?.blockSecrets !== false
     : context.policy?.secrets.scanBeforeCommit !== false;
-  if (!scan) return [];
   if (context.event === "file.write.before" && context.metadata?.tool === "patch") {
     return patchSecretScanGuard(context);
   }
+  if (!scan) return [];
   const paths = readableTargetPaths(context);
   const findings = paths.flatMap((targetPath) => scanTargetForSecretFindings(targetPath, context));
 
@@ -642,30 +645,66 @@ function secretScanGuard(context: HookContext): HookViolation[] {
 }
 
 function patchSecretScanGuard(context: HookContext): HookViolation[] {
-  const summary = parseSecretPatchSummary(context.metadata?.secretPatchSummary);
-  if (!summary || !summary.evaluable || !patchSummaryMatchesTargets(context, summary)) {
+  const evidence = context.metadata?.secretPatchSummary;
+  const summary = parseSecretPatchSummary(evidence);
+  if (!summary?.evaluable || !patchSummaryMatchesTargets(context, summary)
+    || !revalidateSecretPatchSummary(evidence, context.cwd, {
+      projectRoot: context.projectRoot,
+      ...(context.project ? { project: context.project } : {}),
+      ...(context.policyMeta?.policyHash ? { policyHash: context.policyMeta.policyHash } : {}),
+    })) {
+    const unavailable = summary?.evaluable === true || context.metadata?.secretPatchControlUnavailable === true;
+    const failure = summary?.failure ?? {
+      code: unavailable ? "SECURITY_CONTROL_UNAVAILABLE" : "PATCH_NOT_EVALUABLE",
+      reason: unavailable ? "file-unavailable" : "missing-evidence",
+    } as const;
+    const reason = {
+      "invalid-structure": "estructura del cambio no reconocida",
+      "unsupported-operation": "operación no verificable",
+      "invalid-path": "ruta no verificable",
+      "duplicate-target": "destino repetido",
+      "file-unavailable": "archivo o control de lectura no disponible",
+      "context-mismatch": "contexto o indentación que no coincide con el archivo vigente",
+      "ambiguous-context": "contexto repetido sin posición única",
+      "missing-evidence": "evidencia interna ausente",
+    }[failure.reason];
+    const hunk = "hunk" in failure ? failure.hunk : undefined;
     return [{
-      id: "MAL-HOOK-SECRETS",
+      id: "MAL-HOOK-PATCH-UNEVALUABLE",
       decision: "deny",
-      message: "No se pudo demostrar que el patch elimina hallazgos sin introducir otros.",
-      fix: "Usa un patch directo y evaluable que retire todos los hallazgos; no uses metadata manual ni editores indirectos.",
+      message: `No se pudo evaluar el patch: ${reason}${hunk ? ` (bloque ${hunk})` : ""}.`,
+      fix: "Relee el archivo, comprueba contexto e indentación y solicita revalidación; el cambio sigue bloqueado. Si falla la lectura, repara el control antes de continuar.",
+      diagnostic: failure,
     }];
   }
 
   const leaks = summary.files.flatMap((file) => secretKinds(file.after)
-    .map((kind) => `${path.basename(file.path)}:${kind}`));
+    .map((kind) => kind));
   if (leaks.length === 0) return [];
   return [{
     id: "MAL-HOOK-SECRETS",
     decision: "deny",
     message: `El patch conservaria o introduciria posibles secretos: ${leaks.slice(0, 5).join(", ")}`,
     fix: "Retira todos los hallazgos del archivo y no agregues credenciales, tokens o llaves.",
+    diagnostic: { code: "SECRET_PRESENT", reason: "secret-in-result" },
   }];
 }
 
 function patchSummaryMatchesTargets(context: HookContext, summary: SecretPatchSummary): boolean {
   const targets = new Set(filesystemTargetPaths(context).map((target) => path.resolve(context.cwd, target)));
   const summarized = new Set(summary.files.map((file) => path.resolve(context.cwd, file.path)));
+  const operations = context.metadata?.fileOperations;
+  if (!Array.isArray(operations) || operations.length !== summary.files.length) return false;
+  const summarizedOperations = new Map(summary.files.map((file) => [path.resolve(context.cwd, file.path), file.operation]));
+  const seenOperations = new Set<string>();
+  if (operations.some((item: unknown) => {
+    const operation = item as { kind?: unknown; path?: unknown };
+    if (!operation || typeof operation.path !== "string" || typeof operation.kind !== "string") return true;
+    const resolved = path.resolve(context.cwd, operation.path);
+    if (seenOperations.has(resolved)) return true;
+    seenOperations.add(resolved);
+    return summarizedOperations.get(resolved) !== operation.kind;
+  })) return false;
   return targets.size === summarized.size
     && targets.size === summary.files.length
     && [...targets].every((target) => summarized.has(target));
@@ -802,7 +841,7 @@ function fileBoundaryGuard(context: HookContext): HookViolation[] {
       });
     }
 
-    if (!write && isSecretPath(canonical)
+    if (!write && isPotentialSecretPath(canonical)
       && (controls?.excludeSecretsFromContext === true || controls?.excludeSecretsFromIndex === true)) {
       violations.push({
         id: "MAL-HOOK-FILE-SECRET",
@@ -987,6 +1026,7 @@ const KNOWN_OPENCODE_TOOLS = new Set([
   "malahor_plan_control",
   "malahor_commit_prepare",
   "commit_prepare",
+  ...MALAHOR_CODE_MODE_TOOL_NAMES,
   "invalid",
 ]);
 
@@ -1041,16 +1081,6 @@ function resolveTargetPath(target: string, followSymlinks: boolean): string | nu
   } catch {
     return null;
   }
-}
-
-function isSecretPath(target: string): boolean {
-  const normalized = target.replaceAll("\\", "/");
-  const base = path.basename(normalized);
-  if (base === ".env.example") return false;
-  return /(^|\/)\.env(\.|$)/.test(normalized)
-    || /(^|\/)\.ssh\//.test(normalized)
-    || /(^|\/)(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/i.test(normalized)
-    || /\.(pem|p12|pfx|key)$/i.test(base);
 }
 
 function isMcpTool(tool: string): boolean {

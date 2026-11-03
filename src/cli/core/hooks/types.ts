@@ -281,6 +281,12 @@ export const CODE_MODE_TOOL_NAMES = new Set([
   "python",
 ]);
 
+/** Gateways first-party A4. No son aliases de los entrypoints genericos bloqueados. */
+export const MALAHOR_CODE_MODE_TOOL_NAMES = new Set([
+  "malahor_code_search",
+  "malahor_code_execute",
+]);
+
 // OpenCode normaliza las tools MCP como `<servidor>_<tool>`. Los servidores
 // gestionados por Malahor deben pasar por el mismo punto de mediacion que el
 // prefijo legacy `mcp_`, sin convertirlos en permisos V2 desconocidos.
@@ -368,6 +374,16 @@ export interface HookViolation {
   decision: HookDecision;
   message: string;
   fix: string;
+  /** Motivo cerrado, sin payload ni rutas externas; la UI nunca lo interpreta como permiso. */
+  diagnostic?: {
+    code: "PATCH_NOT_EVALUABLE" | "SECRET_PRESENT" | "SECURITY_CONTROL_UNAVAILABLE";
+    reason: "invalid-structure" | "unsupported-operation" | "invalid-path" | "duplicate-target"
+      | "file-unavailable" | "context-mismatch" | "ambiguous-context" | "missing-evidence"
+      | "secret-in-result";
+    operation?: "add" | "update" | "delete";
+    path?: string;
+    hunk?: number;
+  };
   /** Evidencia producida por el hook; metadata del caller nunca puede crearla. */
   remediations?: HookRemediation[];
 }

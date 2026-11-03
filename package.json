@@ -52,6 +52,8 @@
     "node": ">=22.18.0"
   },
   "dependencies": {
+    "@opencode/codemode": "2.2.5",
+    "effect": "4.0.6",
     "jsonc-parser": "3.3.1"
   },
   "devDependencies": {

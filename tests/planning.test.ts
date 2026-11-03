@@ -6,18 +6,35 @@ import path from "node:path";
 import { loadConfig, type MalahorIntervention, type MalahorMode } from "../src/cli/core/config";
 import type { PluginAdapterOptions } from "../src/cli/core/hooks/plugin-adapter";
 import { MODE_CHANGE_ACTION, previewModeChange } from "../src/cli/core/mode";
-import type { PlanningAuthority } from "../src/cli/core/planning-authority";
+import { createPlanningAuthority, type PlanningAuthority } from "../src/cli/core/planning-authority";
 import {
-  authorizePlan, controlPlan, planAllows, presentPlan, proposePlan, renderPlan, requestPlanExecution, reviewPlan, validState,
-  type PlanInput, type PlanningAdapter, type PlanScope, type PlanState,
+  actionGraphForPlan, authorizePlan, controlPlan, DEFAULT_PLANNING_AUTHORITY, planAllows, presentPlan, proposePlan,
+  renderPlan, requestPlanExecution, reviewPlan, validState,
+  type PlanInput, type PlanningAdapter, type PlanScope, type PlanState, type PlanStateV5,
 } from "../src/cli/core/planning";
 import plugin from "../src/plugin/index";
 import {
-  evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, planKey, planRecordKey,
-  planRevisionKey, readPlan, registerPlanningTools, resolvePlanningScope, type PlanningStorage, type PlanningTools,
+  completePlanningTool, evaluatePlanningPermission, evaluatePlanningTool, injectPlanningInstructions, planKey,
+  planRecordKey, planRevisionKey, readPlan, registerPlanningTools, resolvePlanningScope,
+  type PlanningStorage, type PlanningTools,
 } from "../src/plugin/planning";
+import { registerPlanCommand, type PlanCommandHost } from "../src/plugin/plan-command";
+import {
+  loadPlanArchiveBundle,
+  planArchiveRecordKey,
+  planArchiveRevisionKey,
+} from "../src/plugin/plan-retention";
 import { MALAHOR_RUNTIME_PROTOCOL } from "../src/plugin/protocol";
 import { createCommitWorkflowRegistry, type CommitPreparationInput } from "../src/plugin/commit-workflow";
+import {
+  createPlanRecovery,
+  createPlanRevisionRecovery,
+  loadPlanRevisionCandidate,
+  planExecutionKey,
+  validPlanExecutionCheckpoint,
+  type PlanExecutionCheckpointV1,
+  type PlanRevisionCandidateV1,
+} from "../src/plugin/plan-recovery";
 
 const SESSION = "ses_planning_fixture";
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
@@ -287,6 +304,473 @@ type ApprovalRequest = {
   resources: string[];
   save: string[];
 };
+
+interface RevisionStorage {
+  get(key: string): Promise<unknown>;
+  set(key: string, value: unknown): Promise<void>;
+  remove?(key: string): Promise<void>;
+}
+
+interface PlanRevisionDeltaContract {
+  preserved: string[];
+  changed: string[];
+  added: string[];
+  removed: string[];
+}
+
+interface PlanRevisionCandidateContract {
+  schema: 1;
+  kind: "malahor.plan-revision-candidate";
+  planID: string;
+  parent: { revision: string; digest: string; proofHash: string };
+  candidate: PlanStateV5;
+  delta: PlanRevisionDeltaContract;
+  checkpointRef: string;
+  phase: "presented" | "reviewed" | "stale";
+  proof: string;
+}
+
+interface PlanRevisionRecoverySnapshot {
+  active: PlanStateV5;
+  checkpoint: PlanExecutionCheckpointV1;
+  candidate?: PlanRevisionCandidateContract;
+  history: PlanStateV5[];
+}
+
+interface PlanRevisionRecovery {
+  presentCandidate(candidate: PlanStateV5): Promise<PlanRevisionCandidateContract>;
+  activateCandidate(revision: string): Promise<PlanRevisionRecoverySnapshot>;
+  rejectCandidate(revision: string): Promise<PlanRevisionRecoverySnapshot>;
+  markCandidateStale(revision: string): Promise<PlanRevisionRecoverySnapshot>;
+  recoverTransition(): Promise<PlanRevisionRecoverySnapshot>;
+  snapshot(): Promise<PlanRevisionRecoverySnapshot>;
+}
+
+interface PlanRevisionRecoveryApi {
+  createPlanRevisionRecovery(input: {
+    parent: PlanStateV5;
+    checkpoint: PlanExecutionCheckpointV1;
+    storage: RevisionStorage;
+    authority: PlanningAuthority;
+  }): PlanRevisionRecovery | Promise<PlanRevisionRecovery>;
+}
+
+interface RevisionFixture {
+  api: PlanRevisionRecoveryApi;
+  manager: PlanRevisionRecovery;
+  authority: PlanningAuthority;
+  storage: RevisionStorage;
+  records: Map<string, unknown>;
+  parent: PlanStateV5;
+  parentCheckpoint: PlanExecutionCheckpointV1;
+  candidate: PlanStateV5;
+  presented: PlanRevisionCandidateContract;
+  ids: Record<"root" | "dependent" | "blocked" | "reserved" | "added", string>;
+  blockerID: string;
+  reservationID: string;
+}
+
+async function loadPlanRevisionRecoveryApi(): Promise<PlanRevisionRecoveryApi> {
+  const modulePath = "../src/plugin/plan-recovery";
+  const api = await import(modulePath) as unknown as Partial<PlanRevisionRecoveryApi>;
+  if (typeof api.createPlanRevisionRecovery !== "function") {
+    throw new Error(`API normativa ausente: ${modulePath} (candidato, delta y activación verificable).`);
+  }
+  return api as PlanRevisionRecoveryApi;
+}
+
+function canonicalPlanningFixture(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalPlanningFixture).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalPlanningFixture(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function graphlessV5State(state: PlanStateV5, authority: PlanningAuthority): PlanStateV5 {
+  const legacyPlan = {
+    ...state.plan,
+    actions: state.plan.actions.map(({ action, resource }) => ({ action, resource })),
+  };
+  const { actionGraph: _actionGraph, ...withoutGraph } = state;
+  const digestPayload = {
+    contractVersion: state.contractVersion,
+    canonicalizerVersion: state.canonicalizerVersion,
+    scope: {
+      sessionID: state.sessionID,
+      project: state.project,
+      mode: state.mode,
+      policyRevision: state.policyRevision,
+    },
+    plan: legacyPlan,
+    planID: state.planID,
+    revision: state.revision,
+    presentationInteractionID: state.presentationInteractionID,
+    actionIntentSource: state.actionIntentSource,
+    actionIntents: state.actionIntents,
+    ...(state.specRef && state.specHash ? { specRef: state.specRef, specHash: state.specHash } : {}),
+  };
+  const digest = createHash("sha256").update(canonicalPlanningFixture(digestPayload)).digest("hex");
+  const unsigned = { ...withoutGraph, plan: legacyPlan, digest, proof: "" } as PlanStateV5;
+  const { proof: _proof, ...proofPayload } = unsigned;
+  return { ...unsigned, proof: authority.sign(canonicalPlanningFixture(proofPayload)) };
+}
+
+function revisionInput(options: { changedDependency?: boolean; added?: boolean } = {}): PlanInput {
+  const base = input();
+  return {
+    ...base,
+    summary: options.added ? "Revisión material candidata" : "Plan padre con progreso",
+    actions: [
+      { action: "edit", resource: path.join(repo, "root.ts"), key: "root", dependsOn: [] },
+      {
+        action: "shell",
+        resource: "echo dependent",
+        key: "dependent",
+        dependsOn: options.changedDependency ? [] : ["root"],
+      },
+      { action: "shell", resource: "echo blocked", key: "blocked", dependsOn: [] },
+      { action: "shell", resource: "echo reserved", key: "reserved", dependsOn: [] },
+      ...(options.added
+        ? [{ action: "shell", resource: "echo added", key: "added", dependsOn: [] }]
+        : []),
+    ],
+  };
+}
+
+function actionIDsByKey(state: PlanStateV5): Record<string, string> {
+  return Object.fromEntries(actionGraphForPlan(state).map((node) => [node.key, node.actionID]));
+}
+
+function planProofHash(state: PlanStateV5): string {
+  return createHash("sha256").update(state.proof).digest("hex");
+}
+
+async function revisionFixture(): Promise<RevisionFixture> {
+  const api = await loadPlanRevisionRecoveryApi();
+  const authority = createPlanningAuthority(Buffer.alloc(32, 93));
+  const records = new Map<string, unknown>();
+  const fixtureStorage: RevisionStorage = {
+    get: async (key) => records.get(key),
+    set: async (key, value) => { records.set(key, structuredClone(value)); },
+    remove: async (key) => { records.delete(key); },
+  };
+  const planID = "9".repeat(32);
+  const parentPresented = proposePlan(
+    scope("executor"), revisionInput(), NOW, "msg_revision_parent", planID, authority,
+  );
+  const parent = authorizePlan(parentPresented, parentPresented.digest, NOW + 1, authority);
+  const graph = actionGraphForPlan(parent);
+  const parentIDs = actionIDsByKey(parent);
+  const recovery = createPlanRecovery({
+    plan: {
+      planID: parent.planID,
+      revision: parent.revision,
+      digest: parent.digest,
+      proofHash: planProofHash(parent),
+      phase: "running",
+    },
+    graph,
+    authority,
+    storage: fixtureStorage,
+    now: () => NOW + 2,
+  });
+  await recovery.recordAttempt({
+    actionID: parentIDs.root!,
+    outcome: "success",
+    canonicalInputHash: "sha256:root",
+    resourceDigests: { before: ["sha256:root-v1"], after: ["sha256:root-v2"] },
+  });
+  await recovery.recordAttempt({
+    actionID: parentIDs.dependent!,
+    outcome: "success",
+    canonicalInputHash: "sha256:dependent",
+    resourceDigests: { before: ["sha256:dependent-v1"], after: ["sha256:dependent-v2"] },
+  });
+  await recovery.recordPermissionDecision({
+    sessionID: parent.sessionID,
+    messageID: "msg_parent_ask",
+    callID: "call_parent_ask",
+    planID: parent.planID,
+    revision: parent.revision,
+    actionID: parentIDs.blocked!,
+    policyHash: "sha256:policy-parent",
+    resourceHash: "sha256:blocked-parent",
+    effect: "ask",
+    boundary: "permission.evaluate",
+  });
+  const reservation = await recovery.reserveToolCall({
+    sessionID: parent.sessionID,
+    messageID: "msg_parent_reserved",
+    callID: "call_parent_reserved",
+    planID: parent.planID,
+    revision: parent.revision,
+    actionID: parentIDs.reserved!,
+    policyHash: "sha256:policy-parent",
+    resourceHash: "sha256:reserved-parent",
+  });
+  const parentCheckpoint = await recovery.snapshot();
+  const blockerID = parentCheckpoint.nodes[parentIDs.blocked!]?.blockerID;
+  if (!blockerID || !reservation.reservationID) throw new Error("Fixture de revisión no creó blocker/reserva.");
+
+  records.set(planKey(parent.sessionID), structuredClone(parent));
+  records.set(planRecordKey(parent.planID), structuredClone(parent));
+  records.set(planRevisionKey(parent.planID, parent.revision), structuredClone(parent));
+
+  const candidate = proposePlan(
+    scope("executor"), revisionInput({ changedDependency: true, added: true }),
+    NOW + 3, "msg_revision_candidate", parent.planID, authority,
+  );
+  const candidateIDs = actionIDsByKey(candidate);
+  const manager = await api.createPlanRevisionRecovery({
+    parent,
+    checkpoint: parentCheckpoint,
+    storage: fixtureStorage,
+    authority,
+  });
+  const presented = await manager.presentCandidate(candidate);
+
+  return {
+    api,
+    manager,
+    authority,
+    storage: fixtureStorage,
+    records,
+    parent,
+    parentCheckpoint,
+    candidate,
+    presented,
+    ids: {
+      root: parentIDs.root!,
+      dependent: parentIDs.dependent!,
+      blocked: parentIDs.blocked!,
+      reserved: parentIDs.reserved!,
+      added: candidateIDs.added!,
+    },
+    blockerID,
+    reservationID: reservation.reservationID,
+  };
+}
+
+async function runningPluginRecovery() {
+  configure("ejecutar");
+  const harness = await registeredTools();
+  await harness.execute("plan", input(), call(SESSION, "malahor", "msg_recovery_completion_plan"));
+  const presented = records.get(planKey(SESSION)) as PlanStateV5;
+  await harness.execute(
+    "run",
+    { digest: presented.digest },
+    call(SESSION, "malahor", "msg_recovery_completion_run"),
+  );
+  const running = records.get(planKey(SESSION)) as PlanStateV5;
+  const graph = actionGraphForPlan(running);
+  const recovery = createPlanRecovery({
+    plan: {
+      planID: running.planID,
+      revision: running.revision,
+      digest: running.digest,
+      proofHash: planProofHash(running),
+      phase: "running",
+    },
+    graph,
+    authority: DEFAULT_PLANNING_AUTHORITY,
+    storage,
+  });
+  return { harness, running, recovery, actionID: graph[0]!.actionID };
+}
+
+interface RunningPluginRevisionParent {
+  harness: Awaited<ReturnType<typeof registeredTools>>;
+  parent: PlanStateV5;
+  parentCheckpoint: PlanExecutionCheckpointV1;
+  ids: Record<"root" | "dependent" | "blocked" | "reserved", string>;
+  blockerID: string;
+  reservationID: string;
+}
+
+async function runningPluginRevisionParent(): Promise<RunningPluginRevisionParent> {
+  configure("ejecutar");
+  storage.remove = async (key) => { records.delete(key); };
+  const harness = await registeredTools();
+  await harness.execute(
+    "plan",
+    revisionInput(),
+    call(SESSION, "malahor", "msg_plugin_revision_parent_plan"),
+  );
+  const presented = records.get(planKey(SESSION)) as PlanStateV5;
+  await harness.execute(
+    "run",
+    {},
+    call(SESSION, "malahor", "msg_plugin_revision_parent_run"),
+  );
+  const parent = records.get(planKey(SESSION)) as PlanStateV5;
+  expect(parent).toMatchObject({
+    planID: presented.planID,
+    revision: presented.revision,
+    phase: "running",
+  });
+
+  const ids = actionIDsByKey(parent) as RunningPluginRevisionParent["ids"];
+  const recovery = createPlanRecovery({
+    plan: {
+      planID: parent.planID,
+      revision: parent.revision,
+      digest: parent.digest,
+      proofHash: planProofHash(parent),
+      phase: "running",
+    },
+    graph: actionGraphForPlan(parent),
+    authority: DEFAULT_PLANNING_AUTHORITY,
+    storage,
+    now: () => NOW + 10,
+  });
+  await recovery.recordAttempt({
+    actionID: ids.root,
+    outcome: "success",
+    canonicalInputHash: "sha256:plugin-root",
+    resourceDigests: { before: ["sha256:plugin-root-v1"], after: ["sha256:plugin-root-v2"] },
+  });
+  await recovery.recordAttempt({
+    actionID: ids.dependent,
+    outcome: "success",
+    canonicalInputHash: "sha256:plugin-dependent",
+    resourceDigests: { before: ["sha256:plugin-dependent-v1"], after: ["sha256:plugin-dependent-v2"] },
+  });
+  await recovery.recordPermissionDecision({
+    sessionID: parent.sessionID,
+    messageID: "msg_plugin_revision_ask",
+    callID: "call_plugin_revision_ask",
+    planID: parent.planID,
+    revision: parent.revision,
+    actionID: ids.blocked,
+    policyHash: "sha256:plugin-policy",
+    resourceHash: "sha256:plugin-blocked",
+    effect: "ask",
+    boundary: "permission.evaluate",
+  });
+  const reservation = await recovery.reserveToolCall({
+    sessionID: parent.sessionID,
+    messageID: "msg_plugin_revision_reserved",
+    callID: "call_plugin_revision_reserved",
+    planID: parent.planID,
+    revision: parent.revision,
+    actionID: ids.reserved,
+    policyHash: "sha256:plugin-policy",
+    resourceHash: "sha256:plugin-reserved",
+  });
+  const parentCheckpoint = await recovery.snapshot();
+  const blockerID = parentCheckpoint.nodes[ids.blocked]?.blockerID;
+  if (!blockerID || !reservation.reservationID) {
+    throw new Error("El fixture integrado no creó blocker y reserva en el padre running.");
+  }
+  return {
+    harness,
+    parent,
+    parentCheckpoint,
+    ids,
+    blockerID,
+    reservationID: reservation.reservationID,
+  };
+}
+
+async function presentPluginRevision(
+  fixture: RunningPluginRevisionParent,
+  candidateInput: PlanInput = revisionInput({ changedDependency: true, added: true }),
+  messageID = "msg_plugin_revision_candidate",
+): Promise<RunningPluginRevisionParent & {
+  candidate: PlanRevisionCandidateV1;
+  candidateIDs: Record<string, string>;
+  planCall: ReturnType<typeof call>;
+  result: Awaited<ReturnType<RunningPluginRevisionParent["harness"]["execute"]>>;
+}> {
+  const planCall = call(SESSION, "malahor", messageID);
+  const result = await fixture.harness.execute("plan", candidateInput, planCall);
+  const candidate = await loadPlanRevisionCandidate(
+    storage,
+    fixture.parent,
+    DEFAULT_PLANNING_AUTHORITY,
+  );
+  if (!candidate) throw new Error("malahor_plan no persistió la revisión candidata integrada.");
+  return {
+    ...fixture,
+    candidate,
+    candidateIDs: actionIDsByKey(candidate.candidate),
+    planCall,
+    result,
+  };
+}
+
+async function revisionTechnicalView(): Promise<string> {
+  const messages: string[] = [];
+  let executeCommand: ((input: {
+    sessionID: string;
+    prompt: { text: string };
+    delivery: "steer" | "queue";
+  }) => Promise<void>) | undefined;
+  const host: PlanCommandHost = {
+    command: {
+      transform: async (callback) => {
+        callback({ add: (definition) => { executeCommand = definition.execute; } });
+      },
+    },
+    session: { synthetic: async ({ text }) => { messages.push(text); } },
+    permission: { assert: async () => undefined },
+  };
+  await registerPlanCommand(host, storage, DEFAULT_PLANNING_AUTHORITY, options);
+  if (!executeCommand) throw new Error("El comando /malahor-plan no quedó registrado.");
+  await executeCommand({
+    sessionID: SESSION,
+    prompt: { text: "/malahor-plan detalles" },
+    delivery: "steer",
+  });
+  const message = messages.at(-1);
+  if (!message) throw new Error("La vista técnica de /malahor-plan no produjo salida.");
+  return message;
+}
+
+async function runningPlanDependency(sessionID = "ses_plugin_revision_dependency"): Promise<{
+  state: PlanStateV5;
+  complete(): Promise<PlanStateV5>;
+}> {
+  const dependencyScope: PlanScope = { ...scope("executor"), sessionID };
+  const presented = proposePlan(
+    dependencyScope,
+    input(),
+    NOW + 20,
+    "msg_plugin_revision_dependency",
+    undefined,
+    DEFAULT_PLANNING_AUTHORITY,
+  );
+  const running = authorizePlan(
+    presented,
+    presented.digest,
+    NOW + 21,
+    DEFAULT_PLANNING_AUTHORITY,
+  );
+  const save = async (state: PlanState): Promise<void> => {
+    records.set(planKey(state.sessionID), structuredClone(state));
+    records.set(planRecordKey(state.planID), structuredClone(state));
+    records.set(planRevisionKey(state.planID, state.revision), structuredClone(state));
+  };
+  await save(running);
+  return {
+    state: running,
+    complete: async () => controlPlan(
+      dependencyScope,
+      "complete",
+      {
+        loadActive: async (targetSessionID) => records.get(planKey(targetSessionID)),
+        loadPlan: async (planID) => records.get(planRecordKey(planID)) as PlanState | undefined,
+        save,
+        confirm: async () => undefined,
+      },
+      DEFAULT_PLANNING_AUTHORITY,
+    ) as Promise<PlanStateV5>,
+  };
+}
 
 describe("configuracion: intervention es el unico modo efectivo", () => {
   test("acompanar, guiar y ejecutar derivan advisor, assistant y executor aunque mode legacy discrepe", () => {
@@ -877,6 +1361,47 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
       tool: "shell",
       input: { command: "git status --short", workdir: repo },
     }, options, storage)).rejects.toThrow(/asesor/);
+  });
+
+  test("la reserva de la misma llamada atraviesa el permiso y otra llamada sigue denegada", async () => {
+    configure("ejecutar");
+    options = { ...options, toolRegistered: true };
+    const presented = proposePlan(scope("executor"), {
+      ...input("shell"),
+      actions: [{ action: "shell", resource: "echo in-flight" }],
+    }, NOW);
+    const running = authorizePlan(presented, presented.digest, NOW + 1);
+    records.set(planKey(SESSION), running);
+
+    const toolInput = {
+      sessionID: SESSION,
+      agent: "malahor",
+      messageID: "msg_in_flight_tool",
+      id: "call_in_flight_tool",
+      tool: "shell",
+      input: { command: "echo in-flight", workdir: repo },
+    };
+    await evaluatePlanningTool(toolInput, options, storage);
+
+    const permission = (messageID: string, callID: string): Record<string, unknown> => ({
+      sessionID: SESSION,
+      action: "shell",
+      resources: ["echo in-flight"],
+      metadata: { command: "echo in-flight" },
+      source: { type: "tool", messageID, id: callID },
+      effect: "allow",
+    });
+    const sameCall = permission("msg_in_flight_tool", "call_in_flight_tool");
+    await evaluatePlanningPermission(sameCall, options, storage);
+    expect(sameCall.effect).toBe("allow");
+
+    const concurrent = permission("msg_in_flight_other", "call_in_flight_other");
+    await evaluatePlanningPermission(concurrent, options, storage);
+    expect(concurrent.effect).toBe("deny");
+    expect(String(concurrent.message)).toContain("ACTION_IN_FLIGHT");
+
+    const closed = await completePlanningTool(toolInput, options, storage);
+    expect(closed).toMatchObject({ ok: true, completed: 1 });
   });
 
   test("el cambio de modo siempre pide confirmacion nativa sin exponer la version interna", async () => {
@@ -1783,61 +2308,210 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     ]);
   });
 
-  test("reemplazo de plan revoca autorizacion anterior y rehace confirmaciones", async () => {
+  test("plan_control completa directamente tras pausar usando el ancla firmada del checkpoint", async () => {
+    configure("ejecutar");
     const harness = await registeredTools();
-    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_replace_plan_1"));
-    const old = records.get(planKey(SESSION)) as PlanState;
-    await harness.execute("run", { digest: old.digest }, call(SESSION, "malahor", "msg_replace_run_1"));
-    await harness.execute("plan", { ...input(), summary: "Nueva version" }, call(SESSION, "malahor", "msg_replace_plan_2"));
-    const next = records.get(planKey(SESSION)) as PlanState;
-    expect(next.digest).not.toBe(old.digest);
-    expect(next.authorizedAt).toBeUndefined();
-    expect(harness.approvals.map((item) => item.action)).toEqual(["malahor_plan_review", "malahor_plan_run", "malahor_plan_review"]);
-    await expect(harness.execute("run", { digest: old.digest }, call(SESSION, "malahor", "msg_replace_stale"))).rejects.toThrow();
-    const permission = { sessionID: SESSION, action: "edit", resources: [path.join(repo, "file.ts")], effect: "allow" };
-    await evaluatePlanningPermission(permission, options, storage);
-    expect(permission.effect).toBe("deny");
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_anchor_plan"));
+    const presented = records.get(planKey(SESSION)) as PlanStateV5;
+    await harness.execute("run", { digest: presented.digest }, call(SESSION, "malahor", "msg_anchor_run"));
+    const running = records.get(planKey(SESSION)) as PlanStateV5;
+    const recovery = createPlanRecovery({
+      plan: {
+        planID: running.planID,
+        revision: running.revision,
+        digest: running.digest,
+        proofHash: createHash("sha256").update(running.proof).digest("hex"),
+        phase: "running",
+      },
+      graph: actionGraphForPlan(running),
+      authority: DEFAULT_PLANNING_AUTHORITY,
+      storage,
+    });
+    await recovery.snapshot();
+
+    await harness.execute("plan_control", { action: "pause" }, call(SESSION, "malahor", "msg_anchor_pause"));
+    const paused = records.get(planKey(SESSION)) as PlanStateV5;
+    const checkpoint = records.get(planExecutionKey(paused.planID, paused.revision)) as PlanExecutionCheckpointV1;
+    expect(paused.phase).toBe("paused");
+    expect(paused.executionAnchor).toBe(createHash("sha256").update(running.proof).digest("hex"));
+    expect(checkpoint.plan.proofHash).toBe(paused.executionAnchor);
+
+    await expect(harness.execute(
+      "plan_control", { action: "complete" }, call(SESSION, "malahor", "msg_anchor_complete"),
+    )).resolves.toBeDefined();
+    expect((records.get(planKey(SESSION)) as PlanStateV5).phase).toBe("completed");
   });
 
-  test("re-presentar un plan identico revoca permisos y una orden en vuelo no sobrevive al cambio de revision", async () => {
-    let replaceDuringRun = false;
-    const harness = await registeredTools((request) => {
-      if (replaceDuringRun && request.action === "malahor_plan_run") {
-        const current = records.get(planKey(SESSION)) as PlanState;
-        const replacement = proposePlan(scope(), input());
-        expect(replacement.digest).not.toBe(current.digest);
-        expect(replacement.revision).not.toBe(current.revision);
-        records.set(planKey(SESSION), replacement);
-      }
+  test("una revisión tras pausa conserva progreso firmado y rechaza un checkpoint adulterado", async () => {
+    const fixture = await runningPluginRevisionParent();
+    await fixture.harness.execute(
+      "plan_control", { action: "pause" }, call(SESSION, "malahor", "msg_pause_with_checkpoint"),
+    );
+    const paused = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(paused.phase).toBe("paused");
+    expect(paused.proof).not.toBe(fixture.parent.proof);
+
+    await fixture.harness.execute(
+      "plan", revisionInput({ changedDependency: true, added: true }),
+      call(SESSION, "malahor", "msg_revision_after_pause"),
+    );
+    const candidate = await loadPlanRevisionCandidate(storage, paused, DEFAULT_PLANNING_AUTHORITY);
+    expect(candidate?.delta.preserved).toContain(fixture.ids.root);
+    expect(candidate?.delta.changed).toContain(fixture.ids.dependent);
+    expect(records.get(planKey(SESSION))).toEqual(paused);
+
+    const key = planExecutionKey(paused.planID, paused.revision);
+    const checkpoint = records.get(key) as PlanExecutionCheckpointV1;
+    records.set(key, { ...checkpoint, graphHash: "0".repeat(64) });
+    await expect(fixture.harness.execute(
+      "plan", revisionInput({ changedDependency: true, added: true }),
+      call(SESSION, "malahor", "msg_revision_tampered_checkpoint"),
+    )).rejects.toThrow(/checkpoint/i);
+    expect(records.get(planKey(SESSION))).toEqual(paused);
+  });
+
+  test("reemplazo de plan revoca autorizacion anterior y rehace confirmaciones", async () => {
+    storage.remove = async (key) => { records.delete(key); };
+    const harness = await registeredTools();
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_replace_plan_1"));
+    const presentedParent = records.get(planKey(SESSION)) as PlanStateV5;
+    await harness.execute(
+      "run",
+      { digest: presentedParent.digest },
+      call(SESSION, "malahor", "msg_replace_run_1"),
+    );
+    const parent = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(parent).toMatchObject({
+      planID: presentedParent.planID,
+      revision: presentedParent.revision,
+      phase: "running",
     });
+
+    const revisionCall = call(SESSION, "malahor", "msg_replace_plan_2");
+    await harness.execute("plan", { ...input(), summary: "Nueva version" }, revisionCall);
+    const activeWhileReviewed = records.get(planKey(SESSION)) as PlanStateV5;
+    const revision = await loadPlanRevisionCandidate(
+      storage,
+      parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    );
+    if (!revision) throw new Error("El cambio firmado de summary no persistió candidato.");
+
+    expect(activeWhileReviewed).toEqual(parent);
+    expect(revision).toMatchObject({
+      planID: parent.planID,
+      parent: { revision: parent.revision, digest: parent.digest },
+      candidate: {
+        planID: parent.planID,
+        phase: "reviewed",
+      },
+      phase: "reviewed",
+      delta: {
+        planChanged: true,
+        changed: [],
+        added: [],
+        removed: [],
+      },
+    });
+    expect(revision.candidate.plan.summary).toBe("Nueva version");
+    expect(revision.candidate.revision).not.toBe(parent.revision);
+    expect(revision.candidate.digest).not.toBe(parent.digest);
+    expect(revision.delta.preserved).toEqual(
+      actionGraphForPlan(parent).map((node) => node.actionID).sort(),
+    );
+    expect(harness.approvals.at(-1)).toEqual({
+      sessionID: SESSION,
+      agent: "malahor",
+      source: { type: "tool", messageID: revisionCall.messageID, id: revisionCall.id },
+      action: "malahor_plan_review",
+      resources: [revision.candidate.digest],
+      save: [],
+    });
+    expect(harness.approvals.map((item) => item.action)).toEqual([
+      "malahor_plan_review",
+      "malahor_plan_run",
+      "malahor_plan_review",
+    ]);
+
+    const approvalsBeforeStaleDigest = harness.approvals.length;
+    await expect(harness.execute(
+      "run",
+      { digest: parent.digest },
+      call(SESSION, "malahor", "msg_replace_stale"),
+    )).rejects.toThrow(/digest.*candidat/i);
+    expect(records.get(planKey(SESSION))).toEqual(parent);
+    expect(harness.approvals).toHaveLength(approvalsBeforeStaleDigest);
+
+    const candidateRunCall = call(SESSION, "malahor", "msg_replace_candidate_run");
+    await harness.execute(
+      "run",
+      { digest: revision.candidate.digest },
+      candidateRunCall,
+    );
+    const child = records.get(planKey(SESSION)) as PlanStateV5;
+    const superseded = records.get(
+      planRevisionKey(parent.planID, parent.revision),
+    ) as PlanStateV5;
+    expect(child).toMatchObject({
+      planID: parent.planID,
+      revision: revision.candidate.revision,
+      digest: revision.candidate.digest,
+      phase: "running",
+    });
+    expect(superseded).toMatchObject({
+      planID: parent.planID,
+      revision: parent.revision,
+      phase: "superseded",
+    });
+    expect(harness.approvals.at(-1)).toEqual({
+      sessionID: SESSION,
+      agent: "malahor",
+      source: { type: "tool", messageID: candidateRunCall.messageID, id: candidateRunCall.id },
+      action: "malahor_plan_run",
+      resources: [revision.candidate.digest],
+      save: [],
+    });
+    expect(harness.approvals.map((item) => item.action)).toEqual([
+      "malahor_plan_review",
+      "malahor_plan_run",
+      "malahor_plan_review",
+      "malahor_plan_run",
+    ]);
+  });
+
+  test("re-presentar un plan identico falla cerrado de forma idempotente sin revocar autoridad", async () => {
+    const harness = await registeredTools();
     await harness.execute("plan", input(), call(SESSION, "malahor", "msg_repeat_plan_1"));
     const first = records.get(planKey(SESSION)) as PlanState;
     await harness.execute("run", { digest: first.digest }, call(SESSION, "malahor", "msg_repeat_run_1"));
-    expect((records.get(planKey(SESSION)) as PlanState).authorizedAt).toBeNumber();
+    const running = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(running.authorizedAt).toBeNumber();
+    const approvals = structuredClone(harness.approvals);
 
-    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_repeat_plan_2"));
-    const second = records.get(planKey(SESSION)) as PlanState;
-    expect(second.plan).toEqual(first.plan);
-    expect(second.digest).not.toBe(first.digest);
-    expect(second.revision).not.toBe(first.revision);
-    expect(second.reviewedAt).toBeNumber();
-    expect(second.authorizedAt).toBeUndefined();
+    for (const messageID of ["msg_repeat_plan_2", "msg_repeat_plan_3"]) {
+      await expect(harness.execute(
+        "plan",
+        input(),
+        call(SESSION, "malahor", messageID),
+      )).rejects.toThrow(/cambio material|material verificable/i);
+      expect(records.get(planKey(SESSION))).toEqual(running);
+      expect(await loadPlanRevisionCandidate(
+        storage,
+        running,
+        DEFAULT_PLANNING_AUTHORITY,
+      )).toBeUndefined();
+      expect(harness.approvals).toEqual(approvals);
+    }
+
     const edit = path.join(repo, "file.ts");
-    const previouslyAllowed = { sessionID: SESSION, action: "edit", resources: [edit], effect: "allow" };
-    await evaluatePlanningPermission(previouslyAllowed, options, storage);
-    expect(previouslyAllowed.effect).toBe("deny");
-    await expect(evaluatePlanningTool({ sessionID: SESSION, tool: "write", input: { path: edit } }, options, storage)).rejects.toThrow();
-
-    await expect(harness.execute("run", { digest: first.digest }, call(SESSION, "malahor", "msg_repeat_stale"))).rejects.toThrow();
-    replaceDuringRun = true;
-    await expect(harness.execute("run", { digest: second.digest }, call(SESSION, "malahor", "msg_repeat_run_2"))).rejects.toThrow(/cambio/);
-    const third = records.get(planKey(SESSION)) as PlanState;
-    expect(third.digest).not.toBe(first.digest);
-    expect(third.revision).not.toBe(second.revision);
-    expect(third.authorizedAt).toBeUndefined();
-    expect(harness.approvals.map((request) => request.action)).toEqual([
-      "malahor_plan_review", "malahor_plan_run", "malahor_plan_review", "malahor_plan_run",
-    ]);
+    const stillAllowed = { sessionID: SESSION, action: "edit", resources: [edit], effect: "allow" };
+    await evaluatePlanningPermission(stillAllowed, options, storage);
+    expect(stillAllowed.effect).toBe("allow");
+    await evaluatePlanningTool(
+      { sessionID: SESSION, tool: "write", input: { path: edit } },
+      options,
+      storage,
+    );
   });
 
   test("run y nueva presentacion concurrentes en la misma sesion no resucitan la autorizacion previa", async () => {
@@ -2092,5 +2766,688 @@ describe("tools registradas y flujo sin APIs host reales", () => {
         if (typeof cleanup === "function") await cleanup();
       }
     }
+  });
+});
+
+describe("PLANNING-RECOVERY-01: grafo firmado y compatibilidad V5", () => {
+  test("normaliza claves y dependsOn, rechaza ciclos y liga el grafo al digest firmado", () => {
+    const base = input();
+    const state = proposePlan(scope("executor"), {
+      ...base,
+      actions: [
+        {
+          action: "shell",
+          resource: "echo child",
+          key: "  Child   Step  ",
+          dependsOn: [" Root Step ", "root-step"],
+        },
+        {
+          action: "edit",
+          resource: path.join(repo, "root.ts"),
+          key: " Root Step ",
+          dependsOn: [],
+        },
+      ],
+    }, NOW);
+    const actions = Object.fromEntries(state.plan.actions.map((action) => [action.key, action]));
+    const graph = Object.fromEntries(actionGraphForPlan(state).map((node) => [node.key, node]));
+    const digestOnlyAuthority: PlanningAuthority = {
+      fingerprint: "digest-only-graph",
+      sign: () => "proof",
+      verify: () => true,
+    };
+
+    expect(actions["root-step"]).toMatchObject({ key: "root-step", dependsOn: [] });
+    expect(actions["child-step"]).toMatchObject({ key: "child-step", dependsOn: ["root-step"] });
+    expect(graph["child-step"]?.dependsOn).toEqual([graph["root-step"]?.actionID]);
+    expect(validState(state, digestOnlyAuthority)).toBe(true);
+
+    const tampered = structuredClone(state);
+    tampered.actionGraph = tampered.actionGraph?.map((node) => node.key === "child-step"
+      ? { ...node, dependsOn: [] }
+      : node);
+    expect(validState(tampered, digestOnlyAuthority)).toBe(false);
+
+    for (const actionsWithInvalidGraph of [
+      [
+        { action: "edit", resource: path.join(repo, "a.ts"), key: "a", dependsOn: ["b"] },
+        { action: "edit", resource: path.join(repo, "b.ts"), key: "b", dependsOn: ["a"] },
+      ],
+      [
+        { action: "edit", resource: path.join(repo, "a.ts"), key: "Same Key", dependsOn: [] },
+        { action: "edit", resource: path.join(repo, "b.ts"), key: "same-key", dependsOn: [] },
+      ],
+      [
+        { action: "edit", resource: path.join(repo, "a.ts"), key: "a", dependsOn: ["missing"] },
+      ],
+    ]) {
+      expect(() => proposePlan(scope("executor"), {
+        ...base,
+        actions: actionsWithInvalidGraph,
+      }, NOW)).toThrow(/ciclo|claves|dependencia/i);
+    }
+  });
+
+  test("un V5 anterior sin actionGraph deriva nodos deterministas sin inventar aristas", () => {
+    const authority = createPlanningAuthority(Buffer.alloc(32, 94));
+    const current = proposePlan(scope("executor"), {
+      ...input(),
+      actions: [
+        { action: "edit", resource: path.join(repo, "legacy-a.ts") },
+        { action: "shell", resource: "echo legacy-b" },
+      ],
+    }, NOW, "msg_graphless_v5", "a".repeat(32), authority);
+    const legacy = graphlessV5State(current, authority);
+    const first = actionGraphForPlan(legacy);
+    const second = actionGraphForPlan(legacy);
+
+    expect(validState(legacy, authority)).toBe(true);
+    expect(legacy.actionGraph).toBeUndefined();
+    expect(first).toEqual(second);
+    expect(first).toHaveLength(legacy.actionIntents.length);
+    expect(first.every((node) => node.dependsOn.length === 0)).toBe(true);
+    expect(first.map((node) => node.actionID)).toEqual(legacy.actionIntents.map((intent) => intent.actionID));
+    expect(new Set(first.map((node) => node.key)).size).toBe(first.length);
+  });
+});
+
+describe("PLANNING-RECOVERY-01: candidato y transición incremental", () => {
+  test("presentar una revisión material conserva al padre running y guarda un candidato del mismo planID", async () => {
+    const fixture = await revisionFixture();
+    const snapshot = await fixture.manager.snapshot();
+
+    expect(fixture.presented).toMatchObject({
+      schema: 1,
+      kind: "malahor.plan-revision-candidate",
+      planID: fixture.parent.planID,
+      parent: {
+        revision: fixture.parent.revision,
+        digest: fixture.parent.digest,
+        proofHash: planProofHash(fixture.parent),
+      },
+      candidate: {
+        planID: fixture.parent.planID,
+        revision: fixture.candidate.revision,
+        phase: "presented",
+      },
+      phase: "presented",
+    });
+    expect(fixture.presented.proof).toMatch(/^[a-f0-9]{64}$/);
+    expect(fixture.candidate.revision).not.toBe(fixture.parent.revision);
+    expect(snapshot.active).toEqual(fixture.parent);
+    expect(snapshot.active.phase).toBe("running");
+    expect(snapshot.checkpoint).toEqual(fixture.parentCheckpoint);
+    expect(snapshot.candidate).toEqual(fixture.presented);
+    expect(fixture.records.get(planKey(fixture.parent.sessionID))).toEqual(fixture.parent);
+  });
+
+  test("el delta y carry-forward conservan solo actionID/dependencias exactos y nunca ASK o reservas", async () => {
+    const fixture = await revisionFixture();
+
+    expect(fixture.presented.delta.preserved).toEqual(expect.arrayContaining([
+      fixture.ids.root,
+      fixture.ids.blocked,
+      fixture.ids.reserved,
+    ]));
+    expect(fixture.presented.delta.preserved).toHaveLength(3);
+    expect(fixture.presented.delta.changed).toEqual([fixture.ids.dependent]);
+    expect(fixture.presented.delta.added).toEqual([fixture.ids.added]);
+    expect(fixture.presented.delta.removed).toEqual([]);
+
+    const activated = await fixture.manager.activateCandidate(fixture.candidate.revision);
+    const child = activated.checkpoint;
+    expect(activated.active).toMatchObject({
+      planID: fixture.parent.planID,
+      revision: fixture.candidate.revision,
+      phase: "running",
+    });
+    expect(validState(activated.active, fixture.authority)).toBe(true);
+    expect(child.nodes[fixture.ids.root]?.state).toBe("succeeded");
+    expect(child.nodes[fixture.ids.dependent]?.state).toBe("ready");
+    expect(child.nodes[fixture.ids.blocked]?.state).toBe("ready");
+    expect(child.nodes[fixture.ids.blocked]?.blockerID).toBeUndefined();
+    expect(child.nodes[fixture.ids.reserved]?.state).toBe("ready");
+    expect(child.nodes[fixture.ids.added]?.state).toBe("ready");
+    expect(child.blockers).toEqual({});
+    expect(child.reservations).toEqual({});
+    expect(JSON.stringify(child)).not.toContain(fixture.blockerID);
+    expect(JSON.stringify(child)).not.toContain(fixture.reservationID);
+    expect(JSON.stringify(child)).not.toContain("call_parent_ask");
+    expect(JSON.stringify(child)).not.toContain("call_parent_reserved");
+    expect(activated.history).toContainEqual(expect.objectContaining({
+      planID: fixture.parent.planID,
+      revision: fixture.parent.revision,
+      phase: "superseded",
+    }));
+  });
+
+  test("rechazar la aprobación o marcar stale conserva padre y progreso exactos", async () => {
+    for (const outcome of ["reject", "stale"] as const) {
+      const fixture = await revisionFixture();
+      const snapshot = outcome === "reject"
+        ? await fixture.manager.rejectCandidate(fixture.candidate.revision)
+        : await fixture.manager.markCandidateStale(fixture.candidate.revision);
+
+      expect(snapshot.active).toEqual(fixture.parent);
+      expect(snapshot.active.phase).toBe("running");
+      expect(snapshot.checkpoint).toEqual(fixture.parentCheckpoint);
+      expect(snapshot.checkpoint.proof).toBe(fixture.parentCheckpoint.proof);
+      expect(snapshot.checkpoint.sequence).toBe(fixture.parentCheckpoint.sequence);
+      await expect(fixture.manager.activateCandidate(fixture.candidate.revision)).rejects.toThrow(/rechaz|stale|vigente/i);
+    }
+  });
+
+  test("cada corte durable de activación recupera padre o hijo verificable, nunca una mezcla", async () => {
+    for (const failAt of [1, 2, 3]) {
+      const fixture = await revisionFixture();
+      let writes = 0;
+      const crashingStorage: RevisionStorage = {
+        get: async (key) => fixture.records.get(key),
+        set: async (key, value) => {
+          fixture.records.set(key, structuredClone(value));
+          writes++;
+          if (writes === failAt) throw new Error(`synthetic activation crash ${failAt}`);
+        },
+        remove: async (key) => { fixture.records.delete(key); },
+      };
+      const crashing = await fixture.api.createPlanRevisionRecovery({
+        parent: fixture.parent,
+        checkpoint: fixture.parentCheckpoint,
+        storage: crashingStorage,
+        authority: fixture.authority,
+      });
+
+      await expect(crashing.activateCandidate(fixture.candidate.revision)).rejects.toThrow(/synthetic activation crash/);
+
+      const recoveredManager = await fixture.api.createPlanRevisionRecovery({
+        parent: fixture.parent,
+        checkpoint: fixture.parentCheckpoint,
+        storage: fixture.storage,
+        authority: fixture.authority,
+      });
+      const recovered = await recoveredManager.recoverTransition();
+      const identity = [recovered.active.revision, recovered.checkpoint.plan.revision];
+      expect([
+        [fixture.parent.revision, fixture.parent.revision],
+        [fixture.candidate.revision, fixture.candidate.revision],
+      ]).toContainEqual(identity);
+      expect(validState(recovered.active, fixture.authority)).toBe(true);
+      expect(validPlanExecutionCheckpoint(
+        recovered.checkpoint,
+        {
+          planID: recovered.active.planID,
+          revision: recovered.active.revision,
+          digest: recovered.active.digest,
+          proofHash: planProofHash(recovered.active),
+          phase: "running",
+        },
+        actionGraphForPlan(recovered.active),
+        fixture.authority,
+      )).toBe(true);
+    }
+  });
+});
+
+describe("PLANNING-RECOVERY-01: integración end-to-end de revisiones candidatas", () => {
+  test("malahor_plan conserva el padre running y presenta progreso/delta sin filtrar identidad técnica", async () => {
+    const fixture = await presentPluginRevision(await runningPluginRevisionParent());
+    const foreground = foregroundMarkdown(fixture.result.content);
+    const active = records.get(planKey(SESSION));
+
+    expect(active).toEqual(fixture.parent);
+    expect(fixture.candidate).toMatchObject({
+      kind: "malahor.plan-revision-candidate",
+      planID: fixture.parent.planID,
+      parent: {
+        revision: fixture.parent.revision,
+        digest: fixture.parent.digest,
+      },
+      candidate: {
+        planID: fixture.parent.planID,
+        phase: "presented",
+      },
+      phase: "presented",
+    });
+    expect(fixture.candidate.candidate.revision).not.toBe(fixture.parent.revision);
+    expect(fixture.result.metadata).toMatchObject({
+      kind: "malahor.plan.revision-presentation",
+      planID: fixture.parent.planID,
+      revision: fixture.candidate.candidate.revision,
+      phase: "presented",
+    });
+
+    expect(foreground).toMatch(/progreso/i);
+    expect(foreground).toMatch(/completad/i);
+    expect(foreground).toMatch(/bloquead/i);
+    expect(foreground).toMatch(/(?:delta|cambios? de (?:la|esta) revisi[oó]n)/i);
+    expect(foreground).toMatch(/preservad/i);
+    expect(foreground).toMatch(/cambiad/i);
+    expect(foreground).toMatch(/a[nñ]adid/i);
+    expect(foreground).toMatch(/reanud/i);
+    expect(foreground).toMatch(/^## Qué debes hacer ahora$/m);
+
+    const hidden = new Set([
+      fixture.parent.planID,
+      fixture.parent.revision,
+      fixture.parent.digest,
+      fixture.candidate.candidate.revision,
+      fixture.candidate.candidate.digest,
+      ...Object.values(fixture.ids),
+      ...Object.values(fixture.candidateIDs),
+      ...fixture.candidate.delta.preserved,
+      ...fixture.candidate.delta.changed,
+      ...fixture.candidate.delta.added,
+      ...fixture.candidate.delta.removed,
+      path.join(repo, "root.ts"),
+      "echo dependent",
+      "echo blocked",
+      "echo reserved",
+      "echo added",
+    ]);
+    for (const value of hidden) expect(foreground).not.toContain(value);
+
+    const technical = await revisionTechnicalView();
+    expect(technical).toMatch(/(?:lineage|linaje)/i);
+    expect(technical).toMatch(/delta/i);
+    expect(technical).toContain(fixture.parent.planID);
+    expect(technical).toContain(fixture.parent.revision);
+    expect(technical).toContain(fixture.candidate.candidate.revision);
+    expect(technical).toContain(fixture.candidate.candidate.digest);
+    for (const actionID of new Set([
+      ...fixture.candidate.delta.preserved,
+      ...fixture.candidate.delta.changed,
+      ...fixture.candidate.delta.added,
+      ...fixture.candidate.delta.removed,
+    ])) expect(technical).toContain(actionID);
+  });
+
+  test("malahor_run sin digest aprueba y activa la hija con carry-forward exacto", async () => {
+    const fixture = await presentPluginRevision(await runningPluginRevisionParent());
+    const approvalsBefore = fixture.harness.approvals.length;
+    const runCall = call(SESSION, "malahor", "msg_plugin_revision_activate");
+
+    const result = await fixture.harness.execute("run", {}, runCall);
+    const child = records.get(planKey(SESSION)) as PlanStateV5;
+    const checkpoint = await storage.get(planExecutionKey(child.planID, child.revision)) as PlanExecutionCheckpointV1;
+    const parentHistory = records.get(
+      planRevisionKey(fixture.parent.planID, fixture.parent.revision),
+    ) as PlanStateV5;
+
+    expect(fixture.harness.approvals).toHaveLength(approvalsBefore + 1);
+    expect(fixture.harness.approvals.at(-1)).toEqual({
+      sessionID: SESSION,
+      agent: "malahor",
+      source: { type: "tool", messageID: runCall.messageID, id: runCall.id },
+      action: "malahor_plan_run",
+      resources: [fixture.candidate.candidate.digest],
+      save: [],
+    });
+    expect(child).toMatchObject({
+      planID: fixture.parent.planID,
+      revision: fixture.candidate.candidate.revision,
+      phase: "running",
+    });
+    expect(validState(child, DEFAULT_PLANNING_AUTHORITY)).toBe(true);
+    expect(result.metadata).toMatchObject({
+      planID: child.planID,
+      revision: child.revision,
+      phase: "running",
+    });
+    expect(result.content).not.toContain(child.planID);
+    expect(result.content).not.toContain(child.revision);
+    expect(result.content).not.toContain(child.digest);
+
+    expect(validPlanExecutionCheckpoint(
+      checkpoint,
+      {
+        planID: child.planID,
+        revision: child.revision,
+        digest: child.digest,
+        proofHash: planProofHash(child),
+        phase: "running",
+      },
+      actionGraphForPlan(child),
+      DEFAULT_PLANNING_AUTHORITY,
+    )).toBe(true);
+    expect(checkpoint.nodes[fixture.ids.root]?.state).toBe("succeeded");
+    expect(checkpoint.nodes[fixture.ids.root]?.attemptOrdinal)
+      .toBe(fixture.parentCheckpoint.nodes[fixture.ids.root]?.attemptOrdinal);
+    expect(checkpoint.nodes[fixture.ids.dependent]?.state).toBe("ready");
+    expect(checkpoint.nodes[fixture.ids.dependent]?.attemptOrdinal).toBeUndefined();
+    expect(checkpoint.nodes[fixture.ids.blocked]?.state).toBe("ready");
+    expect(checkpoint.nodes[fixture.ids.blocked]?.blockerID).toBeUndefined();
+    expect(checkpoint.nodes[fixture.ids.reserved]?.state).toBe("ready");
+    expect(checkpoint.nodes[fixture.candidateIDs.added!]?.state).toBe("ready");
+    expect(checkpoint.blockers).toEqual({});
+    expect(checkpoint.reservations).toEqual({});
+    expect(JSON.stringify(checkpoint)).not.toContain(fixture.blockerID);
+    expect(JSON.stringify(checkpoint)).not.toContain(fixture.reservationID);
+    expect(parentHistory).toMatchObject({
+      planID: fixture.parent.planID,
+      revision: fixture.parent.revision,
+      phase: "superseded",
+    });
+    expect(validState(parentHistory, DEFAULT_PLANNING_AUTHORITY)).toBe(true);
+    expect(await loadPlanRevisionCandidate(
+      storage,
+      fixture.parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    )).toBeUndefined();
+  });
+
+  test("digest explícito ajeno y mismo turno fallan sin retirar padre ni candidato", async () => {
+    const fixture = await presentPluginRevision(await runningPluginRevisionParent());
+    const approvalsBefore = fixture.harness.approvals.length;
+
+    await expect(fixture.harness.execute(
+      "run",
+      { digest: "0".repeat(64) },
+      call(SESSION, "malahor", "msg_plugin_revision_wrong_digest"),
+    )).rejects.toThrow();
+    expect(records.get(planKey(SESSION))).toEqual(fixture.parent);
+    expect(await loadPlanRevisionCandidate(
+      storage,
+      fixture.parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    )).toEqual(fixture.candidate);
+    expect(fixture.harness.approvals).toHaveLength(approvalsBefore);
+
+    await expect(fixture.harness.execute("run", {}, fixture.planCall)).rejects.toThrow();
+    expect(records.get(planKey(SESSION))).toEqual(fixture.parent);
+    expect(await loadPlanRevisionCandidate(
+      storage,
+      fixture.parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    )).toEqual(fixture.candidate);
+    expect(fixture.harness.approvals).toHaveLength(approvalsBefore);
+  });
+
+  test("candidato stale o padre cambiado fallan cerrados y conservan el padre", async () => {
+    const staleFixture = await presentPluginRevision(await runningPluginRevisionParent());
+    const staleManager = createPlanRevisionRecovery({
+      parent: staleFixture.parent,
+      checkpoint: staleFixture.parentCheckpoint,
+      storage,
+      authority: DEFAULT_PLANNING_AUTHORITY,
+    });
+    await staleManager.markCandidateStale(staleFixture.candidate.candidate.revision);
+    const staleApprovals = staleFixture.harness.approvals.length;
+
+    await expect(staleFixture.harness.execute(
+      "run",
+      {},
+      call(SESSION, "malahor", "msg_plugin_revision_stale_run"),
+    )).rejects.toThrow();
+    expect(records.get(planKey(SESSION))).toEqual(staleFixture.parent);
+    expect((await loadPlanRevisionCandidate(
+      storage,
+      staleFixture.parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    ))?.phase).toBe("stale");
+    expect(staleFixture.harness.approvals).toHaveLength(staleApprovals);
+
+    records.clear();
+    const changedFixture = await presentPluginRevision(await runningPluginRevisionParent());
+    await changedFixture.harness.execute(
+      "plan_control",
+      { action: "pause" },
+      call(SESSION, "malahor", "msg_plugin_revision_parent_pause"),
+    );
+    const changedParent = records.get(planKey(SESSION)) as PlanStateV5;
+    const changedApprovals = changedFixture.harness.approvals.length;
+    expect(changedParent).toMatchObject({
+      planID: changedFixture.parent.planID,
+      revision: changedFixture.parent.revision,
+      phase: "paused",
+    });
+
+    await expect(changedFixture.harness.execute(
+      "run",
+      {},
+      call(SESSION, "malahor", "msg_plugin_revision_changed_parent_run"),
+    )).rejects.toThrow();
+    expect(records.get(planKey(SESSION))).toEqual(changedParent);
+    expect(await loadPlanRevisionCandidate(
+      storage,
+      changedFixture.parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    )).toEqual(changedFixture.candidate);
+    expect(changedFixture.harness.approvals).toHaveLength(changedApprovals);
+  });
+
+  test("rechaza dependencias de plan no evaluables sin sustituir al padre", async () => {
+    const fixture = await runningPluginRevisionParent();
+    const approvalsBefore = fixture.harness.approvals.length;
+    const candidateInput: PlanInput = {
+      ...revisionInput({ changedDependency: true, added: true }),
+      dependencies: [{ planID: "a".repeat(32), revision: "b".repeat(32) }],
+    };
+
+    await expect(fixture.harness.execute(
+      "plan",
+      candidateInput,
+      call(SESSION, "malahor", "msg_plugin_revision_invalid_dependency"),
+    )).rejects.toThrow(/dependencia/i);
+    expect(records.get(planKey(SESSION))).toEqual(fixture.parent);
+    expect(await loadPlanRevisionCandidate(
+      storage,
+      fixture.parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    )).toBeUndefined();
+    expect(fixture.harness.approvals).toHaveLength(approvalsBefore);
+  });
+
+  test("una dependencia válida pendiente bloquea la hija y su cierre no la autoarranca", async () => {
+    const parentFixture = await runningPluginRevisionParent();
+    const dependency = await runningPlanDependency();
+    const fixture = await presentPluginRevision(parentFixture, {
+      ...revisionInput({ changedDependency: true, added: true }),
+      dependencies: [{
+        planID: dependency.state.planID,
+        revision: dependency.state.revision,
+      }],
+    }, "msg_plugin_revision_pending_dependency");
+
+    expect(records.get(planKey(SESSION))).toEqual(fixture.parent);
+    expect(fixture.candidate.candidate.plan.dependencies).toEqual([{
+      planID: dependency.state.planID,
+      revision: dependency.state.revision,
+    }]);
+    expect(fixture.candidate.phase).toBe("presented");
+
+    const runCall = call(SESSION, "malahor", "msg_plugin_revision_pending_dependency_run");
+    await fixture.harness.execute("run", {}, runCall);
+    const blockedChild = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(fixture.harness.approvals.at(-1)).toEqual({
+      sessionID: SESSION,
+      agent: "malahor",
+      source: { type: "tool", messageID: runCall.messageID, id: runCall.id },
+      action: "malahor_plan_run",
+      resources: [fixture.candidate.candidate.digest],
+      save: [],
+    });
+    expect(blockedChild).toMatchObject({
+      planID: fixture.parent.planID,
+      revision: fixture.candidate.candidate.revision,
+      phase: "blocked",
+      blockedBy: [{
+        planID: dependency.state.planID,
+        revision: dependency.state.revision,
+      }],
+    });
+
+    const completedDependency = await dependency.complete();
+    expect(completedDependency.phase).toBe("completed");
+    expect(records.get(planKey(SESSION))).toEqual(blockedChild);
+    expect(await loadPlanRevisionCandidate(
+      storage,
+      fixture.parent,
+      DEFAULT_PLANNING_AUTHORITY,
+    )).toBeUndefined();
+  });
+
+  test("completar la hija archiva lineage, delta y checkpoints verificables antes de retirar copias", async () => {
+    const fixture = await presentPluginRevision(await runningPluginRevisionParent());
+    await fixture.harness.execute(
+      "run",
+      {},
+      call(SESSION, "malahor", "msg_plugin_revision_retention_run"),
+    );
+    const child = records.get(planKey(SESSION)) as PlanStateV5;
+    const childRecovery = createPlanRecovery({
+      plan: {
+        planID: child.planID,
+        revision: child.revision,
+        digest: child.digest,
+        proofHash: planProofHash(child),
+        phase: "running",
+      },
+      graph: actionGraphForPlan(child),
+      authority: DEFAULT_PLANNING_AUTHORITY,
+      storage,
+      now: () => NOW + 30,
+    });
+    let childCheckpoint = await childRecovery.snapshot();
+    for (const node of actionGraphForPlan(child)) {
+      if (childCheckpoint.nodes[node.actionID]?.state === "succeeded") continue;
+      await childRecovery.recordAttempt({
+        actionID: node.actionID,
+        outcome: "success",
+        canonicalInputHash: `sha256:integrated-${node.key}`,
+        resourceDigests: {
+          before: [`sha256:integrated-${node.key}-before`],
+          after: [`sha256:integrated-${node.key}-after`],
+        },
+      });
+      childCheckpoint = await childRecovery.snapshot();
+    }
+
+    const events: string[] = [];
+    const set = storage.set.bind(storage);
+    const remove = storage.remove?.bind(storage);
+    if (!remove) throw new Error("El fixture integrado requiere remove para verificar archive-first.");
+    storage.set = async (key, value) => {
+      events.push(`set:${key}`);
+      await set(key, value);
+    };
+    storage.remove = async (key) => {
+      events.push(`remove:${key}`);
+      await remove(key);
+    };
+
+    await fixture.harness.execute(
+      "plan_control",
+      { action: "complete" },
+      call(SESSION, "malahor", "msg_plugin_revision_retention_complete"),
+    );
+
+    const archiveKey = planArchiveRevisionKey(child.planID, child.revision);
+    const bundle = await loadPlanArchiveBundle(
+      storage,
+      child.planID,
+      child.revision,
+      DEFAULT_PLANNING_AUTHORITY,
+    );
+    expect(bundle).toBeDefined();
+    if (!bundle) throw new Error("El cierre integrado no archivó el bundle de recuperación.");
+    expect(bundle.state).toMatchObject({
+      planID: child.planID,
+      revision: child.revision,
+      phase: "completed",
+    });
+    expect(bundle.delta).toEqual({
+      parentRevision: fixture.parent.revision,
+      childRevision: child.revision,
+      ...fixture.candidate.delta,
+    });
+    expect(bundle.lineage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ revision: fixture.parent.revision, phase: "superseded" }),
+      expect.objectContaining({ revision: child.revision, phase: "running" }),
+      expect.objectContaining({ revision: child.revision, phase: "completed" }),
+    ]));
+    expect(bundle.checkpoints.length).toBeGreaterThan(0);
+    expect(bundle.checkpoints.map((checkpoint) => checkpoint.plan.revision)).toContain(child.revision);
+    expect(bundle.checkpoints.map((checkpoint) => checkpoint.proof)).toEqual(expect.arrayContaining([
+      childCheckpoint.proof,
+    ]));
+    for (const checkpoint of bundle.checkpoints) {
+      const running = bundle.lineage.find((state) =>
+        state.revision === checkpoint.plan.revision && state.phase === "running");
+      expect(running).toBeDefined();
+      expect(validPlanExecutionCheckpoint(
+        checkpoint,
+        {
+          planID: running!.planID,
+          revision: running!.revision,
+          digest: running!.digest,
+          proofHash: planProofHash(running!),
+          phase: "running",
+        },
+        actionGraphForPlan(running!),
+        DEFAULT_PLANNING_AUTHORITY,
+      )).toBe(true);
+    }
+
+    expect(records.has(planKey(SESSION))).toBe(false);
+    expect(records.has(planRecordKey(child.planID))).toBe(false);
+    expect(records.has(planRevisionKey(child.planID, child.revision))).toBe(false);
+    expect(records.has(archiveKey)).toBe(true);
+    expect(records.has(planArchiveRecordKey(child.planID))).toBe(true);
+    const firstRemove = events.findIndex((event) => event.startsWith("remove:"));
+    expect(firstRemove).toBeGreaterThan(events.indexOf(`set:${archiveKey}`));
+    expect(firstRemove).toBeGreaterThan(events.indexOf(`set:${planArchiveRecordKey(child.planID)}`));
+  });
+});
+
+describe("PLANNING-RECOVERY-01: cierre consulta el checkpoint", () => {
+  test("plan_control complete falla mientras exista un blocker local", async () => {
+    const fixture = await runningPluginRecovery();
+    await fixture.recovery.recordPermissionDecision({
+      sessionID: fixture.running.sessionID,
+      messageID: "msg_completion_ask",
+      callID: "call_completion_ask",
+      planID: fixture.running.planID,
+      revision: fixture.running.revision,
+      actionID: fixture.actionID,
+      policyHash: "sha256:completion-policy",
+      resourceHash: "sha256:completion-resource",
+      effect: "ask",
+      boundary: "permission.evaluate",
+    });
+
+    await expect(fixture.harness.execute(
+      "plan_control",
+      { action: "complete" },
+      call(SESSION, "malahor", "msg_completion_blocked"),
+    )).rejects.toThrow(/blocker|checkpoint|pendiente/i);
+    expect(records.get(planKey(SESSION))).toMatchObject({
+      revision: fixture.running.revision,
+      phase: "running",
+    });
+  });
+
+  test("plan_control complete falla mientras exista una reserva in-flight", async () => {
+    const fixture = await runningPluginRecovery();
+    const reservation = await fixture.recovery.reserveToolCall({
+      sessionID: fixture.running.sessionID,
+      messageID: "msg_completion_in_flight",
+      callID: "call_completion_in_flight",
+      planID: fixture.running.planID,
+      revision: fixture.running.revision,
+      actionID: fixture.actionID,
+      policyHash: "sha256:completion-policy",
+      resourceHash: "sha256:completion-resource",
+    });
+    expect(reservation.reservationID).toBeDefined();
+
+    await expect(fixture.harness.execute(
+      "plan_control",
+      { action: "complete" },
+      call(SESSION, "malahor", "msg_completion_in_flight_close"),
+    )).rejects.toThrow(/in-flight|reserva|checkpoint|pendiente/i);
+    expect(records.get(planKey(SESSION))).toMatchObject({
+      revision: fixture.running.revision,
+      phase: "running",
+    });
   });
 });
