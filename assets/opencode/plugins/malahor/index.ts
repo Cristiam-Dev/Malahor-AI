@@ -12,6 +12,154 @@ var __export = (target, all) => {
 };
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
+// src/cli/core/paths.ts
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+function resolvePaths(env = process.env, cwd = process.cwd(), platform = process.platform) {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const home = pathApi.resolve(resolveHome(env, platform));
+  const malahorHome = pathApi.resolve(cwd, env.MALAHOR_HOME ?? pathApi.join(home, ".malahor"));
+  const opencodeDir = pathApi.resolve(cwd, env.MALAHOR_OPENCODE_DIR ?? detectOpenCodeDir(env, cwd, pathApi, home));
+  return {
+    cwd,
+    home,
+    malahorHome,
+    mnemoDir: pathApi.join(malahorHome, "mnemo"),
+    mnemoDb: pathApi.join(malahorHome, "mnemo", "db.json"),
+    mnemoIndex: pathApi.join(malahorHome, "mnemo", "index.js"),
+    horielDir: pathApi.join(malahorHome, "horiel"),
+    horielDb: pathApi.join(malahorHome, "horiel", "horiel.sqlite"),
+    horielSnapshots: pathApi.join(malahorHome, "horiel", "snapshots"),
+    horielIndex: pathApi.join(malahorHome, "horiel", "index.js"),
+    docsDir: pathApi.join(malahorHome, "docs"),
+    docsIndex: pathApi.join(malahorHome, "docs", "index.js"),
+    assetsDir: pathApi.join(malahorHome, "assets"),
+    scriptsDir: pathApi.join(malahorHome, "scripts"),
+    secretsDir: pathApi.join(malahorHome, "secrets"),
+    projectsFile: pathApi.join(malahorHome, "projects.json"),
+    vaultDir: pathApi.join(malahorHome, "vault"),
+    configFile: pathApi.resolve(cwd, env.MALAHOR_CONFIG ?? pathApi.join(malahorHome, "config.jsonc")),
+    opencodeDir,
+    opencodeConfig: pathApi.join(opencodeDir, "opencode.jsonc"),
+    opencodePluginsDir: pathApi.join(opencodeDir, "plugins"),
+    opencodeSkillsDir: pathApi.join(opencodeDir, "skills"),
+    malahorPluginDir: pathApi.join(opencodeDir, "plugins", "malahor"),
+    pluginState: pathApi.join(malahorHome, "plugin-state.json"),
+    agentsMd: pathApi.join(opencodeDir, "AGENTS.md"),
+    opencodeMd: pathApi.join(opencodeDir, "OPENCODE.md"),
+    opencodeSdkState: pathApi.join(malahorHome, "opencode-sdk.json"),
+    backupsDir: pathApi.join(malahorHome, "backups")
+  };
+}
+function resolveWindowsHome(env) {
+  if (env.HOMEDRIVE && env.HOMEPATH) {
+    return `${env.HOMEDRIVE}${env.HOMEPATH}`;
+  }
+  return;
+}
+function resolveHome(env, platform) {
+  if (platform === "win32") {
+    return env.USERPROFILE ?? resolveWindowsHome(env) ?? env.HOME ?? os.homedir();
+  }
+  return env.HOME ?? os.homedir();
+}
+function detectOpenCodeDir(env, cwd, pathApi, home) {
+  const fallbackCandidates = fallbackOpenCodeCandidates(env, pathApi, home);
+  const detected = env.MALAHOR_OPENCODE_DETECT === "0" ? undefined : detectOpenCodeDirFromApi(env, cwd, pathApi, home, fallbackCandidates);
+  return detected ?? bestOpenCodeDir(fallbackCandidates, pathApi, home) ?? defaultOpenCodeDir(env, pathApi, home);
+}
+function detectOpenCodeDirFromApi(env, cwd, pathApi, home, fallbackCandidates) {
+  try {
+    const output = execFileSync(env.MALAHOR_OPENCODE_BIN ?? "opencode", ["api", "get", "/api/config"], {
+      cwd,
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2000
+    });
+    return opencodeDirFromConfigApi(output, pathApi, home, fallbackCandidates);
+  } catch {
+    return;
+  }
+}
+function opencodeDirFromConfigApi(output, pathApi, home, fallbackCandidates) {
+  const parsed = JSON.parse(output);
+  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  const documentDirs = entries.flatMap((entry) => collectConfigPaths(entry)).filter((entry) => /opencode\.jsonc?$/i.test(pathApi.basename(entry))).map((entry) => pathApi.dirname(entry));
+  const directoryDirs = entries.flatMap((entry) => collectConfigPaths(entry)).filter((entry) => pathApi.basename(entry).toLowerCase() === "opencode");
+  return bestOpenCodeDir([...documentDirs, ...directoryDirs, ...fallbackCandidates], pathApi, home);
+}
+function collectConfigPaths(value, depth = 0) {
+  if (depth > 4 || value === null || value === undefined)
+    return [];
+  if (typeof value === "string")
+    return looksLikeOpenCodePath(value) ? [value] : [];
+  if (Array.isArray(value))
+    return value.flatMap((item) => collectConfigPaths(item, depth + 1));
+  if (typeof value !== "object")
+    return [];
+  const record = value;
+  const ownPath = typeof record.path === "string" && record.path.trim() ? [record.path] : [];
+  return [...ownPath, ...Object.values(record).flatMap((item) => collectConfigPaths(item, depth + 1))].filter(looksLikeOpenCodePath);
+}
+function bestOpenCodeDir(candidates, pathApi, home) {
+  if (candidates.length === 0)
+    return;
+  return unique(candidates).sort((left, right) => scoreOpenCodeDir(right, pathApi, home) - scoreOpenCodeDir(left, pathApi, home))[0];
+}
+function scoreOpenCodeDir(candidate, pathApi, home) {
+  let score = 0;
+  const normalized = normalizeForCompare(candidate);
+  const preferred = normalizeForCompare(pathApi.join(home, ".config", "opencode"));
+  if (normalized === preferred)
+    score += 50;
+  if (pathApi.basename(candidate).toLowerCase() === "opencode")
+    score += 20;
+  if (fs.existsSync(candidate))
+    score += 10;
+  if (fs.existsSync(pathApi.join(candidate, "opencode.jsonc")))
+    score += 8;
+  if (fs.existsSync(pathApi.join(candidate, "opencode.json")))
+    score += 8;
+  if (fs.existsSync(pathApi.join(candidate, "commands")))
+    score += 4;
+  if (fs.existsSync(pathApi.join(candidate, "AGENTS.md")))
+    score += 2;
+  if (fs.existsSync(pathApi.join(candidate, "OPENCODE.md")))
+    score += 2;
+  return score;
+}
+function fallbackOpenCodeCandidates(env, pathApi, home) {
+  const xdgConfigHome = pathApi.resolve(env.XDG_CONFIG_HOME ?? pathApi.join(home, ".config"));
+  const candidates = [pathApi.join(xdgConfigHome, "opencode"), pathApi.join(home, ".config", "opencode")];
+  if (env.APPDATA)
+    candidates.push(pathApi.join(pathApi.resolve(env.APPDATA), "opencode"));
+  return unique(candidates);
+}
+function defaultOpenCodeDir(env, pathApi, home) {
+  return pathApi.join(pathApi.resolve(env.XDG_CONFIG_HOME ?? pathApi.join(home, ".config")), "opencode");
+}
+function looksLikeOpenCodePath(value) {
+  const normalized = normalizeForCompare(value);
+  return /(^|\/)opencode(\/opencode\.jsonc?)?$/.test(normalized);
+}
+function unique(values) {
+  const seen = new Set;
+  return values.filter((value) => {
+    const key = normalizeForCompare(value);
+    if (seen.has(key))
+      return false;
+    seen.add(key);
+    return true;
+  });
+}
+function normalizeForCompare(value) {
+  return value.replaceAll("\\", "/").replace(/\/+$/g, "").toLowerCase();
+}
+var init_paths = () => {};
+
 // src/cli/core/planning-authority.ts
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs2 from "node:fs";
@@ -110,6 +258,306 @@ function isAlreadyExists(error) {
 }
 var KEY_FILE = "planning.key", KEY_BYTES = 32;
 var init_planning_authority = () => {};
+
+// src/cli/core/project.ts
+import fs3 from "node:fs";
+import path3 from "node:path";
+function resolveProject(cwd = process.cwd(), aliases = {}) {
+  const root = findProjectRoot(cwd);
+  const name = readPackageName(root) ?? path3.basename(root);
+  const canonicalKey = resolveCanonicalProjectKey(name, aliases);
+  return {
+    name,
+    canonicalKey,
+    root,
+    aliases: aliasesForProject(canonicalKey, aliases)
+  };
+}
+function resolveCanonicalProjectKey(project, aliases = {}) {
+  const lookup = projectLookupKey(project);
+  const allAliases = mergeAliases(BUILT_IN_PROJECT_ALIASES, aliases);
+  for (const [canonical, values] of Object.entries(allAliases)) {
+    const candidates = [canonical, ...values];
+    if (candidates.some((candidate) => projectLookupKey(candidate) === lookup)) {
+      return toCanonicalKey(canonical);
+    }
+  }
+  return toCanonicalKey(project);
+}
+function projectLookupKey(project) {
+  return project.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function findProjectRoot(cwd) {
+  let current = path3.resolve(cwd);
+  while (true) {
+    if (fs3.existsSync(path3.join(current, "package.json")) || fs3.existsSync(path3.join(current, ".git"))) {
+      return current;
+    }
+    const parent = path3.dirname(current);
+    if (parent === current)
+      return path3.resolve(cwd);
+    current = parent;
+  }
+}
+function readPackageName(cwd) {
+  const packagePath = path3.join(cwd, "package.json");
+  if (!fs3.existsSync(packagePath))
+    return null;
+  try {
+    const parsed = JSON.parse(fs3.readFileSync(packagePath, "utf8"));
+    if (typeof parsed === "object" && parsed !== null && typeof parsed.name === "string" && parsed.name.trim()) {
+      return parsed.name.trim();
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+function toCanonicalKey(value) {
+  return projectLookupKey(value) || "project";
+}
+function aliasesForProject(canonicalKey, aliases) {
+  const allAliases = mergeAliases(BUILT_IN_PROJECT_ALIASES, aliases);
+  return Object.entries(allAliases).filter(([canonical]) => toCanonicalKey(canonical) === canonicalKey).flatMap(([, values]) => values);
+}
+function mergeAliases(base, extra) {
+  const merged = { ...base };
+  for (const [canonical, values] of Object.entries(extra)) {
+    merged[canonical] = [...merged[canonical] ?? [], ...values];
+  }
+  return merged;
+}
+var BUILT_IN_PROJECT_ALIASES;
+var init_project = __esm(() => {
+  BUILT_IN_PROJECT_ALIASES = {
+    malahor: ["malaho", "MalaHor", "malahor ai", "malahor-ai", "malahor_ai", "malahorai"]
+  };
+});
+
+// src/cli/core/context.ts
+import fs4 from "node:fs";
+import path4 from "node:path";
+function resolveContextTarget(paths, aliases, override) {
+  if (override && override.trim()) {
+    const canonicalKey = resolveCanonicalProjectKey(override, aliases);
+    const registered = rootsForProject(paths.projectsFile, canonicalKey);
+    return {
+      name: override.trim(),
+      canonicalKey,
+      root: registered[0] ?? "",
+      registeredRoots: registered
+    };
+  }
+  const project = resolveRegisteredProject(paths, aliases);
+  return {
+    name: project.name,
+    canonicalKey: project.canonicalKey,
+    root: project.root,
+    registeredRoots: rootsForProject(paths.projectsFile, project.canonicalKey)
+  };
+}
+function resolveRegisteredProject(paths, aliases = {}, options = {}) {
+  const canonicalKey = options.override?.trim() ? resolveCanonicalProjectKey(options.override, aliases) : resolveProjectHint(paths, aliases, options.projectHint);
+  const absoluteTargets = (options.targetPaths ?? []).map((target) => path4.resolve(paths.cwd, target));
+  const registered = canonicalKey ? rootsForProject(paths.projectsFile, canonicalKey).map((root2) => ({ canonicalKey, root: root2 })) : registeredProjectRoots(paths.projectsFile).filter((entry) => isWithinPath(paths.cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root))).sort((left, right) => right.root.length - left.root.length);
+  const root = options.preferredRoot ?? registered[0]?.root;
+  if (root) {
+    const resolved = resolveProject(root, aliases);
+    return {
+      ...resolved,
+      canonicalKey: canonicalKey ?? registered[0]?.canonicalKey ?? resolved.canonicalKey,
+      root
+    };
+  }
+  const fallback = resolveProject(paths.cwd, aliases);
+  return canonicalKey ? { ...fallback, canonicalKey } : fallback;
+}
+function resolveProjectHint(paths, aliases, hint) {
+  if (!hint?.trim())
+    return;
+  const projects = loadProjectsFile(paths.projectsFile);
+  const normalized = resolveCanonicalProjectKey(hint, aliases);
+  if (projects[normalized])
+    return normalized;
+  const rootSegment = hint.split("/")[0]?.trim();
+  if (!rootSegment || rootSegment === hint)
+    return normalized;
+  const rootKey = resolveCanonicalProjectKey(rootSegment, aliases);
+  return projects[rootKey] ? rootKey : normalized;
+}
+function parseContextLevel(value) {
+  if (typeof value !== "string" || !CONTEXT_LEVELS.includes(value)) {
+    throw new Error(`Nivel de contexto invalido: ${String(value)}. Consulta \`malahor-ai context help\`; los valores persistidos siguen en compatibilidad transitoria.`);
+  }
+  return value;
+}
+function loadProjectsFile(filePath) {
+  if (!fs4.existsSync(filePath)) {
+    return {};
+  }
+  const raw = fs4.readFileSync(filePath, "utf8").trim();
+  if (!raw)
+    return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`No se pudo leer ${filePath}: ${error.message}`);
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`La configuracion ${filePath} no contiene un objeto JSON valido.`);
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!isRecord(value)) {
+      throw new Error(`La configuracion ${filePath} en ${key} debe ser un objeto.`);
+    }
+    try {
+      const roots = readRoots(value.roots, `${filePath} en ${key}.roots`);
+      const defaultRoot = readRoot(value.defaultRoot, `${filePath} en ${key}.defaultRoot`);
+      const docs = readDocsConfig(value.docs, `${filePath} en ${key}.docs`);
+      result[key] = {
+        context: parseContextLevel(value.context),
+        ...roots.length > 0 ? { roots } : {},
+        ...defaultRoot ? { defaultRoot } : {},
+        ...docs ? { docs } : {}
+      };
+    } catch (error) {
+      throw new Error(`La configuracion ${filePath} en ${key}: ${error.message}`);
+    }
+  }
+  return result;
+}
+function levelForProject(projectsFile, canonicalKey) {
+  return loadProjectsFile(projectsFile)[canonicalKey]?.context ?? DEFAULT_CONTEXT_LEVEL;
+}
+function rootsForProject(projectsFile, canonicalKey) {
+  const entry = loadProjectsFile(projectsFile)[canonicalKey];
+  if (!entry)
+    return [];
+  const roots = entry.roots ?? [];
+  const preferred = entry.defaultRoot && roots.includes(entry.defaultRoot) ? [entry.defaultRoot] : [];
+  return [...preferred, ...roots.filter((root) => !preferred.includes(root))];
+}
+function registeredProjectRoots(projectsFile) {
+  const projects = loadProjectsFile(projectsFile);
+  return Object.entries(projects).flatMap(([canonicalKey, entry]) => (entry.roots ?? []).map((root) => ({ canonicalKey, root })));
+}
+function normalizeRoot(root) {
+  const resolved = path4.resolve(root);
+  try {
+    return fs4.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+function readRoots(value, key) {
+  if (value === undefined || value === null)
+    return [];
+  if (!Array.isArray(value))
+    throw new Error(`La configuracion ${key} debe ser una lista de strings.`);
+  return value.filter((item) => typeof item === "string" && Boolean(item.trim())).map(normalizeRoot);
+}
+function readRoot(value, key) {
+  if (value === undefined || value === null || value === "")
+    return;
+  if (typeof value !== "string")
+    throw new Error(`La configuracion ${key} debe ser un string.`);
+  return normalizeRoot(value);
+}
+function readDocsConfig(value, key) {
+  if (value === undefined || value === null)
+    return;
+  if (!isRecord(value))
+    throw new Error(`La configuracion ${key} debe ser un objeto.`);
+  const docsPath = readDocsPath(value.path, `${key}.path`);
+  const unknown = Object.keys(value).filter((name) => name !== "path");
+  if (unknown.length > 0)
+    throw new Error(`La configuracion ${key} contiene campos desconocidos: ${unknown.join(", ")}.`);
+  return docsPath ? { path: docsPath } : {};
+}
+function readDocsPath(value, key) {
+  if (value === undefined || value === null || value === "")
+    return;
+  if (typeof value !== "string")
+    throw new Error(`La configuracion ${key} debe ser un string.`);
+  if (!path4.isAbsolute(value))
+    throw new Error(`La configuracion ${key} debe ser una ruta absoluta externa.`);
+  return path4.resolve(value);
+}
+function codegraphEnabled(level) {
+  return level === "memory+codegraph" || level === "memory+codegraph+obsidian";
+}
+function isWithinPath(value, root) {
+  const relative = path4.relative(path4.resolve(root), path4.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path4.isAbsolute(relative);
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var CONTEXT_LEVELS, DEFAULT_CONTEXT_LEVEL = "memory+codegraph";
+var init_context = __esm(() => {
+  init_project();
+  CONTEXT_LEVELS = [
+    "memory",
+    "memory+codegraph",
+    "memory+codegraph+obsidian",
+    "mnemo",
+    "mnemo+graphify",
+    "mnemo+graphify+obsidian"
+  ];
+});
+
+// src/cli/core/jsonc.ts
+function stripJsonComments(input) {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let index = 0;index < input.length; index += 1) {
+    const current = input[index];
+    const next = input[index + 1];
+    if (inLineComment) {
+      if (current === `
+`) {
+        inLineComment = false;
+        output += current;
+      }
+      continue;
+    }
+    if (inBlockComment) {
+      if (current === "*" && next === "/") {
+        inBlockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (!inString && current === "/" && next === "/") {
+      inLineComment = true;
+      index += 1;
+      continue;
+    }
+    if (!inString && current === "/" && next === "*") {
+      inBlockComment = true;
+      index += 1;
+      continue;
+    }
+    output += current;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (current === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (current === '"') {
+      inString = !inString;
+    }
+  }
+  return output;
+}
 
 // src/cli/core/git-command-policy.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
@@ -2259,6 +2707,177 @@ var init_secret_scan = __esm(() => {
   SERIALIZED_SYNTHETIC_ASSIGNMENT = new RegExp(`^(${CREDENTIAL_NAME_SOURCE})(\\s*[:=]\\s*)(["'])(synthetic[-_][A-Za-z0-9._-]{8,80})\\3$`, "i");
 });
 
+// src/docs/client.ts
+function parseDocsClient(value, key = "cliente documental") {
+  if (typeof value === "string" && DOCS_CLIENTS.includes(value.toLowerCase())) {
+    return value.toLowerCase();
+  }
+  throw new Error(`${key} debe ser system, vscode u obsidian.`);
+}
+var DOCS_CLIENTS;
+var init_client = __esm(() => {
+  DOCS_CLIENTS = ["system", "vscode", "obsidian"];
+});
+
+// src/cli/core/config.ts
+import { createHash as createHash6 } from "node:crypto";
+import fs12 from "node:fs";
+function loadConfig(env = process.env, cwd = process.cwd()) {
+  const defaultPaths = resolvePaths(env, cwd);
+  const fileConfig = readConfigFile(defaultPaths.configFile);
+  const executionConfig = readOptionalObject(fileConfig.execution, "execution");
+  const docsConfig = readOptionalObject(fileConfig.docs, "docs");
+  const projectsConfig = readOptionalObject(fileConfig.projects, "projects");
+  const paths = resolvePaths({ ...resolvePathEnv(env, fileConfig), MALAHOR_CONFIG: defaultPaths.configFile }, cwd);
+  const legacyMode = env.MALAHOR_MODE ?? fileConfig.mode;
+  if (legacyMode !== undefined)
+    resolveMode(legacyMode);
+  const execution = resolveExecutionPolicy(env, executionConfig, legacyMode);
+  return {
+    mode: modeForIntervention(execution.intervention),
+    paths,
+    execution,
+    docs: {
+      client: readDocsClient(docsConfig?.client)
+    },
+    projects: {
+      aliases: readProjectAliases(projectsConfig?.aliases)
+    }
+  };
+}
+function readDocsClient(value) {
+  if (value === undefined || value === null || value === "")
+    return "system";
+  return parseDocsClient(value, "La configuracion docs.client");
+}
+function resolveMode(value = process.env.MALAHOR_MODE) {
+  if (value === undefined || value === null || value === "") {
+    return "assistant";
+  }
+  if (value === "advisor" || value === "assistant" || value === "executor") {
+    return value;
+  }
+  throw new Error(`Modo Malahor invalido: ${String(value)}. Usa "advisor", "assistant" o "executor".`);
+}
+function modeForIntervention(intervention) {
+  switch (intervention) {
+    case "acompanar":
+      return "advisor";
+    case "guiar":
+      return "assistant";
+    case "ejecutar":
+      return "executor";
+  }
+}
+function readConfigFile(filePath) {
+  if (!fs12.existsSync(filePath)) {
+    return {};
+  }
+  const raw = fs12.readFileSync(filePath, "utf8").trim();
+  if (!raw)
+    return {};
+  try {
+    const parsed = JSON.parse(stripJsonComments(raw));
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch (error) {
+    throw new Error(`No se pudo leer ${filePath}: ${error.message}`);
+  }
+  throw new Error(`La configuracion ${filePath} no contiene un objeto JSON valido.`);
+}
+function resolvePathEnv(env, config) {
+  const pathConfig = readOptionalObject(config.paths, "paths");
+  return {
+    ...env,
+    MALAHOR_HOME: env.MALAHOR_HOME ?? readOptionalString(pathConfig?.malahorHome, "paths.malahorHome"),
+    MALAHOR_OPENCODE_DIR: env.MALAHOR_OPENCODE_DIR ?? readOptionalString(pathConfig?.opencodeDir, "paths.opencodeDir")
+  };
+}
+function resolveExecutionPolicy(env, config, legacyMode) {
+  const legacyIntervention = legacyMode === undefined || legacyMode === null || legacyMode === "" ? undefined : { advisor: "acompanar", assistant: "guiar", executor: "ejecutar" }[resolveMode(legacyMode)];
+  const intervention = readIntervention(env.MALAHOR_EXECUTION_INTERVENTION ?? config?.intervention ?? legacyIntervention, "execution.intervention");
+  const verification = readOptionalBoolean(env.MALAHOR_EXECUTION_VERIFICATION ?? config?.verification, "execution.verification");
+  const revision = readExecutionRevision(config?.revision, intervention);
+  return {
+    intervention,
+    verification: intervention === "acompanar" ? false : verification ?? true,
+    revision
+  };
+}
+function readExecutionRevision(value, intervention) {
+  if (value === undefined || value === null || value === "") {
+    return createHash6("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
+  }
+  if (typeof value === "string" && /^[a-f0-9]{32}$/.test(value))
+    return value;
+  throw new Error("La configuracion execution.revision debe ser un identificador hexadecimal de 32 caracteres.");
+}
+function readIntervention(value, key) {
+  if (value === undefined || value === null || value === "") {
+    return "guiar";
+  }
+  if (value === "ejecutar" || value === "guiar" || value === "acompanar") {
+    return value;
+  }
+  throw new Error(`La configuracion ${key} debe ser "ejecutar", "guiar" o "acompanar".`);
+}
+function readProjectAliases(value) {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  const aliases = readOptionalObject(value, "projects.aliases") ?? {};
+  const result = {};
+  for (const [canonical, rawAliases] of Object.entries(aliases)) {
+    const parsedAliases = readStringList(rawAliases, `projects.aliases.${canonical}`);
+    if (canonical.trim() && parsedAliases.length > 0) {
+      result[canonical.trim()] = parsedAliases;
+    }
+  }
+  return result;
+}
+function readOptionalObject(value, key) {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  throw new Error(`La configuracion ${key} debe ser un objeto.`);
+}
+function readOptionalString(value, key) {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  throw new Error(`La configuracion ${key} debe ser un string.`);
+}
+function readStringList(value, key) {
+  if (!Array.isArray(value)) {
+    throw new Error(`La configuracion ${key} debe ser una lista de strings.`);
+  }
+  return value.map((item, index) => readOptionalString(item, `${key}.${index}`)).filter((item) => Boolean(item));
+}
+function readOptionalBoolean(value, key) {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  throw new Error(`La configuracion ${key} debe ser boolean.`);
+}
+var init_config = __esm(() => {
+  init_client();
+  init_paths();
+});
+
 // src/cli/core/action-intent.ts
 import { createHash as createHash8 } from "node:crypto";
 import fs14 from "node:fs";
@@ -3749,6 +4368,7 @@ function normalizePlan(mode, input) {
   const presentation = normalizePlanPresentation(input.presentation, mode, level);
   const actions = normalizePlannedActions(input.actions);
   const preflightBundle = normalizePlanPreflight(input.preflight, actions, input.verification);
+  const architecture = input.architecture;
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\x00${item.revision}`);
   validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
   const normalized = {
@@ -3758,7 +4378,8 @@ function normalizePlan(mode, input) {
     actions,
     dependencies: normalizedDependencies,
     ...preflightBundle.verification === undefined ? {} : { verification: preflightBundle.verification },
-    ...preflightBundle.preflight === undefined ? {} : { preflight: preflightBundle.preflight }
+    ...preflightBundle.preflight === undefined ? {} : { preflight: preflightBundle.preflight },
+    ...architecture === undefined ? {} : { architecture }
   };
   return input.level === undefined ? normalized : { level, ...normalized };
 }
@@ -4956,6 +5577,153 @@ var init_read_only_shell_policy = __esm(() => {
   COMMIT_MESSAGE_TYPES = new Set(COMMIT_TYPES);
 });
 
+// src/docs/resolver.ts
+import fs16 from "node:fs";
+import path20 from "node:path";
+function resolveDocsProject(paths, aliases = {}, requestedProject, pathOverride) {
+  const target = resolveContextTarget(paths, aliases, requestedProject);
+  const projects = loadProjectsFile(paths.projectsFile);
+  return resolveDocsConfiguration(paths, target.canonicalKey, projects, pathOverride);
+}
+function resolveDocsConfiguration(paths, canonicalKey, projects, pathOverride) {
+  const entry = projects[canonicalKey];
+  if (!entry || !entry.roots?.length) {
+    throw new Error(`El proyecto ${canonicalKey} no esta registrado con una raiz de codigo.`);
+  }
+  assertProjectKey(canonicalKey);
+  const caseCollision = Object.keys(projects).find((key) => key !== canonicalKey && key.toLowerCase() === canonicalKey.toLowerCase());
+  if (caseCollision)
+    throw new Error(`Las claves ${canonicalKey} y ${caseCollision} colisionan en filesystems sin distincion de mayusculas.`);
+  const configured = pathOverride?.trim() || entry.docs?.path;
+  const plannedVaultRoot = path20.resolve(paths.vaultDir);
+  assertNoSymlinkComponents(plannedVaultRoot);
+  const vaultRoot = canonicalPlannedPath3(plannedVaultRoot);
+  const plannedDefaultRoot = path20.join(vaultRoot, "projects", canonicalKey);
+  assertNoSymlinkComponents(plannedDefaultRoot);
+  const defaultRoot = canonicalPlannedPath3(plannedDefaultRoot);
+  const plannedConfiguredRoot = configured ? path20.resolve(configured) : undefined;
+  if (plannedConfiguredRoot)
+    assertNoSymlinkComponents(plannedConfiguredRoot);
+  const configuredRoot = plannedConfiguredRoot ? canonicalPlannedPath3(plannedConfiguredRoot) : undefined;
+  const source = configuredRoot && !samePath(configuredRoot, defaultRoot) ? "override" : "default";
+  const projectRoot = source === "override" ? configuredRoot : defaultRoot;
+  const repositoryRoots = Object.values(projects).flatMap((project) => project.roots ?? []);
+  assertExternalDocsRoot(projectRoot, repositoryRoots);
+  if (source === "default") {
+    assertExternalDocsRoot(vaultRoot, repositoryRoots);
+  } else {
+    assertExternalOverride(projectRoot, paths.malahorHome, vaultRoot);
+  }
+  assertIsolatedProjectRoot(projectRoot, canonicalKey, projects, vaultRoot);
+  return {
+    project: canonicalKey,
+    projectRoot,
+    vaultRoot,
+    source,
+    initialized: secureDirectoryExists(projectRoot)
+  };
+}
+function assertExternalDocsRoot(candidate, repositoryRoots) {
+  const root = canonicalPlannedPath3(candidate);
+  if (isSandboxPath(root))
+    return;
+  const containingRepository = repositoryAncestor(root);
+  if (containingRepository) {
+    throw new Error(`La raiz documental debe estar fuera de repositorios: ${root} esta dentro de ${containingRepository}.`);
+  }
+  for (const repository of repositoryRoots) {
+    const codeRoot = canonicalPlannedPath3(repository);
+    if (isWithin4(root, codeRoot) || isWithin4(codeRoot, root)) {
+      throw new Error(`La raiz documental debe estar fuera de repositorios: ${root} entra en conflicto con ${codeRoot}.`);
+    }
+  }
+}
+function isSandboxPath(value) {
+  return path20.resolve(value).split(path20.sep).includes(".sandbox");
+}
+function assertProjectKey(value) {
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?$/.test(value) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value)) {
+    throw new Error(`Clave canonica no portable para el vault: ${value}`);
+  }
+}
+function canonicalPlannedPath3(value) {
+  const resolved = path20.resolve(value);
+  let current = resolved;
+  const suffix = [];
+  while (!fs16.existsSync(current)) {
+    const parent = path20.dirname(current);
+    if (parent === current)
+      break;
+    suffix.unshift(path20.basename(current));
+    current = parent;
+  }
+  const canonical3 = fs16.existsSync(current) ? fs16.realpathSync(current) : current;
+  return path20.resolve(canonical3, ...suffix);
+}
+function assertExternalOverride(projectRoot, malahorHome, vaultRoot) {
+  const home = canonicalPlannedPath3(malahorHome);
+  if (isWithin4(projectRoot, home) || isWithin4(home, projectRoot) || isWithin4(projectRoot, vaultRoot) || isWithin4(vaultRoot, projectRoot)) {
+    throw new Error(`El override documental debe ser externo a MALAHOR_HOME: ${projectRoot}`);
+  }
+}
+function assertIsolatedProjectRoot(projectRoot, project, projects, vaultRoot) {
+  for (const [otherProject, entry] of Object.entries(projects)) {
+    if (otherProject === project)
+      continue;
+    assertProjectKey(otherProject);
+    const otherRoot = canonicalPlannedPath3(entry.docs?.path ?? path20.join(vaultRoot, "projects", otherProject));
+    if (isWithin4(projectRoot, otherRoot) || isWithin4(otherRoot, projectRoot)) {
+      throw new Error(`Las raices documentales de ${project} y ${otherProject} se solapan: ${projectRoot} / ${otherRoot}.`);
+    }
+  }
+}
+function secureDirectoryExists(target) {
+  if (!fs16.existsSync(target))
+    return false;
+  assertNoSymlinkComponents(target);
+  const stat = fs16.lstatSync(target);
+  if (stat.isSymbolicLink() || !stat.isDirectory())
+    throw new Error(`La raiz documental no es un directorio real: ${target}`);
+  if (!samePath(fs16.realpathSync(target), path20.resolve(target)))
+    throw new Error(`La raiz documental usa un symlink: ${target}`);
+  return true;
+}
+function repositoryAncestor(target) {
+  for (let current = path20.resolve(target);; current = path20.dirname(current)) {
+    if (fs16.existsSync(path20.join(current, ".git")))
+      return current;
+    if (path20.dirname(current) === current)
+      return;
+  }
+}
+function assertNoSymlinkComponents(target) {
+  for (let current = path20.resolve(target);; current = path20.dirname(current)) {
+    try {
+      if (fs16.lstatSync(current).isSymbolicLink())
+        throw new Error(`Ruta con symlink no permitida: ${current}`);
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    }
+    if (path20.dirname(current) === current)
+      return;
+  }
+}
+function samePath(left, right) {
+  const normalizedLeft = path20.resolve(left);
+  const normalizedRight = path20.resolve(right);
+  return process.platform === "win32" ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase() : normalizedLeft === normalizedRight;
+}
+function isWithin4(value, root) {
+  const relative = path20.relative(path20.resolve(root), path20.resolve(value));
+  return relative === "" || !relative.startsWith("..") && !path20.isAbsolute(relative);
+}
+var MAX_MARKDOWN_BYTES;
+var init_resolver = __esm(() => {
+  init_context();
+  MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
+});
+
 // src/plugin/planning-preflight.ts
 var exports_planning_preflight = {};
 __export(exports_planning_preflight, {
@@ -4979,9 +5747,13 @@ function validatePlanningPreflight(value3) {
   }
   const root = fs21.realpathSync(input.root);
   const base = path27.resolve(input.directory);
+  const rawCompleted = input.completedKeys;
+  const completedKeys = new Set(Array.isArray(rawCompleted) ? rawCompleted.filter((key) => typeof key === "string") : []);
   const editActions = input.actions.filter((action) => action.action === "edit");
   const mayCreate = new Set;
   for (const edit of normalized.preflight.edits) {
+    if (completedKeys.has(edit.key))
+      continue;
     const action = editActions.find((item) => item.key === edit.key);
     if (!action)
       throw new Error(`Preflight inválido: la edición ${edit.key} no tiene acción.`);
@@ -5072,8 +5844,328 @@ var init_planning_preflight = __esm(() => {
   init_planning();
 });
 
-// src/cli/core/task-classification.ts
+// src/plugin/architecture-contract.ts
+var exports_architecture_contract = {};
+__export(exports_architecture_contract, {
+  validateArchitecturePlan: () => validateArchitecturePlan,
+  readArchitectureContract: () => readArchitectureContract
+});
 import { createHash as createHash18 } from "node:crypto";
+import fs22 from "node:fs";
+import path28 from "node:path";
+function validateArchitecturePlan(value3) {
+  if (!isRecord17(value3))
+    throw new Error("Arquitectura del plan inválida: se espera un objeto.");
+  const input = value3;
+  if (!Array.isArray(input.actions) || typeof input.project !== "string" || !input.project.trim() || typeof input.projectRoot !== "string" || !input.projectRoot.trim() || typeof input.directory !== "string" || !input.directory.trim()) {
+    throw new Error("Arquitectura del plan inválida: falta el proyecto, la raíz o las acciones.");
+  }
+  const editActions = input.actions.filter((action) => action.action === "edit");
+  const architecture = normalizeArchitecture(input.architecture, editActions, input.level, input.presentation);
+  if (!architecture)
+    throw new Error("Un plan con ediciones requiere architecture: contrato, módulos y decisión respect/change.");
+  const contract = readArchitectureContract(architecture.contractRef, architecture.contractHash, input.project, input.directory, input.env);
+  validateAgainstContract(architecture, contract, editActions, input.projectRoot);
+  return architecture.mode === "change" ? { architecture, changeHash: sha2564(JSON.stringify(architecture)) } : { architecture };
+}
+function readArchitectureContract(contractRef, contractHash, project, directory, env) {
+  const config = loadConfig({ ...env ?? process.env, MALAHOR_OPENCODE_DETECT: "0" }, directory);
+  const docs = resolveDocsProject(config.paths, config.projects.aliases, project);
+  const segments = contractRef.trim().split("/");
+  if (!docs.initialized || !contractRef.endsWith(".md") || contractRef.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("El contrato de arquitectura no pertenece a la documentación canónica inicializada.");
+  }
+  const docsRoot = fs22.realpathSync(docs.projectRoot);
+  const target = path28.resolve(docsRoot, contractRef);
+  if (!inside8(target, docsRoot))
+    throw new Error("El contrato de arquitectura queda fuera de la documentación canónica.");
+  const stat = fs22.lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2 * 1024 * 1024 || !inside8(fs22.realpathSync(target), docsRoot)) {
+    throw new Error("El contrato de arquitectura debe ser un Markdown regular y acotado.");
+  }
+  const content = fs22.readFileSync(target);
+  const actualHash = createHash18("sha256").update(content).digest("hex");
+  if (actualHash !== contractHash)
+    throw new Error("La versión SHA-256 del contrato de arquitectura ya no coincide.");
+  const match8 = /```json\s*\r?\n([\s\S]*?)\r?\n```/i.exec(content.toString("utf8"));
+  if (!match8)
+    throw new Error("El contrato de arquitectura no contiene un bloque JSON.");
+  let parsed;
+  try {
+    parsed = JSON.parse(match8[1]);
+  } catch {
+    throw new Error("El bloque JSON del contrato de arquitectura no es válido.");
+  }
+  return normalizeContract(parsed);
+}
+function normalizeContract(value3) {
+  if (!isRecord17(value3))
+    throw new Error("El contrato de arquitectura debe ser un objeto JSON.");
+  assertExactKeys2(value3, ["version", "modules", "forbidden"], "Contrato de arquitectura");
+  if (value3.version !== 1)
+    throw new Error("El contrato de arquitectura requiere version 1.");
+  if (!Array.isArray(value3.modules) || value3.modules.length === 0 || value3.modules.length > 64) {
+    throw new Error("El contrato de arquitectura requiere entre 1 y 64 módulos.");
+  }
+  const modules = [];
+  const ids = new Set;
+  for (const raw of value3.modules) {
+    if (!isRecord17(raw))
+      throw new Error("Cada módulo del contrato debe ser un objeto.");
+    assertExactKeys2(raw, ["id", "path", "layer", "allowedDependencies"], "Módulo del contrato");
+    const id2 = typeof raw.id === "string" ? raw.id.trim().toLowerCase() : "";
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(id2) || ids.has(id2)) {
+      throw new Error("El contrato contiene un módulo no evaluable o duplicado.");
+    }
+    ids.add(id2);
+    const modulePath = normalizeContractPath(raw.path, "modules.path");
+    const layer = typeof raw.layer === "string" ? raw.layer.trim() : "";
+    if (!layer || layer.length > 128)
+      throw new Error("El contrato contiene una capa inválida.");
+    if (!Array.isArray(raw.allowedDependencies) || raw.allowedDependencies.some((entry) => typeof entry !== "string" || !entry.trim())) {
+      throw new Error("El contrato contiene dependencias permitidas inválidas.");
+    }
+    modules.push({
+      id: id2,
+      path: modulePath,
+      layer,
+      allowedDependencies: raw.allowedDependencies.map((entry) => entry.trim().toLowerCase())
+    });
+  }
+  for (const module of modules) {
+    for (const dependency of module.allowedDependencies) {
+      if (!ids.has(dependency) || dependency === module.id) {
+        throw new Error(`El contrato referencia una dependencia permitida inexistente: ${module.id} -> ${dependency}.`);
+      }
+    }
+  }
+  if (!Array.isArray(value3.forbidden))
+    throw new Error("El contrato requiere la lista forbidden.");
+  const forbidden2 = [];
+  for (const raw of value3.forbidden) {
+    if (!isRecord17(raw))
+      throw new Error("Cada arista prohibida debe ser un objeto.");
+    assertExactKeys2(raw, ["from", "to"], "Arista prohibida");
+    const from = typeof raw.from === "string" ? raw.from.trim().toLowerCase() : "";
+    const to = typeof raw.to === "string" ? raw.to.trim().toLowerCase() : "";
+    if (!ids.has(from) || !ids.has(to) || from === to) {
+      throw new Error("El contrato contiene una arista prohibida inválida.");
+    }
+    forbidden2.push({ from, to });
+  }
+  return { version: 1, modules, forbidden: forbidden2 };
+}
+function normalizeArchitecture(value3, editActions, level, presentation) {
+  if (value3 === undefined) {
+    if (editActions.length > 0) {
+      throw new Error("Un plan con ediciones requiere architecture: contrato, módulos y decisión respect/change.");
+    }
+    return;
+  }
+  if (editActions.length === 0)
+    throw new Error("La arquitectura no aplica a un plan sin ediciones.");
+  if (!isRecord17(value3))
+    throw new Error("Arquitectura del plan inválida: se espera un objeto.");
+  assertExactKeys2(value3, ["mode", "contractRef", "contractHash", "modules", "dependencies", "change"], "Arquitectura del plan");
+  const mode = value3.mode;
+  if (mode !== "respect" && mode !== "change") {
+    throw new Error("Arquitectura del plan inválida: mode debe ser respect o change.");
+  }
+  const contractRef = normalizeDocsRef(value3.contractRef, "contractRef");
+  const contractHash = value3.contractHash;
+  if (typeof contractHash !== "string" || !/^[a-f0-9]{64}$/.test(contractHash)) {
+    throw new Error("Arquitectura del plan inválida: contractHash no evaluable.");
+  }
+  if (!Array.isArray(value3.modules) || value3.modules.length === 0 || value3.modules.length > 20) {
+    throw new Error("Arquitectura del plan inválida: modules debe declarar entre 1 y 20 módulos.");
+  }
+  const modules = [];
+  const moduleIds = new Set;
+  for (const raw of value3.modules) {
+    if (!isRecord17(raw))
+      throw new Error("Arquitectura del plan inválida: cada módulo debe ser un objeto.");
+    assertExactKeys2(raw, ["id", "path", "layer", "reason"], "Módulo del plan");
+    const id2 = typeof raw.id === "string" ? raw.id.trim().toLowerCase() : "";
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(id2) || moduleIds.has(id2)) {
+      throw new Error("Arquitectura del plan inválida: módulo no evaluable o duplicado.");
+    }
+    moduleIds.add(id2);
+    const modulePath = normalizeContractPath(raw.path, "modules.path");
+    const layer = typeof raw.layer === "string" ? raw.layer.trim() : "";
+    const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+    if (!layer || layer.length > 128 || !reason || reason.length > 2000) {
+      throw new Error("Arquitectura del plan inválida: layer o reason inválidos.");
+    }
+    modules.push({ id: id2, path: modulePath, layer, reason });
+  }
+  const dependencies = normalizeDependencies(value3.dependencies, moduleIds);
+  if (mode === "respect") {
+    if (value3.change !== undefined)
+      throw new Error("Arquitectura del plan inválida: respect no declara change.");
+    const architecture2 = {
+      mode,
+      contractRef,
+      contractHash,
+      modules,
+      ...dependencies.length > 0 ? { dependencies } : {}
+    };
+    assertArchitectureSize(architecture2);
+    return architecture2;
+  }
+  if (level !== 2)
+    throw new Error("Un cambio de arquitectura requiere nivel 2.");
+  if (!presentation.risk.categories.includes("architecture")) {
+    throw new Error("Un cambio de arquitectura requiere la categoría crítica architecture.");
+  }
+  const change = normalizeChange(value3.change);
+  const architecture = {
+    mode,
+    contractRef,
+    contractHash,
+    modules,
+    ...dependencies.length > 0 ? { dependencies } : {},
+    change
+  };
+  assertArchitectureSize(architecture);
+  return architecture;
+}
+function validateAgainstContract(architecture, contract, editActions, projectRoot) {
+  const contractById = new Map(contract.modules.map((module) => [module.id, module]));
+  const planById = new Map(architecture.modules.map((module) => [module.id, module]));
+  for (const module of architecture.modules) {
+    const declared = contractById.get(module.id);
+    if (architecture.mode === "respect") {
+      if (!declared)
+        throw new Error(`El módulo ${module.id} no existe en el contrato; usa mode change.`);
+      if (path28.resolve(projectRoot, module.path) !== path28.resolve(projectRoot, declared.path)) {
+        throw new Error(`El módulo ${module.id} no coincide con la ruta del contrato.`);
+      }
+    } else if (declared && path28.resolve(projectRoot, module.path) !== path28.resolve(projectRoot, declared.path)) {
+      throw new Error(`El módulo existente ${module.id} cambia de ruta; el cambio debe declararlo explícitamente.`);
+    }
+  }
+  const modulePaths = architecture.modules.map((module) => path28.resolve(projectRoot, module.path));
+  for (const action of editActions) {
+    const target = path28.resolve(action.resource);
+    if (!modulePaths.some((modulePath) => inside8(target, modulePath))) {
+      throw new Error(`La edición ${action.resource} no pertenece a un módulo declarado; usa mode change.`);
+    }
+  }
+  for (const dependency of architecture.dependencies ?? []) {
+    const from = contractById.get(dependency.from);
+    const to = contractById.get(dependency.to);
+    if (architecture.mode === "respect") {
+      if (!from || !to)
+        throw new Error(`La dependencia ${dependency.from} -> ${dependency.to} no existe en el contrato.`);
+      if (!from.allowedDependencies.includes(dependency.to)) {
+        throw new Error(`La dependencia ${dependency.from} -> ${dependency.to} no está permitida por el contrato.`);
+      }
+      if (contract.forbidden.some((edge) => edge.from === dependency.from && edge.to === dependency.to)) {
+        throw new Error(`La dependencia ${dependency.from} -> ${dependency.to} está prohibida por el contrato.`);
+      }
+    } else if (!planById.has(dependency.from) && !from) {
+      throw new Error(`La dependencia ${dependency.from} -> ${dependency.to} referencia un módulo desconocido.`);
+    } else if (!planById.has(dependency.to) && !to) {
+      throw new Error(`La dependencia ${dependency.from} -> ${dependency.to} referencia un módulo desconocido.`);
+    }
+  }
+}
+function normalizeDependencies(value3, moduleIds) {
+  if (value3 === undefined)
+    return [];
+  if (!Array.isArray(value3) || value3.length > 50)
+    throw new Error("Arquitectura del plan inválida: dependencies inválidas.");
+  const result4 = [];
+  const seen = new Set;
+  for (const raw of value3) {
+    if (!isRecord17(raw))
+      throw new Error("Arquitectura del plan inválida: cada dependencia debe ser un objeto.");
+    assertExactKeys2(raw, ["from", "to"], "Dependencia del plan");
+    const from = typeof raw.from === "string" ? raw.from.trim().toLowerCase() : "";
+    const to = typeof raw.to === "string" ? raw.to.trim().toLowerCase() : "";
+    if (!moduleIds.has(from) || !moduleIds.has(to) || from === to) {
+      throw new Error("Arquitectura del plan inválida: dependencia entre módulos no declarados.");
+    }
+    const identity2 = `${from}\x00${to}`;
+    if (seen.has(identity2))
+      continue;
+    seen.add(identity2);
+    result4.push({ from, to });
+  }
+  return result4;
+}
+function normalizeChange(value3) {
+  if (!isRecord17(value3))
+    throw new Error("Un cambio de arquitectura requiere el manifiesto change.");
+  assertExactKeys2(value3, ["rationale", "alternatives", "impact", "migration", "rollback"], "Cambio de arquitectura");
+  const text3 = (key) => {
+    const entry = value3[key];
+    if (typeof entry !== "string" || !entry.trim() || entry.length > 4000) {
+      throw new Error(`Cambio de arquitectura inválido: ${key}.`);
+    }
+    return entry.trim();
+  };
+  if (!Array.isArray(value3.alternatives) || value3.alternatives.length === 0 || value3.alternatives.length > 10 || value3.alternatives.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 2000)) {
+    throw new Error("Cambio de arquitectura inválido: alternatives.");
+  }
+  return {
+    rationale: text3("rationale"),
+    alternatives: value3.alternatives.map((entry) => entry.trim()),
+    impact: text3("impact"),
+    migration: text3("migration"),
+    rollback: text3("rollback")
+  };
+}
+function assertArchitectureSize(architecture) {
+  if (JSON.stringify(architecture).length > 16000) {
+    throw new Error("La arquitectura del plan es demasiado grande para una revisión firmada.");
+  }
+}
+function normalizeDocsRef(value3, field) {
+  if (typeof value3 !== "string" || value3.length === 0 || value3.length > 1024 || /[\u0000\r\n]/u.test(value3)) {
+    throw new Error(`Arquitectura del plan inválida: ${field} no evaluable.`);
+  }
+  const normalized = value3.trim();
+  const segments = normalized.split("/");
+  if (!normalized.endsWith(".md") || normalized.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Arquitectura del plan inválida: ${field} debe ser un Markdown relativo.`);
+  }
+  return normalized;
+}
+function normalizeContractPath(value3, field) {
+  if (typeof value3 !== "string" || value3.length === 0 || value3.length > 4096 || /[\u0000\r\n]/u.test(value3)) {
+    throw new Error(`Arquitectura inválida: ${field} no evaluable.`);
+  }
+  const normalized = value3.trim().replace(/\\/g, "/");
+  if (normalized === ".")
+    return normalized;
+  if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized) || normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Arquitectura inválida: ${field} debe ser una ruta relativa sin traversal.`);
+  }
+  return normalized;
+}
+function assertExactKeys2(value3, allowed, label) {
+  const set5 = new Set(allowed);
+  if (Object.keys(value3).some((key) => !set5.has(key)))
+    throw new Error(`${label}: campo no admitido.`);
+}
+function inside8(target, root) {
+  const relative = path28.relative(path28.resolve(root), path28.resolve(target));
+  return relative === "" || !relative.startsWith("..") && !path28.isAbsolute(relative);
+}
+function sha2564(value3) {
+  return createHash18("sha256").update(value3).digest("hex");
+}
+function isRecord17(value3) {
+  return typeof value3 === "object" && value3 !== null && !Array.isArray(value3);
+}
+var init_architecture_contract = __esm(() => {
+  init_config();
+  init_resolver();
+});
+
+// src/cli/core/task-classification.ts
+import { createHash as createHash19 } from "node:crypto";
 function parseTaskAssessment(value3) {
   const record5 = exactRecord4(value3, [
     "schema",
@@ -5155,7 +6247,7 @@ function deriveTaskDecision(assessment, context3) {
   };
   return {
     ...decision,
-    decisionRef: sha2564(JSON.stringify({
+    decisionRef: sha2565(JSON.stringify({
       schema: TASK_CLASSIFICATION_SCHEMA,
       context: normalizeContext(context3),
       assessment: normalizeAssessment(assessment),
@@ -5172,7 +6264,7 @@ function commitTaskDecision(context3) {
   };
   return {
     ...decision,
-    decisionRef: sha2564(JSON.stringify({
+    decisionRef: sha2565(JSON.stringify({
       schema: TASK_CLASSIFICATION_SCHEMA,
       context: normalizeContext(context3),
       operation: "commit",
@@ -5281,8 +6373,8 @@ function exactRecord4(value3, keys4, message) {
 function invalid5(message) {
   return new TaskClassificationError("TASK_ASSESSMENT_INVALID", message);
 }
-function sha2564(value3) {
-  return createHash18("sha256").update(value3).digest("hex");
+function sha2565(value3) {
+  return createHash19("sha256").update(value3).digest("hex");
 }
 var TASK_CLASSIFICATION_SCHEMA = 1, TASK_DECISION_SCHEMA = 1, SIGNAL_LEVELS, REQUESTED_EFFECTS, CLOSURE_ACTION, CLOSURE_TARGETS, CLOSURE_VERIFICATION, CLOSURE_DISCOVERY, PLACEHOLDERS, MAX_TEXT = 2000, MAX_OPEN_DECISIONS = 64, MAX_PREVIOUS_REF = 256, TaskClassificationError;
 var init_task_classification = __esm(() => {
@@ -5503,9 +6595,9 @@ __export(exports_direct_task_execution, {
   DIRECT_TASK_APPROVAL: () => DIRECT_TASK_APPROVAL,
   DIRECT_GRANT_MISMATCH: () => DIRECT_GRANT_MISMATCH
 });
-import { createHash as createHash19 } from "node:crypto";
-import fs22 from "node:fs";
-import path28 from "node:path";
+import { createHash as createHash20 } from "node:crypto";
+import fs23 from "node:fs";
+import path29 from "node:path";
 function createDirectTaskRegistry() {
   const grants = new Map;
   const completed = new Map;
@@ -5665,7 +6757,7 @@ function parseMutation(value3) {
   if (kind !== "edit" && kind !== "write" && kind !== "patch")
     throw new Error("Tipo de mutación directa inválido.");
   const target = text3(record5.path, "path");
-  if (!target || path28.isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target) || target.startsWith("~") || /[*?\[\]{}]/.test(target))
+  if (!target || path29.isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target) || target.startsWith("~") || /[*?\[\]{}]/.test(target))
     throw new Error("Ruta de mutación directa inválida.");
   const existence = record5.existence === "may-create" ? "may-create" : record5.existence === "must-exist" || record5.existence === undefined ? "must-exist" : undefined;
   if (!existence)
@@ -5695,11 +6787,11 @@ function parseVerification(value3) {
   return { kind: "shell", argv: [...record5.argv], ...cwd ? { cwd } : {} };
 }
 function compileEnvelope(input, scope3) {
-  const root = path28.resolve(scope3.root);
+  const root = path29.resolve(scope3.root);
   const actions = [];
   for (const mutation of input.mutations) {
-    const absolute = path28.resolve(root, mutation.path);
-    if (!inside8(absolute, root) || absolute === root)
+    const absolute = path29.resolve(root, mutation.path);
+    if (!inside9(absolute, root) || absolute === root)
       throw new Error(`Ruta de mutación fuera de la raíz: ${mutation.path}.`);
     if (isProtectedDocumentationPath(root, absolute) || classifyInfrastructurePath(root, absolute).protected) {
       throw new Error(`La tarea directa no cubre documentación protegida ni infraestructura: ${mutation.path}.`);
@@ -5713,7 +6805,7 @@ function compileEnvelope(input, scope3) {
     }
     if (exists2 && !isRegular(absolute))
       throw new Error(`La ruta no es un archivo regular: ${mutation.path}.`);
-    const relativePath = path28.relative(root, absolute).split(path28.sep).join("/");
+    const relativePath = path29.relative(root, absolute).split(path29.sep).join("/");
     const existence = mutation.existence ?? "must-exist";
     const intent = canonicalizeDirectTaskMutation({
       project: scope3.project,
@@ -5724,9 +6816,9 @@ function compileEnvelope(input, scope3) {
     })[0];
     if (!intent)
       throw new Error("La mutación directa no pudo canonicalizarse.");
-    const payloadDigest = sha2565(JSON.stringify(mutation.payload));
+    const payloadDigest = sha2566(JSON.stringify(mutation.payload));
     actions.push({
-      actionID: sha2565(JSON.stringify({ decisionRef: input.decisionRef, kind: mutation.kind, relativePath, payloadDigest })),
+      actionID: sha2566(JSON.stringify({ decisionRef: input.decisionRef, kind: mutation.kind, relativePath, payloadDigest })),
       kind: mutation.kind,
       relativePath,
       existence,
@@ -5734,8 +6826,8 @@ function compileEnvelope(input, scope3) {
     });
   }
   const verification = input.verification.map((item) => {
-    const cwd = item.cwd ? path28.resolve(root, item.cwd) : root;
-    if (!inside8(cwd, root))
+    const cwd = item.cwd ? path29.resolve(root, item.cwd) : root;
+    if (!inside9(cwd, root))
       throw new Error("El cwd de verificación queda fuera de la raíz.");
     const command = item.argv.join(" ");
     if (!classifyReadOnlyShellCommand(command, root, { workingDirectory: cwd }).readOnly) {
@@ -5750,12 +6842,12 @@ function compileEnvelope(input, scope3) {
     project: scope3.project,
     policyRevision: scope3.policyRevision,
     mode: scope3.mode,
-    rootDigest: sha2565(root),
+    rootDigest: sha2566(root),
     summary: input.summary,
     actions,
     verification
   };
-  return { ...unsigned, proof: sha2565(JSON.stringify(unsigned)) };
+  return { ...unsigned, proof: sha2566(JSON.stringify(unsigned)) };
 }
 function candidateForTool2(tool, value3) {
   if (!["edit", "write", "patch"].includes(tool))
@@ -5766,13 +6858,13 @@ function candidateForTool2(tool, value3) {
   const rawPath = tool === "patch" ? parsePatchOperations(typeof record5.patchText === "string" ? record5.patchText : "")[0]?.path : record5.path ?? record5.filePath;
   if (typeof rawPath !== "string" || !rawPath.trim())
     return;
-  const normalized = path28.normalize(rawPath).split(path28.sep).join("/");
+  const normalized = path29.normalize(rawPath).split(path29.sep).join("/");
   if (normalized.startsWith("../") || normalized === "..")
     return;
   return {
     kind: tool,
     relativePath: normalized,
-    payloadDigest: sha2565(JSON.stringify(value3))
+    payloadDigest: sha2566(JSON.stringify(value3))
   };
 }
 function normalizeScope4(scope3) {
@@ -5781,7 +6873,7 @@ function normalizeScope4(scope3) {
     project: scope3.project,
     policyRevision: scope3.policyRevision,
     mode: scope3.mode,
-    root: path28.resolve(scope3.root)
+    root: path29.resolve(scope3.root)
   };
 }
 function sameScope4(left2, right) {
@@ -5808,25 +6900,25 @@ function text3(value3, field) {
 }
 function existsRegular(target) {
   try {
-    return fs22.lstatSync(target).isFile();
+    return fs23.lstatSync(target).isFile();
   } catch {
     return false;
   }
 }
 function isRegular(target) {
   try {
-    const stat = fs22.lstatSync(target);
+    const stat = fs23.lstatSync(target);
     return stat.isFile() && !stat.isSymbolicLink();
   } catch {
     return false;
   }
 }
-function inside8(target, root) {
-  const relative = path28.relative(root, target);
-  return relative === "" || !relative.startsWith("..") && !path28.isAbsolute(relative);
+function inside9(target, root) {
+  const relative = path29.relative(root, target);
+  return relative === "" || !relative.startsWith("..") && !path29.isAbsolute(relative);
 }
-function sha2565(value3) {
-  return createHash19("sha256").update(value3).digest("hex");
+function sha2566(value3) {
+  return createHash20("sha256").update(value3).digest("hex");
 }
 var DIRECT_TASK_APPROVAL = "malahor_direct_task_execute", DIRECT_GRANT_MISMATCH = "DIRECT_GRANT_MISMATCH", MAX_ACTIONS = 32, MAX_VERIFICATIONS = 16, MAX_PAYLOAD_BYTES, DIRECT_TASK_INPUT_SCHEMA;
 var init_direct_task_execution = __esm(() => {
@@ -5878,407 +6970,17 @@ var init_direct_task_execution = __esm(() => {
 });
 
 // src/plugin/index.ts
-import fs23 from "node:fs";
+init_paths();
+init_planning_authority();
+init_context();
+init_project();
+import fs24 from "node:fs";
 import os2 from "node:os";
-import path29 from "node:path";
+import path30 from "node:path";
 import { isMainThread, workerData as workerData2 } from "node:worker_threads";
 
-// src/cli/core/paths.ts
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-function resolvePaths(env = process.env, cwd = process.cwd(), platform = process.platform) {
-  const pathApi = platform === "win32" ? path.win32 : path.posix;
-  const home = pathApi.resolve(resolveHome(env, platform));
-  const malahorHome = pathApi.resolve(cwd, env.MALAHOR_HOME ?? pathApi.join(home, ".malahor"));
-  const opencodeDir = pathApi.resolve(cwd, env.MALAHOR_OPENCODE_DIR ?? detectOpenCodeDir(env, cwd, pathApi, home));
-  return {
-    cwd,
-    home,
-    malahorHome,
-    mnemoDir: pathApi.join(malahorHome, "mnemo"),
-    mnemoDb: pathApi.join(malahorHome, "mnemo", "db.json"),
-    mnemoIndex: pathApi.join(malahorHome, "mnemo", "index.js"),
-    horielDir: pathApi.join(malahorHome, "horiel"),
-    horielDb: pathApi.join(malahorHome, "horiel", "horiel.sqlite"),
-    horielSnapshots: pathApi.join(malahorHome, "horiel", "snapshots"),
-    horielIndex: pathApi.join(malahorHome, "horiel", "index.js"),
-    docsDir: pathApi.join(malahorHome, "docs"),
-    docsIndex: pathApi.join(malahorHome, "docs", "index.js"),
-    assetsDir: pathApi.join(malahorHome, "assets"),
-    scriptsDir: pathApi.join(malahorHome, "scripts"),
-    secretsDir: pathApi.join(malahorHome, "secrets"),
-    projectsFile: pathApi.join(malahorHome, "projects.json"),
-    vaultDir: pathApi.join(malahorHome, "vault"),
-    configFile: pathApi.resolve(cwd, env.MALAHOR_CONFIG ?? pathApi.join(malahorHome, "config.jsonc")),
-    opencodeDir,
-    opencodeConfig: pathApi.join(opencodeDir, "opencode.jsonc"),
-    opencodePluginsDir: pathApi.join(opencodeDir, "plugins"),
-    opencodeSkillsDir: pathApi.join(opencodeDir, "skills"),
-    malahorPluginDir: pathApi.join(opencodeDir, "plugins", "malahor"),
-    pluginState: pathApi.join(malahorHome, "plugin-state.json"),
-    agentsMd: pathApi.join(opencodeDir, "AGENTS.md"),
-    opencodeMd: pathApi.join(opencodeDir, "OPENCODE.md"),
-    opencodeSdkState: pathApi.join(malahorHome, "opencode-sdk.json"),
-    backupsDir: pathApi.join(malahorHome, "backups")
-  };
-}
-function resolveWindowsHome(env) {
-  if (env.HOMEDRIVE && env.HOMEPATH) {
-    return `${env.HOMEDRIVE}${env.HOMEPATH}`;
-  }
-  return;
-}
-function resolveHome(env, platform) {
-  if (platform === "win32") {
-    return env.USERPROFILE ?? resolveWindowsHome(env) ?? env.HOME ?? os.homedir();
-  }
-  return env.HOME ?? os.homedir();
-}
-function detectOpenCodeDir(env, cwd, pathApi, home) {
-  const fallbackCandidates = fallbackOpenCodeCandidates(env, pathApi, home);
-  const detected = env.MALAHOR_OPENCODE_DETECT === "0" ? undefined : detectOpenCodeDirFromApi(env, cwd, pathApi, home, fallbackCandidates);
-  return detected ?? bestOpenCodeDir(fallbackCandidates, pathApi, home) ?? defaultOpenCodeDir(env, pathApi, home);
-}
-function detectOpenCodeDirFromApi(env, cwd, pathApi, home, fallbackCandidates) {
-  try {
-    const output = execFileSync(env.MALAHOR_OPENCODE_BIN ?? "opencode", ["api", "get", "/api/config"], {
-      cwd,
-      env,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000
-    });
-    return opencodeDirFromConfigApi(output, pathApi, home, fallbackCandidates);
-  } catch {
-    return;
-  }
-}
-function opencodeDirFromConfigApi(output, pathApi, home, fallbackCandidates) {
-  const parsed = JSON.parse(output);
-  const entries = Array.isArray(parsed) ? parsed : [parsed];
-  const documentDirs = entries.flatMap((entry) => collectConfigPaths(entry)).filter((entry) => /opencode\.jsonc?$/i.test(pathApi.basename(entry))).map((entry) => pathApi.dirname(entry));
-  const directoryDirs = entries.flatMap((entry) => collectConfigPaths(entry)).filter((entry) => pathApi.basename(entry).toLowerCase() === "opencode");
-  return bestOpenCodeDir([...documentDirs, ...directoryDirs, ...fallbackCandidates], pathApi, home);
-}
-function collectConfigPaths(value, depth = 0) {
-  if (depth > 4 || value === null || value === undefined)
-    return [];
-  if (typeof value === "string")
-    return looksLikeOpenCodePath(value) ? [value] : [];
-  if (Array.isArray(value))
-    return value.flatMap((item) => collectConfigPaths(item, depth + 1));
-  if (typeof value !== "object")
-    return [];
-  const record = value;
-  const ownPath = typeof record.path === "string" && record.path.trim() ? [record.path] : [];
-  return [...ownPath, ...Object.values(record).flatMap((item) => collectConfigPaths(item, depth + 1))].filter(looksLikeOpenCodePath);
-}
-function bestOpenCodeDir(candidates, pathApi, home) {
-  if (candidates.length === 0)
-    return;
-  return unique(candidates).sort((left, right) => scoreOpenCodeDir(right, pathApi, home) - scoreOpenCodeDir(left, pathApi, home))[0];
-}
-function scoreOpenCodeDir(candidate, pathApi, home) {
-  let score = 0;
-  const normalized = normalizeForCompare(candidate);
-  const preferred = normalizeForCompare(pathApi.join(home, ".config", "opencode"));
-  if (normalized === preferred)
-    score += 50;
-  if (pathApi.basename(candidate).toLowerCase() === "opencode")
-    score += 20;
-  if (fs.existsSync(candidate))
-    score += 10;
-  if (fs.existsSync(pathApi.join(candidate, "opencode.jsonc")))
-    score += 8;
-  if (fs.existsSync(pathApi.join(candidate, "opencode.json")))
-    score += 8;
-  if (fs.existsSync(pathApi.join(candidate, "commands")))
-    score += 4;
-  if (fs.existsSync(pathApi.join(candidate, "AGENTS.md")))
-    score += 2;
-  if (fs.existsSync(pathApi.join(candidate, "OPENCODE.md")))
-    score += 2;
-  return score;
-}
-function fallbackOpenCodeCandidates(env, pathApi, home) {
-  const xdgConfigHome = pathApi.resolve(env.XDG_CONFIG_HOME ?? pathApi.join(home, ".config"));
-  const candidates = [pathApi.join(xdgConfigHome, "opencode"), pathApi.join(home, ".config", "opencode")];
-  if (env.APPDATA)
-    candidates.push(pathApi.join(pathApi.resolve(env.APPDATA), "opencode"));
-  return unique(candidates);
-}
-function defaultOpenCodeDir(env, pathApi, home) {
-  return pathApi.join(pathApi.resolve(env.XDG_CONFIG_HOME ?? pathApi.join(home, ".config")), "opencode");
-}
-function looksLikeOpenCodePath(value) {
-  const normalized = normalizeForCompare(value);
-  return /(^|\/)opencode(\/opencode\.jsonc?)?$/.test(normalized);
-}
-function unique(values) {
-  const seen = new Set;
-  return values.filter((value) => {
-    const key = normalizeForCompare(value);
-    if (seen.has(key))
-      return false;
-    seen.add(key);
-    return true;
-  });
-}
-function normalizeForCompare(value) {
-  return value.replaceAll("\\", "/").replace(/\/+$/g, "").toLowerCase();
-}
-
-// src/plugin/index.ts
-init_planning_authority();
-
-// src/cli/core/context.ts
-import fs4 from "node:fs";
-import path4 from "node:path";
-
-// src/cli/core/project.ts
-import fs3 from "node:fs";
-import path3 from "node:path";
-var BUILT_IN_PROJECT_ALIASES = {
-  malahor: ["malaho", "MalaHor", "malahor ai", "malahor-ai", "malahor_ai", "malahorai"]
-};
-function resolveProject(cwd = process.cwd(), aliases = {}) {
-  const root = findProjectRoot(cwd);
-  const name = readPackageName(root) ?? path3.basename(root);
-  const canonicalKey = resolveCanonicalProjectKey(name, aliases);
-  return {
-    name,
-    canonicalKey,
-    root,
-    aliases: aliasesForProject(canonicalKey, aliases)
-  };
-}
-function resolveCanonicalProjectKey(project, aliases = {}) {
-  const lookup = projectLookupKey(project);
-  const allAliases = mergeAliases(BUILT_IN_PROJECT_ALIASES, aliases);
-  for (const [canonical, values] of Object.entries(allAliases)) {
-    const candidates = [canonical, ...values];
-    if (candidates.some((candidate) => projectLookupKey(candidate) === lookup)) {
-      return toCanonicalKey(canonical);
-    }
-  }
-  return toCanonicalKey(project);
-}
-function projectLookupKey(project) {
-  return project.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
-function findProjectRoot(cwd) {
-  let current = path3.resolve(cwd);
-  while (true) {
-    if (fs3.existsSync(path3.join(current, "package.json")) || fs3.existsSync(path3.join(current, ".git"))) {
-      return current;
-    }
-    const parent = path3.dirname(current);
-    if (parent === current)
-      return path3.resolve(cwd);
-    current = parent;
-  }
-}
-function readPackageName(cwd) {
-  const packagePath = path3.join(cwd, "package.json");
-  if (!fs3.existsSync(packagePath))
-    return null;
-  try {
-    const parsed = JSON.parse(fs3.readFileSync(packagePath, "utf8"));
-    if (typeof parsed === "object" && parsed !== null && typeof parsed.name === "string" && parsed.name.trim()) {
-      return parsed.name.trim();
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-function toCanonicalKey(value) {
-  return projectLookupKey(value) || "project";
-}
-function aliasesForProject(canonicalKey, aliases) {
-  const allAliases = mergeAliases(BUILT_IN_PROJECT_ALIASES, aliases);
-  return Object.entries(allAliases).filter(([canonical]) => toCanonicalKey(canonical) === canonicalKey).flatMap(([, values]) => values);
-}
-function mergeAliases(base, extra) {
-  const merged = { ...base };
-  for (const [canonical, values] of Object.entries(extra)) {
-    merged[canonical] = [...merged[canonical] ?? [], ...values];
-  }
-  return merged;
-}
-
-// src/cli/core/context.ts
-var CONTEXT_LEVELS = [
-  "memory",
-  "memory+codegraph",
-  "memory+codegraph+obsidian",
-  "mnemo",
-  "mnemo+graphify",
-  "mnemo+graphify+obsidian"
-];
-var DEFAULT_CONTEXT_LEVEL = "memory+codegraph";
-function resolveContextTarget(paths, aliases, override) {
-  if (override && override.trim()) {
-    const canonicalKey = resolveCanonicalProjectKey(override, aliases);
-    const registered = rootsForProject(paths.projectsFile, canonicalKey);
-    return {
-      name: override.trim(),
-      canonicalKey,
-      root: registered[0] ?? "",
-      registeredRoots: registered
-    };
-  }
-  const project = resolveRegisteredProject(paths, aliases);
-  return {
-    name: project.name,
-    canonicalKey: project.canonicalKey,
-    root: project.root,
-    registeredRoots: rootsForProject(paths.projectsFile, project.canonicalKey)
-  };
-}
-function resolveRegisteredProject(paths, aliases = {}, options = {}) {
-  const canonicalKey = options.override?.trim() ? resolveCanonicalProjectKey(options.override, aliases) : resolveProjectHint(paths, aliases, options.projectHint);
-  const absoluteTargets = (options.targetPaths ?? []).map((target) => path4.resolve(paths.cwd, target));
-  const registered = canonicalKey ? rootsForProject(paths.projectsFile, canonicalKey).map((root2) => ({ canonicalKey, root: root2 })) : registeredProjectRoots(paths.projectsFile).filter((entry) => isWithinPath(paths.cwd, entry.root) || absoluteTargets.some((target) => isWithinPath(target, entry.root))).sort((left, right) => right.root.length - left.root.length);
-  const root = options.preferredRoot ?? registered[0]?.root;
-  if (root) {
-    const resolved = resolveProject(root, aliases);
-    return {
-      ...resolved,
-      canonicalKey: canonicalKey ?? registered[0]?.canonicalKey ?? resolved.canonicalKey,
-      root
-    };
-  }
-  const fallback = resolveProject(paths.cwd, aliases);
-  return canonicalKey ? { ...fallback, canonicalKey } : fallback;
-}
-function resolveProjectHint(paths, aliases, hint) {
-  if (!hint?.trim())
-    return;
-  const projects = loadProjectsFile(paths.projectsFile);
-  const normalized = resolveCanonicalProjectKey(hint, aliases);
-  if (projects[normalized])
-    return normalized;
-  const rootSegment = hint.split("/")[0]?.trim();
-  if (!rootSegment || rootSegment === hint)
-    return normalized;
-  const rootKey = resolveCanonicalProjectKey(rootSegment, aliases);
-  return projects[rootKey] ? rootKey : normalized;
-}
-function parseContextLevel(value) {
-  if (typeof value !== "string" || !CONTEXT_LEVELS.includes(value)) {
-    throw new Error(`Nivel de contexto invalido: ${String(value)}. Consulta \`malahor-ai context help\`; los valores persistidos siguen en compatibilidad transitoria.`);
-  }
-  return value;
-}
-function loadProjectsFile(filePath) {
-  if (!fs4.existsSync(filePath)) {
-    return {};
-  }
-  const raw = fs4.readFileSync(filePath, "utf8").trim();
-  if (!raw)
-    return {};
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`No se pudo leer ${filePath}: ${error.message}`);
-  }
-  if (!isRecord(parsed)) {
-    throw new Error(`La configuracion ${filePath} no contiene un objeto JSON valido.`);
-  }
-  const result = {};
-  for (const [key, value] of Object.entries(parsed)) {
-    if (!isRecord(value)) {
-      throw new Error(`La configuracion ${filePath} en ${key} debe ser un objeto.`);
-    }
-    try {
-      const roots = readRoots(value.roots, `${filePath} en ${key}.roots`);
-      const defaultRoot = readRoot(value.defaultRoot, `${filePath} en ${key}.defaultRoot`);
-      const docs = readDocsConfig(value.docs, `${filePath} en ${key}.docs`);
-      result[key] = {
-        context: parseContextLevel(value.context),
-        ...roots.length > 0 ? { roots } : {},
-        ...defaultRoot ? { defaultRoot } : {},
-        ...docs ? { docs } : {}
-      };
-    } catch (error) {
-      throw new Error(`La configuracion ${filePath} en ${key}: ${error.message}`);
-    }
-  }
-  return result;
-}
-function levelForProject(projectsFile, canonicalKey) {
-  return loadProjectsFile(projectsFile)[canonicalKey]?.context ?? DEFAULT_CONTEXT_LEVEL;
-}
-function rootsForProject(projectsFile, canonicalKey) {
-  const entry = loadProjectsFile(projectsFile)[canonicalKey];
-  if (!entry)
-    return [];
-  const roots = entry.roots ?? [];
-  const preferred = entry.defaultRoot && roots.includes(entry.defaultRoot) ? [entry.defaultRoot] : [];
-  return [...preferred, ...roots.filter((root) => !preferred.includes(root))];
-}
-function registeredProjectRoots(projectsFile) {
-  const projects = loadProjectsFile(projectsFile);
-  return Object.entries(projects).flatMap(([canonicalKey, entry]) => (entry.roots ?? []).map((root) => ({ canonicalKey, root })));
-}
-function normalizeRoot(root) {
-  const resolved = path4.resolve(root);
-  try {
-    return fs4.realpathSync(resolved);
-  } catch {
-    return resolved;
-  }
-}
-function readRoots(value, key) {
-  if (value === undefined || value === null)
-    return [];
-  if (!Array.isArray(value))
-    throw new Error(`La configuracion ${key} debe ser una lista de strings.`);
-  return value.filter((item) => typeof item === "string" && Boolean(item.trim())).map(normalizeRoot);
-}
-function readRoot(value, key) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (typeof value !== "string")
-    throw new Error(`La configuracion ${key} debe ser un string.`);
-  return normalizeRoot(value);
-}
-function readDocsConfig(value, key) {
-  if (value === undefined || value === null)
-    return;
-  if (!isRecord(value))
-    throw new Error(`La configuracion ${key} debe ser un objeto.`);
-  const docsPath = readDocsPath(value.path, `${key}.path`);
-  const unknown = Object.keys(value).filter((name) => name !== "path");
-  if (unknown.length > 0)
-    throw new Error(`La configuracion ${key} contiene campos desconocidos: ${unknown.join(", ")}.`);
-  return docsPath ? { path: docsPath } : {};
-}
-function readDocsPath(value, key) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (typeof value !== "string")
-    throw new Error(`La configuracion ${key} debe ser un string.`);
-  if (!path4.isAbsolute(value))
-    throw new Error(`La configuracion ${key} debe ser una ruta absoluta externa.`);
-  return path4.resolve(value);
-}
-function codegraphEnabled(level) {
-  return level === "memory+codegraph" || level === "memory+codegraph+obsidian";
-}
-function isWithinPath(value, root) {
-  const relative = path4.relative(path4.resolve(root), path4.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path4.isAbsolute(relative);
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 // src/cli/core/codegraph-runtime.ts
+init_context();
 import { createHash as createHash2 } from "node:crypto";
 import fs5 from "node:fs";
 import path5 from "node:path";
@@ -6432,59 +7134,9 @@ function inside(value, root) {
 }
 
 // src/cli/core/hooks/policy-loader.ts
+init_project();
 import fs6 from "node:fs";
 import path6 from "node:path";
-
-// src/cli/core/jsonc.ts
-function stripJsonComments(input) {
-  let output = "";
-  let inString = false;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-  for (let index = 0;index < input.length; index += 1) {
-    const current = input[index];
-    const next = input[index + 1];
-    if (inLineComment) {
-      if (current === `
-`) {
-        inLineComment = false;
-        output += current;
-      }
-      continue;
-    }
-    if (inBlockComment) {
-      if (current === "*" && next === "/") {
-        inBlockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-    if (!inString && current === "/" && next === "/") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-    if (!inString && current === "/" && next === "*") {
-      inBlockComment = true;
-      index += 1;
-      continue;
-    }
-    output += current;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (current === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (current === '"') {
-      inString = !inString;
-    }
-  }
-  return output;
-}
 
 // src/cli/core/hooks/security-policy.ts
 import { createHash as createHash3 } from "node:crypto";
@@ -7553,6 +8205,7 @@ function isTextPart(value) {
 }
 
 // src/plugin/memory-nudge.ts
+init_project();
 import path7 from "node:path";
 var MALAHOR_MEMORY_NUDGE_MARKER = "<!-- malahor-memory-nudge:v1 -->";
 var DEFAULT_MEMORY_STALE_MINUTES = 15;
@@ -7689,6 +8342,7 @@ function isTextPart2(value) {
 }
 
 // src/plugin/events.ts
+init_project();
 import path8 from "node:path";
 var SESSION_LIFECYCLE_EVENTS = new Set([
   "session.created",
@@ -7816,6 +8470,9 @@ function recordValue2(value) {
 }
 
 // src/cli/core/hooks/plugin-adapter.ts
+init_context();
+init_paths();
+init_project();
 import { execFileSync as execFileSync4 } from "node:child_process";
 import path16 from "node:path";
 
@@ -8298,6 +8955,7 @@ function isRecord3(value) {
 }
 
 // src/cli/core/hooks/rules.ts
+init_context();
 import { execFileSync as execFileSync3 } from "node:child_process";
 import fs11 from "node:fs";
 import path15 from "node:path";
@@ -10518,175 +11176,11 @@ function isRecord4(value) {
 }
 
 // src/plugin/planning.ts
+init_config();
+init_context();
 import { createHash as createHash15 } from "node:crypto";
 import fs19 from "node:fs";
 import path23 from "node:path";
-
-// src/cli/core/config.ts
-import { createHash as createHash6 } from "node:crypto";
-import fs12 from "node:fs";
-
-// src/docs/client.ts
-var DOCS_CLIENTS = ["system", "vscode", "obsidian"];
-function parseDocsClient(value, key = "cliente documental") {
-  if (typeof value === "string" && DOCS_CLIENTS.includes(value.toLowerCase())) {
-    return value.toLowerCase();
-  }
-  throw new Error(`${key} debe ser system, vscode u obsidian.`);
-}
-
-// src/cli/core/config.ts
-function loadConfig(env = process.env, cwd = process.cwd()) {
-  const defaultPaths = resolvePaths(env, cwd);
-  const fileConfig = readConfigFile(defaultPaths.configFile);
-  const executionConfig = readOptionalObject(fileConfig.execution, "execution");
-  const docsConfig = readOptionalObject(fileConfig.docs, "docs");
-  const projectsConfig = readOptionalObject(fileConfig.projects, "projects");
-  const paths = resolvePaths({ ...resolvePathEnv(env, fileConfig), MALAHOR_CONFIG: defaultPaths.configFile }, cwd);
-  const legacyMode = env.MALAHOR_MODE ?? fileConfig.mode;
-  if (legacyMode !== undefined)
-    resolveMode(legacyMode);
-  const execution = resolveExecutionPolicy(env, executionConfig, legacyMode);
-  return {
-    mode: modeForIntervention(execution.intervention),
-    paths,
-    execution,
-    docs: {
-      client: readDocsClient(docsConfig?.client)
-    },
-    projects: {
-      aliases: readProjectAliases(projectsConfig?.aliases)
-    }
-  };
-}
-function readDocsClient(value) {
-  if (value === undefined || value === null || value === "")
-    return "system";
-  return parseDocsClient(value, "La configuracion docs.client");
-}
-function resolveMode(value = process.env.MALAHOR_MODE) {
-  if (value === undefined || value === null || value === "") {
-    return "assistant";
-  }
-  if (value === "advisor" || value === "assistant" || value === "executor") {
-    return value;
-  }
-  throw new Error(`Modo Malahor invalido: ${String(value)}. Usa "advisor", "assistant" o "executor".`);
-}
-function modeForIntervention(intervention) {
-  switch (intervention) {
-    case "acompanar":
-      return "advisor";
-    case "guiar":
-      return "assistant";
-    case "ejecutar":
-      return "executor";
-  }
-}
-function readConfigFile(filePath) {
-  if (!fs12.existsSync(filePath)) {
-    return {};
-  }
-  const raw = fs12.readFileSync(filePath, "utf8").trim();
-  if (!raw)
-    return {};
-  try {
-    const parsed = JSON.parse(stripJsonComments(raw));
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return parsed;
-    }
-  } catch (error) {
-    throw new Error(`No se pudo leer ${filePath}: ${error.message}`);
-  }
-  throw new Error(`La configuracion ${filePath} no contiene un objeto JSON valido.`);
-}
-function resolvePathEnv(env, config) {
-  const pathConfig = readOptionalObject(config.paths, "paths");
-  return {
-    ...env,
-    MALAHOR_HOME: env.MALAHOR_HOME ?? readOptionalString(pathConfig?.malahorHome, "paths.malahorHome"),
-    MALAHOR_OPENCODE_DIR: env.MALAHOR_OPENCODE_DIR ?? readOptionalString(pathConfig?.opencodeDir, "paths.opencodeDir")
-  };
-}
-function resolveExecutionPolicy(env, config, legacyMode) {
-  const legacyIntervention = legacyMode === undefined || legacyMode === null || legacyMode === "" ? undefined : { advisor: "acompanar", assistant: "guiar", executor: "ejecutar" }[resolveMode(legacyMode)];
-  const intervention = readIntervention(env.MALAHOR_EXECUTION_INTERVENTION ?? config?.intervention ?? legacyIntervention, "execution.intervention");
-  const verification = readOptionalBoolean(env.MALAHOR_EXECUTION_VERIFICATION ?? config?.verification, "execution.verification");
-  const revision = readExecutionRevision(config?.revision, intervention);
-  return {
-    intervention,
-    verification: intervention === "acompanar" ? false : verification ?? true,
-    revision
-  };
-}
-function readExecutionRevision(value, intervention) {
-  if (value === undefined || value === null || value === "") {
-    return createHash6("sha256").update(`malahor.execution.legacy:${intervention}`).digest("hex").slice(0, 32);
-  }
-  if (typeof value === "string" && /^[a-f0-9]{32}$/.test(value))
-    return value;
-  throw new Error("La configuracion execution.revision debe ser un identificador hexadecimal de 32 caracteres.");
-}
-function readIntervention(value, key) {
-  if (value === undefined || value === null || value === "") {
-    return "guiar";
-  }
-  if (value === "ejecutar" || value === "guiar" || value === "acompanar") {
-    return value;
-  }
-  throw new Error(`La configuracion ${key} debe ser "ejecutar", "guiar" o "acompanar".`);
-}
-function readProjectAliases(value) {
-  if (value === undefined || value === null) {
-    return {};
-  }
-  const aliases = readOptionalObject(value, "projects.aliases") ?? {};
-  const result = {};
-  for (const [canonical, rawAliases] of Object.entries(aliases)) {
-    const parsedAliases = readStringList(rawAliases, `projects.aliases.${canonical}`);
-    if (canonical.trim() && parsedAliases.length > 0) {
-      result[canonical.trim()] = parsedAliases;
-    }
-  }
-  return result;
-}
-function readOptionalObject(value, key) {
-  if (value === undefined || value === null) {
-    return;
-  }
-  if (typeof value === "object" && !Array.isArray(value)) {
-    return value;
-  }
-  throw new Error(`La configuracion ${key} debe ser un objeto.`);
-}
-function readOptionalString(value, key) {
-  if (value === undefined || value === null || value === "") {
-    return;
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  throw new Error(`La configuracion ${key} debe ser un string.`);
-}
-function readStringList(value, key) {
-  if (!Array.isArray(value)) {
-    throw new Error(`La configuracion ${key} debe ser una lista de strings.`);
-  }
-  return value.map((item, index) => readOptionalString(item, `${key}.${index}`)).filter((item) => Boolean(item));
-}
-function readOptionalBoolean(value, key) {
-  if (value === undefined || value === null || value === "") {
-    return;
-  }
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (value === "true")
-    return true;
-  if (value === "false")
-    return false;
-  throw new Error(`La configuracion ${key} debe ser boolean.`);
-}
 
 // src/cli/core/mode.ts
 import { createHash as createHash7, randomBytes as randomBytes3 } from "node:crypto";
@@ -12016,6 +12510,9 @@ function applyEdits(text, edits) {
   return text;
 }
 
+// src/cli/core/mode.ts
+init_config();
+
 // src/cli/core/backup.ts
 function timestamp() {
   return new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
@@ -12182,6 +12679,7 @@ function hash(input) {
 }
 
 // src/plugin/planning.ts
+init_paths();
 init_action_intent();
 
 // src/cli/core/authorization-decision.ts
@@ -12327,149 +12825,7 @@ init_planning();
 init_plan_presentation();
 init_documentation_boundary();
 init_read_only_shell_policy();
-
-// src/docs/resolver.ts
-import fs16 from "node:fs";
-import path20 from "node:path";
-var MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
-function resolveDocsProject(paths, aliases = {}, requestedProject, pathOverride) {
-  const target = resolveContextTarget(paths, aliases, requestedProject);
-  const projects = loadProjectsFile(paths.projectsFile);
-  return resolveDocsConfiguration(paths, target.canonicalKey, projects, pathOverride);
-}
-function resolveDocsConfiguration(paths, canonicalKey, projects, pathOverride) {
-  const entry = projects[canonicalKey];
-  if (!entry || !entry.roots?.length) {
-    throw new Error(`El proyecto ${canonicalKey} no esta registrado con una raiz de codigo.`);
-  }
-  assertProjectKey(canonicalKey);
-  const caseCollision = Object.keys(projects).find((key) => key !== canonicalKey && key.toLowerCase() === canonicalKey.toLowerCase());
-  if (caseCollision)
-    throw new Error(`Las claves ${canonicalKey} y ${caseCollision} colisionan en filesystems sin distincion de mayusculas.`);
-  const configured = pathOverride?.trim() || entry.docs?.path;
-  const plannedVaultRoot = path20.resolve(paths.vaultDir);
-  assertNoSymlinkComponents(plannedVaultRoot);
-  const vaultRoot = canonicalPlannedPath3(plannedVaultRoot);
-  const plannedDefaultRoot = path20.join(vaultRoot, "projects", canonicalKey);
-  assertNoSymlinkComponents(plannedDefaultRoot);
-  const defaultRoot = canonicalPlannedPath3(plannedDefaultRoot);
-  const plannedConfiguredRoot = configured ? path20.resolve(configured) : undefined;
-  if (plannedConfiguredRoot)
-    assertNoSymlinkComponents(plannedConfiguredRoot);
-  const configuredRoot = plannedConfiguredRoot ? canonicalPlannedPath3(plannedConfiguredRoot) : undefined;
-  const source = configuredRoot && !samePath(configuredRoot, defaultRoot) ? "override" : "default";
-  const projectRoot = source === "override" ? configuredRoot : defaultRoot;
-  const repositoryRoots = Object.values(projects).flatMap((project) => project.roots ?? []);
-  assertExternalDocsRoot(projectRoot, repositoryRoots);
-  if (source === "default") {
-    assertExternalDocsRoot(vaultRoot, repositoryRoots);
-  } else {
-    assertExternalOverride(projectRoot, paths.malahorHome, vaultRoot);
-  }
-  assertIsolatedProjectRoot(projectRoot, canonicalKey, projects, vaultRoot);
-  return {
-    project: canonicalKey,
-    projectRoot,
-    vaultRoot,
-    source,
-    initialized: secureDirectoryExists(projectRoot)
-  };
-}
-function assertExternalDocsRoot(candidate, repositoryRoots) {
-  const root = canonicalPlannedPath3(candidate);
-  if (isSandboxPath(root))
-    return;
-  const containingRepository = repositoryAncestor(root);
-  if (containingRepository) {
-    throw new Error(`La raiz documental debe estar fuera de repositorios: ${root} esta dentro de ${containingRepository}.`);
-  }
-  for (const repository of repositoryRoots) {
-    const codeRoot = canonicalPlannedPath3(repository);
-    if (isWithin4(root, codeRoot) || isWithin4(codeRoot, root)) {
-      throw new Error(`La raiz documental debe estar fuera de repositorios: ${root} entra en conflicto con ${codeRoot}.`);
-    }
-  }
-}
-function isSandboxPath(value) {
-  return path20.resolve(value).split(path20.sep).includes(".sandbox");
-}
-function assertProjectKey(value) {
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?$/.test(value) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value)) {
-    throw new Error(`Clave canonica no portable para el vault: ${value}`);
-  }
-}
-function canonicalPlannedPath3(value) {
-  const resolved = path20.resolve(value);
-  let current = resolved;
-  const suffix = [];
-  while (!fs16.existsSync(current)) {
-    const parent = path20.dirname(current);
-    if (parent === current)
-      break;
-    suffix.unshift(path20.basename(current));
-    current = parent;
-  }
-  const canonical3 = fs16.existsSync(current) ? fs16.realpathSync(current) : current;
-  return path20.resolve(canonical3, ...suffix);
-}
-function assertExternalOverride(projectRoot, malahorHome, vaultRoot) {
-  const home = canonicalPlannedPath3(malahorHome);
-  if (isWithin4(projectRoot, home) || isWithin4(home, projectRoot) || isWithin4(projectRoot, vaultRoot) || isWithin4(vaultRoot, projectRoot)) {
-    throw new Error(`El override documental debe ser externo a MALAHOR_HOME: ${projectRoot}`);
-  }
-}
-function assertIsolatedProjectRoot(projectRoot, project, projects, vaultRoot) {
-  for (const [otherProject, entry] of Object.entries(projects)) {
-    if (otherProject === project)
-      continue;
-    assertProjectKey(otherProject);
-    const otherRoot = canonicalPlannedPath3(entry.docs?.path ?? path20.join(vaultRoot, "projects", otherProject));
-    if (isWithin4(projectRoot, otherRoot) || isWithin4(otherRoot, projectRoot)) {
-      throw new Error(`Las raices documentales de ${project} y ${otherProject} se solapan: ${projectRoot} / ${otherRoot}.`);
-    }
-  }
-}
-function secureDirectoryExists(target) {
-  if (!fs16.existsSync(target))
-    return false;
-  assertNoSymlinkComponents(target);
-  const stat = fs16.lstatSync(target);
-  if (stat.isSymbolicLink() || !stat.isDirectory())
-    throw new Error(`La raiz documental no es un directorio real: ${target}`);
-  if (!samePath(fs16.realpathSync(target), path20.resolve(target)))
-    throw new Error(`La raiz documental usa un symlink: ${target}`);
-  return true;
-}
-function repositoryAncestor(target) {
-  for (let current = path20.resolve(target);; current = path20.dirname(current)) {
-    if (fs16.existsSync(path20.join(current, ".git")))
-      return current;
-    if (path20.dirname(current) === current)
-      return;
-  }
-}
-function assertNoSymlinkComponents(target) {
-  for (let current = path20.resolve(target);; current = path20.dirname(current)) {
-    try {
-      if (fs16.lstatSync(current).isSymbolicLink())
-        throw new Error(`Ruta con symlink no permitida: ${current}`);
-    } catch (error) {
-      if (error.code !== "ENOENT")
-        throw error;
-    }
-    if (path20.dirname(current) === current)
-      return;
-  }
-}
-function samePath(left, right) {
-  const normalizedLeft = path20.resolve(left);
-  const normalizedRight = path20.resolve(right);
-  return process.platform === "win32" ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase() : normalizedLeft === normalizedRight;
-}
-function isWithin4(value, root) {
-  const relative = path20.relative(path20.resolve(root), path20.resolve(value));
-  return relative === "" || !relative.startsWith("..") && !path20.isAbsolute(relative);
-}
+init_resolver();
 
 // src/plugin/plan-retention.ts
 init_planning();
@@ -12693,7 +13049,7 @@ function createCandidateRecord(parent, candidate, checkpoint, authority) {
   return sealCandidate(unsigned, authority);
 }
 function revisionDeltaForPlans(parent, candidate) {
-  const delta = revisionDelta(actionGraphForPlan(parent), actionGraphForPlan(candidate));
+  const delta = revisionDelta(parent, candidate);
   if (!sameRevisionContent(parent, candidate))
     delta.planChanged = true;
   return delta;
@@ -12713,40 +13069,67 @@ function sameRevisionContent(parent, candidate) {
     specHash: candidate.specHash
   });
 }
-function revisionDelta(parentGraph, candidateGraph) {
+function revisionDelta(parent, candidate) {
+  const parentGraph = actionGraphForPlan(parent);
+  const candidateGraph = actionGraphForPlan(candidate);
   const parentByKey = new Map(parentGraph.map((node) => [node.key, node]));
   const candidateByKey = new Map(candidateGraph.map((node) => [node.key, node]));
+  const parentKeyByID = new Map(parentGraph.map((node) => [node.actionID, node.key]));
+  const candidateKeyByID = new Map(candidateGraph.map((node) => [node.actionID, node.key]));
+  const parentEffects = logicalEffects(parent);
+  const candidateEffects = logicalEffects(candidate);
   const delta = { preserved: [], changed: [], added: [], removed: [] };
-  for (const parent of parentGraph) {
-    const candidate = candidateByKey.get(parent.key);
-    if (!candidate) {
-      delta.removed.push(parent.actionID);
+  for (const parentNode of parentGraph) {
+    const candidateNode = candidateByKey.get(parentNode.key);
+    if (!candidateNode) {
+      delta.removed.push(parentNode.actionID);
       continue;
     }
-    if (candidate.actionID === parent.actionID && sameSet(candidate.dependsOn, parent.dependsOn)) {
-      delta.preserved.push(parent.actionID);
+    const sameEffect = parentEffects.get(parentNode.key) === candidateEffects.get(candidateNode.key);
+    const sameDependencies = sameSet(dependencyKeys(parentNode, parentKeyByID), dependencyKeys(candidateNode, candidateKeyByID));
+    if (sameEffect && sameDependencies) {
+      delta.preserved.push(candidateNode.actionID);
     } else {
-      delta.changed.push(parent.actionID);
+      delta.changed.push(parentNode.actionID);
     }
   }
-  for (const candidate of candidateGraph) {
-    if (!parentByKey.has(candidate.key))
-      delta.added.push(candidate.actionID);
+  for (const candidateNode of candidateGraph) {
+    if (!parentByKey.has(candidateNode.key))
+      delta.added.push(candidateNode.actionID);
   }
   for (const values of Object.values(delta))
     values.sort(compareText3);
   return delta;
 }
+function logicalEffects(state) {
+  const intentByID = new Map(state.actionIntents.map((intent) => [intent.actionID, intent]));
+  const effects = new Map;
+  for (const node of actionGraphForPlan(state)) {
+    const intent = intentByID.get(node.actionID);
+    effects.set(node.key, intent ? canonical3({
+      kind: intent.kind,
+      logicalKey: intent.logicalKey,
+      effect: intent.effect,
+      resources: intent.resources.map((resource) => resource.canonicalPath),
+      command: intent.command?.argv,
+      delegate: intent.delegate?.agent
+    }) : node.actionID);
+  }
+  return effects;
+}
+function dependencyKeys(node, keyByID) {
+  return node.dependsOn.map((actionID) => keyByID.get(actionID) ?? actionID).sort(compareText3);
+}
 function carryCheckpointForward(parentCheckpoint, parentGraphInput, child, childGraphInput, delta, now, authority) {
   const parentGraph = normalizeGraph(parentGraphInput);
   const childGraph = normalizeGraph(childGraphInput);
-  const parentByID = new Map(parentGraph.map((node) => [node.actionID, node]));
+  const parentByKey = new Map(parentGraph.map((node) => [node.key, node]));
   const preserved = new Set(delta.preserved);
   const nodes = {};
   for (const node of childGraph) {
-    const parentNode = parentCheckpoint.nodes[node.actionID];
-    const parentDefinition = parentByID.get(node.actionID);
-    const canCarrySuccess = !node.key.startsWith("quality-") && preserved.has(node.actionID) && parentNode?.state === "succeeded" && parentDefinition && sameSet(parentDefinition.dependsOn, node.dependsOn);
+    const parentNodeByKey = parentByKey.get(node.key);
+    const parentNode = parentNodeByKey ? parentCheckpoint.nodes[parentNodeByKey.actionID] : undefined;
+    const canCarrySuccess = !node.key.startsWith("quality-") && preserved.has(node.actionID) && parentNode?.state === "succeeded";
     nodes[node.actionID] = {
       key: node.key,
       actionID: node.actionID,
@@ -15808,6 +16191,48 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             required: ["edits"],
             additionalProperties: false
           },
+          architecture: {
+            type: "object",
+            properties: {
+              mode: { type: "string", enum: ["respect", "change"] },
+              contractRef: { type: "string" },
+              contractHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+              modules: { type: "array", items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  path: { type: "string" },
+                  layer: { type: "string" },
+                  reason: { type: "string" }
+                },
+                required: ["id", "path", "layer", "reason"],
+                additionalProperties: false
+              } },
+              dependencies: { type: "array", items: {
+                type: "object",
+                properties: {
+                  from: { type: "string" },
+                  to: { type: "string" }
+                },
+                required: ["from", "to"],
+                additionalProperties: false
+              } },
+              change: {
+                type: "object",
+                properties: {
+                  rationale: { type: "string" },
+                  alternatives: { type: "array", items: { type: "string" } },
+                  impact: { type: "string" },
+                  migration: { type: "string" },
+                  rollback: { type: "string" }
+                },
+                required: ["rationale", "alternatives", "impact", "migration", "rollback"],
+                additionalProperties: false
+              }
+            },
+            required: ["mode", "contractRef", "contractHash", "modules"],
+            additionalProperties: false
+          },
           dependencies: { type: "array", items: {
             type: "object",
             properties: { planID: { type: "string" }, revision: { type: "string" } },
@@ -15858,13 +16283,64 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         const normalizedActions = normalizePlannedActions(actions ?? []);
         const preflightGate = options.planningPreflight;
         if (preflightGate && normalizedActions.some((item) => item.action === "edit")) {
+          let completedKeys = [];
+          const activePlan = await readPlan(storage, resolved.scope.sessionID, authority);
+          if (activePlan?.version === 5 && (activePlan.phase === "running" || activePlan.phase === "paused")) {
+            try {
+              const activeCheckpoint = await recoveryForState(activePlan, storage, authority, resolved.directory, projectRoot).snapshot();
+              const activeGraph = actionGraphForPlan(activePlan);
+              completedKeys = activeGraph.filter((node) => activeCheckpoint.nodes[node.actionID]?.state === "succeeded").map((node) => node.key);
+            } catch {
+              completedKeys = [];
+            }
+          }
           preflightGate.validate({
             root: projectRoot,
             directory: resolved.directory,
             actions: normalizedActions,
             verification: raw.verification,
-            preflight: raw.preflight
+            preflight: raw.preflight,
+            completedKeys
           });
+        }
+        const architectureGate = options.architectureGate;
+        if (architectureGate && normalizedActions.some((item) => item.action === "edit")) {
+          const result = architectureGate.validate({
+            architecture: raw.architecture,
+            actions: normalizedActions,
+            level: raw.level,
+            presentation: raw.presentation,
+            project: resolved.scope.project,
+            projectRoot,
+            directory: resolved.directory,
+            env: options.env
+          });
+          raw.architecture = result.architecture;
+          if (result.changeHash) {
+            const approved = result.architecture;
+            await approvals.assert({
+              sessionID: resolved.scope.sessionID,
+              agent: call.agent,
+              source: { type: "tool", messageID: call.messageID, id: call.id },
+              action: "malahor_plan_architecture",
+              resources: [resolved.scope.project, approved.contractRef, approved.contractHash, result.changeHash],
+              save: []
+            });
+            const fresh = await requireScope(call, options);
+            if (fresh.scope.sessionID !== resolved.scope.sessionID || fresh.scope.project !== resolved.scope.project || fresh.scope.policyRevision !== resolved.scope.policyRevision || fresh.directory !== resolved.directory) {
+              throw new Error("El proyecto, la sesión o la política cambiaron durante la autorización de arquitectura.");
+            }
+            architectureGate.validate({
+              architecture: raw.architecture,
+              actions: normalizedActions,
+              level: raw.level,
+              presentation: raw.presentation,
+              project: resolved.scope.project,
+              projectRoot,
+              directory: resolved.directory,
+              env: options.env
+            });
+          }
         }
         const intentContext = {
           project: resolved.scope.project,
@@ -16729,8 +17205,10 @@ function selectActionIDs(state, checkpoint, actionIDs) {
   if (kind !== "edit")
     return actionIDs;
   const actionable = actionIDs.filter((actionID) => {
-    const nodeState = checkpoint.nodes[actionID]?.state;
-    return nodeState === "ready" || nodeState === "failed";
+    const node = checkpoint.nodes[actionID];
+    if (!node || node.state !== "ready" && node.state !== "failed")
+      return false;
+    return node.dependsOn.every((dependency) => checkpoint.nodes[dependency]?.state === "succeeded");
   });
   return actionable.length > 0 ? actionable.slice(0, 1) : actionIDs.slice(0, 1);
 }
@@ -16739,11 +17217,19 @@ async function authorizeCheckpointActions(state, actionIDs, storage, authority, 
     return { effect: "deny", code: "ACTION_NOT_DECLARED" };
   try {
     const recovery = recoveryForState(state, storage, authority, directory, projectRoot);
-    const checkpoint = await recovery.snapshot();
-    const selected = selectActionIDs(state, checkpoint, actionIDs);
+    let checkpoint = await recovery.snapshot();
+    let selected = selectActionIDs(state, checkpoint, actionIDs);
     const requested = new Set(selected);
     for (const actionID of selected) {
-      const decision = await recovery.evaluateAction(actionID);
+      let decision = await recovery.evaluateAction(actionID);
+      if (decision.effect === "deny" && decision.code === "DEPENDENCY_BLOCKED") {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        checkpoint = await recovery.snapshot();
+        selected = selectActionIDs(state, checkpoint, actionIDs);
+        if (selected.length === 1 && selected[0] === actionID) {
+          decision = await recovery.evaluateAction(actionID);
+        }
+      }
       if (decision.effect === "deny") {
         if (decision.code === "ACTION_IN_FLIGHT" && call && reservationOwnedByCall(checkpoint, actionID, call))
           continue;
@@ -17122,7 +17608,13 @@ function deny2(input, message) {
   input.message = `[malahor.plan] ${message}`;
 }
 
+// src/plugin/mode-command.ts
+init_config();
+init_context();
+
 // src/cli/core/mode-hooks.ts
+init_config();
+init_context();
 function assertModeWriteAllowed(configFile, backupsDir, cwd, env, harness, approval) {
   const config = loadConfig(env, cwd);
   const project = resolveRegisteredProject(config.paths, config.projects.aliases);
@@ -39596,6 +40088,7 @@ var getCurrent = getCurrentFiber;
 var runIn = fiberRunIn;
 // src/plugin/code-mode.ts
 init_infrastructure_boundary();
+init_paths();
 init_secret_scan();
 
 // src/plugin/code-mode-redaction.ts
@@ -56241,6 +56734,9 @@ function sha2563(value3) {
 }
 
 // src/plugin/project-affinity.ts
+init_config();
+init_context();
+init_project();
 import path26 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 var PROJECT_AFFINITY_MARKER = "<!-- malahor-project-affinity:v1 -->";
@@ -56560,12 +57056,12 @@ var SESSION_HOOKS = [
   "session.http-response.after"
 ];
 function detectHost(value3) {
-  if (!isRecord17(value3))
+  if (!isRecord18(value3))
     return "unknown";
-  const isV2 = isRecord17(value3.session) && typeof value3.session.hook === "function" || isRecord17(value3.mcp) && typeof value3.mcp.transform === "function" || isRecord17(value3.agent) && typeof value3.agent.transform === "function";
+  const isV2 = isRecord18(value3.session) && typeof value3.session.hook === "function" || isRecord18(value3.mcp) && typeof value3.mcp.transform === "function" || isRecord18(value3.agent) && typeof value3.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord17(value3.client) && isRecord17(value3.project) && typeof value3.directory === "string";
+  const isV1 = isRecord18(value3.client) && isRecord18(value3.project) && typeof value3.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -56611,7 +57107,7 @@ async function setupV2(context3) {
   };
   const domain = (name) => {
     const value3 = context3[name];
-    if (!isRecord17(value3) || typeof value3.hook !== "function")
+    if (!isRecord18(value3) || typeof value3.hook !== "function")
       return;
     return value3;
   };
@@ -56665,8 +57161,8 @@ async function setupV2(context3) {
     };
     options.resolveParentSession = async (sessionID) => {
       const raw = await session.get?.({ sessionID });
-      const value3 = isRecord17(raw) && isRecord17(raw.data) ? raw.data : raw;
-      return isRecord17(value3) && typeof value3.parentID === "string" && typeof value3.agent === "string" ? { parentID: value3.parentID, agent: value3.agent } : undefined;
+      const value3 = isRecord18(raw) && isRecord18(raw.data) ? raw.data : raw;
+      return isRecord18(value3) && typeof value3.parentID === "string" && typeof value3.agent === "string" ? { parentID: value3.parentID, agent: value3.agent } : undefined;
     };
   }
   const affinityStorage = storage && typeof storage.get === "function" ? storage : undefined;
@@ -56728,7 +57224,7 @@ async function setupV2(context3) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord17(input.env)) {
+      if (isRecord18(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -56743,7 +57239,7 @@ async function setupV2(context3) {
     criticalGaps.push("shell.create.before");
   capabilities.shell = Boolean(shell);
   capabilities["shell.create.before"] = options.shellRegistered === true;
-  const approvalPort = isRecord17(context3.permission) && typeof context3.permission.assert === "function" ? context3.permission : undefined;
+  const approvalPort = isRecord18(context3.permission) && typeof context3.permission.assert === "function" ? context3.permission : undefined;
   const tool = domain("tool");
   if (tool) {
     const registered = await registerHook(tool, "execute.before", async (input) => {
@@ -56788,6 +57284,10 @@ async function setupV2(context3) {
         const { validatePlanningPreflight: validatePlanningPreflight2 } = await Promise.resolve().then(() => (init_planning_preflight(), exports_planning_preflight));
         options.planningPreflight = {
           validate: validatePlanningPreflight2
+        };
+        const { validateArchitecturePlan: validateArchitecturePlan2 } = await Promise.resolve().then(() => (init_architecture_contract(), exports_architecture_contract));
+        options.architectureGate = {
+          validate: validateArchitecturePlan2
         };
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function")
@@ -56864,7 +57364,7 @@ async function setupV2(context3) {
     criticalGaps.push("tool.hook");
     criticalGaps.push("planning.v5");
   }
-  const modeHost = isRecord17(context3.command) && typeof context3.command.transform === "function" && isRecord17(context3.session) && typeof context3.session.synthetic === "function" && isRecord17(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
+  const modeHost = isRecord18(context3.command) && typeof context3.command.transform === "function" && isRecord18(context3.session) && typeof context3.session.synthetic === "function" && isRecord18(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
   if (modeHost) {
     try {
       const registration = await registerModeCommand(modeHost, options);
@@ -56877,7 +57377,7 @@ async function setupV2(context3) {
   }
   if (!capabilities["mode.command"])
     degraded.push("mode.command");
-  const planCommandHost = isRecord17(context3.command) && typeof context3.command.transform === "function" && isRecord17(context3.session) && typeof context3.session.synthetic === "function" && isRecord17(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
+  const planCommandHost = isRecord18(context3.command) && typeof context3.command.transform === "function" && isRecord18(context3.session) && typeof context3.session.synthetic === "function" && isRecord18(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
   if (planCommandHost && planStorage && planningAuthority) {
     try {
       const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
@@ -57012,7 +57512,7 @@ async function setupV2(context3) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context3.storage !== undefined && context3.storage !== null : isRecord17(context3[name]) && (typeof context3[name].transform === "function" || typeof context3[name].hook === "function" || typeof context3[name].subscribe === "function");
+    const available = name === "storage" ? context3.storage !== undefined && context3.storage !== null : isRecord18(context3[name]) && (typeof context3[name].transform === "function" || typeof context3[name].hook === "function" || typeof context3[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -57044,12 +57544,12 @@ async function setupV2(context3) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord17(input.client),
-    project: isRecord17(input.project),
+    client: isRecord18(input.client),
+    project: isRecord18(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord17(input.experimental_workspace)
+    workspace: isRecord18(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -57098,7 +57598,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback3, cleanups) {
   try {
     const registration = await domain.hook(name, callback3);
-    if (isRecord17(registration) && typeof registration.dispose === "function") {
+    if (isRecord18(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -57127,32 +57627,32 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context3) {
-  const location = isRecord17(context3.location) ? context3.location : undefined;
+  const location = isRecord18(context3.location) ? context3.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function locationCanonical(context3) {
-  const location = isRecord17(context3.location) ? context3.location : undefined;
-  const project = location && isRecord17(location.project) ? location.project : undefined;
+  const location = isRecord18(context3.location) ? context3.location : undefined;
+  const project = location && isRecord18(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function isWithin5(value3, root) {
-  const relative = path29.relative(path29.resolve(root), path29.resolve(value3));
-  return relative === "" || !relative.startsWith("..") && !path29.isAbsolute(relative);
+  const relative = path30.relative(path30.resolve(root), path30.resolve(value3));
+  return relative === "" || !relative.startsWith("..") && !path30.isAbsolute(relative);
 }
 function transformDomain(value3) {
-  if (!isRecord17(value3) || typeof value3.transform !== "function")
+  if (!isRecord18(value3) || typeof value3.transform !== "function")
     return;
   return value3;
 }
 function storageDomain(value3) {
-  if (!isRecord17(value3) || typeof value3.set !== "function")
+  if (!isRecord18(value3) || typeof value3.set !== "function")
     return;
   return value3;
 }
 function eventDomain(value3) {
-  if (!isRecord17(value3) || typeof value3.subscribe !== "function")
+  if (!isRecord18(value3) || typeof value3.subscribe !== "function")
     return;
   return value3;
 }
@@ -57170,28 +57670,28 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
   const memoryProject = memoryProjectForLocation(paths, cwd, canonical5);
-  const horielIndex = paths.horielIndex ?? path29.join(paths.malahorHome, "horiel", "index.js");
-  const horielDatabase = paths.horielDb ?? path29.join(paths.malahorHome, "horiel", "horiel.sqlite");
-  const horielSnapshots = paths.horielSnapshots ?? path29.join(paths.malahorHome, "horiel", "snapshots");
-  if (!fs23.existsSync(paths.mnemoIndex)) {
+  const horielIndex = paths.horielIndex ?? path30.join(paths.malahorHome, "horiel", "index.js");
+  const horielDatabase = paths.horielDb ?? path30.join(paths.malahorHome, "horiel", "horiel.sqlite");
+  const horielSnapshots = paths.horielSnapshots ?? path30.join(paths.malahorHome, "horiel", "snapshots");
+  if (!fs24.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   } else if (!memoryProject) {
     warnings.push("mcp.mnemo-project-unresolved");
   }
-  if (!fs23.existsSync(paths.docsIndex)) {
+  if (!fs24.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs23.existsSync(paths.mnemoIndex)) {
+      if (fs24.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
             type: "local",
             command: ["node", paths.mnemoIndex],
             environment: memoryProject ? {
-              ...isRecord17(existingMnemo?.environment) ? existingMnemo.environment : {},
+              ...isRecord18(existingMnemo?.environment) ? existingMnemo.environment : {},
               MALAHOR_MEMORY_BOUND: "1",
               MALAHOR_MEMORY_PROJECT: memoryProject
             } : {
@@ -57205,7 +57705,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         }
       }
       const existingDocs = editor.get("docs");
-      if (fs23.existsSync(paths.docsIndex)) {
+      if (fs24.existsSync(paths.docsIndex)) {
         if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
           editor.set("docs", {
             ...existingDocs ?? {},
@@ -57219,7 +57719,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         }
       }
       const existingHoriel = editor.get("horiel");
-      if (fs23.existsSync(horielIndex)) {
+      if (fs24.existsSync(horielIndex)) {
         if (!memoryProject) {
           warnings.push("mcp.horiel-project-unresolved");
         } else if (!existingHoriel || isMalahorHoriel(existingHoriel, paths)) {
@@ -57243,7 +57743,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
       }
       let target;
       try {
-        const registered = canonical5 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs23.realpathSync(entry.root) === fs23.realpathSync(canonical5)) : undefined;
+        const registered = canonical5 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs24.realpathSync(entry.root) === fs24.realpathSync(canonical5)) : undefined;
         if (!canonical5 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
@@ -57275,7 +57775,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         });
       }
     });
-    if (isRecord17(registration) && typeof registration.dispose === "function") {
+    if (isRecord18(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -57285,14 +57785,14 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path29.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path30.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function memoryProjectForLocation(paths, cwd, canonical5) {
   const roots = registeredProjectRoots(paths.projectsFile).sort((left2, right) => right.root.length - left2.root.length);
   const canonicalValue = canonical5?.trim();
   const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
   const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
-  const byCanonicalPath = canonicalValue && path29.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
+  const byCanonicalPath = canonicalValue && path30.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
   const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey].filter((value3) => Boolean(value3)));
   if (candidates.size > 1)
     return;
@@ -57312,57 +57812,57 @@ function validMemoryProject(value3) {
 }
 function canonicalLocation(value3) {
   try {
-    return fs23.realpathSync(value3);
+    return fs24.realpathSync(value3);
   } catch {
-    return path29.resolve(value3);
+    return path30.resolve(value3);
   }
 }
 function pathInside(value3, root) {
-  const relative = path29.relative(canonicalLocation(root), canonicalLocation(value3));
-  return relative === "" || !relative.startsWith("..") && !path29.isAbsolute(relative);
+  const relative = path30.relative(canonicalLocation(root), canonicalLocation(value3));
+  return relative === "" || !relative.startsWith("..") && !path30.isAbsolute(relative);
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path29.resolve(paths.opencodeDir, item) === path29.resolve(paths.mnemoIndex));
+  return command.some((item) => path30.resolve(paths.opencodeDir, item) === path30.resolve(paths.mnemoIndex));
 }
 function isMalahorDocs(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path29.resolve(paths.opencodeDir, item) === path29.resolve(paths.docsIndex));
+  return command.some((item) => path30.resolve(paths.opencodeDir, item) === path30.resolve(paths.docsIndex));
 }
 function isMalahorHoriel(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
-  const index3 = paths.horielIndex ?? path29.join(paths.malahorHome, "horiel", "index.js");
+  const index3 = paths.horielIndex ?? path30.join(paths.malahorHome, "horiel", "index.js");
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path29.resolve(paths.opencodeDir, item) === path29.resolve(index3));
+  return command.some((item) => path30.resolve(paths.opencodeDir, item) === path30.resolve(index3));
 }
 function withoutHorielEnablement(value3) {
-  if (!isRecord17(value3))
+  if (!isRecord18(value3))
     return {};
   return Object.fromEntries(Object.entries(value3).filter(([key]) => !/HORIEL.*ENABLED/i.test(key)));
 }
 function sessionLocationDirectory(value3) {
-  const response = isRecord17(value3) && isRecord17(value3.data) ? value3.data : value3;
-  if (!isRecord17(response))
+  const response = isRecord18(value3) && isRecord18(value3.data) ? value3.data : value3;
+  if (!isRecord18(response))
     return;
-  const location = isRecord17(response.location) ? response.location : undefined;
+  const location = isRecord18(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function sessionLocationProject(value3) {
-  const response = isRecord17(value3) && isRecord17(value3.data) ? value3.data : value3;
-  if (!isRecord17(response))
+  const response = isRecord18(value3) && isRecord18(value3.data) ? value3.data : value3;
+  if (!isRecord18(response))
     return;
-  const location = isRecord17(response.location) ? response.location : undefined;
-  const project = location && isRecord17(location.project) ? location.project : undefined;
+  const location = isRecord18(response.location) ? response.location : undefined;
+  const project = location && isRecord18(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : typeof project?.name === "string" ? project.name : typeof project?.id === "string" ? project.id : undefined;
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path29.join(directory, "plugin-state.json");
+  const file = path30.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -57374,15 +57874,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs23.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path29.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs23.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs24.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path30.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs24.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs23.chmodSync(temporary, 384);
-    fs23.renameSync(temporary, file);
+    fs24.chmodSync(temporary, 384);
+    fs24.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -57392,8 +57892,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path29.resolve(override);
-  return path29.join(os2.homedir(), ".malahor");
+    return path30.resolve(override);
+  return path30.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))
@@ -57409,7 +57909,7 @@ function warn(message) {
 function unique2(values2) {
   return [...new Set(values2)];
 }
-function isRecord17(value3) {
+function isRecord18(value3) {
   return typeof value3 === "object" && value3 !== null && !Array.isArray(value3);
 }
 export {

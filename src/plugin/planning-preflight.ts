@@ -36,9 +36,16 @@ export function validatePlanningPreflight(value: unknown): void {
   }
   const root = fs.realpathSync(input.root);
   const base = path.resolve(input.directory);
+  const rawCompleted = (input as unknown as { completedKeys?: unknown }).completedKeys;
+  const completedKeys = new Set(
+    Array.isArray(rawCompleted)
+      ? rawCompleted.filter((key): key is string => typeof key === "string")
+      : [],
+  );
   const editActions = input.actions.filter((action) => action.action === "edit");
   const mayCreate = new Set<string>();
   for (const edit of normalized.preflight.edits) {
+    if (completedKeys.has(edit.key)) continue;
     const action = editActions.find((item) => item.key === edit.key);
     if (!action) throw new Error(`Preflight inválido: la edición ${edit.key} no tiene acción.`);
     const target = path.resolve(base, edit.path);

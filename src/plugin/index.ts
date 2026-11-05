@@ -378,6 +378,11 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
         (options as unknown as { planningPreflight?: { validate(input: unknown): void } }).planningPreflight = {
           validate: validatePlanningPreflight,
         };
+        // Activa el gate de arquitectura; si el import falla, no se registran las tools.
+        const { validateArchitecturePlan } = await import("./architecture-contract");
+        (options as unknown as { architectureGate?: { validate(input: unknown): unknown } }).architectureGate = {
+          validate: validateArchitecturePlan,
+        };
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
         capabilities["planning.v5"] = true;

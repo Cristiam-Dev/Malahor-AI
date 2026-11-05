@@ -558,7 +558,7 @@ function revisionDeltaForPlans(
   parent: PlanStateV5,
   candidate: PlanStateV5,
 ): PlanRevisionDeltaV1 {
-  const delta = revisionDelta(actionGraphForPlan(parent), actionGraphForPlan(candidate));
+  const delta = revisionDelta(parent, candidate);
   if (!sameRevisionContent(parent, candidate)) delta.planChanged = true;
   return delta;
 }
@@ -579,30 +579,62 @@ function sameRevisionContent(parent: PlanStateV5, candidate: PlanStateV5): boole
   });
 }
 
-function revisionDelta(
-  parentGraph: PlanRecoveryGraphNode[],
-  candidateGraph: PlanRecoveryGraphNode[],
-): PlanRevisionDeltaV1 {
+function revisionDelta(parent: PlanStateV5, candidate: PlanStateV5): PlanRevisionDeltaV1 {
+  const parentGraph = actionGraphForPlan(parent);
+  const candidateGraph = actionGraphForPlan(candidate);
   const parentByKey = new Map(parentGraph.map((node) => [node.key, node]));
   const candidateByKey = new Map(candidateGraph.map((node) => [node.key, node]));
+  const parentKeyByID = new Map(parentGraph.map((node) => [node.actionID, node.key]));
+  const candidateKeyByID = new Map(candidateGraph.map((node) => [node.actionID, node.key]));
+  const parentEffects = logicalEffects(parent);
+  const candidateEffects = logicalEffects(candidate);
   const delta: PlanRevisionDeltaV1 = { preserved: [], changed: [], added: [], removed: [] };
-  for (const parent of parentGraph) {
-    const candidate = candidateByKey.get(parent.key);
-    if (!candidate) {
-      delta.removed.push(parent.actionID);
+  for (const parentNode of parentGraph) {
+    const candidateNode = candidateByKey.get(parentNode.key);
+    if (!candidateNode) {
+      delta.removed.push(parentNode.actionID);
       continue;
     }
-    if (candidate.actionID === parent.actionID && sameSet(candidate.dependsOn, parent.dependsOn)) {
-      delta.preserved.push(parent.actionID);
+    const sameEffect = parentEffects.get(parentNode.key) === candidateEffects.get(candidateNode.key);
+    const sameDependencies = sameSet(
+      dependencyKeys(parentNode, parentKeyByID),
+      dependencyKeys(candidateNode, candidateKeyByID),
+    );
+    if (sameEffect && sameDependencies) {
+      delta.preserved.push(candidateNode.actionID);
     } else {
-      delta.changed.push(parent.actionID);
+      delta.changed.push(parentNode.actionID);
     }
   }
-  for (const candidate of candidateGraph) {
-    if (!parentByKey.has(candidate.key)) delta.added.push(candidate.actionID);
+  for (const candidateNode of candidateGraph) {
+    if (!parentByKey.has(candidateNode.key)) delta.added.push(candidateNode.actionID);
   }
   for (const values of Object.values(delta)) values.sort(compareText);
   return delta;
+}
+
+function logicalEffects(state: PlanStateV5): Map<string, string> {
+  const intentByID = new Map(state.actionIntents.map((intent) => [intent.actionID, intent]));
+  const effects = new Map<string, string>();
+  for (const node of actionGraphForPlan(state)) {
+    const intent = intentByID.get(node.actionID);
+    effects.set(node.key, intent ? canonical({
+      kind: intent.kind,
+      logicalKey: intent.logicalKey,
+      effect: intent.effect,
+      resources: intent.resources.map((resource) => resource.canonicalPath),
+      command: intent.command?.argv,
+      delegate: intent.delegate?.agent,
+    }) : node.actionID);
+  }
+  return effects;
+}
+
+function dependencyKeys(
+  node: PlanRecoveryGraphNode,
+  keyByID: Map<string, string>,
+): string[] {
+  return node.dependsOn.map((actionID) => keyByID.get(actionID) ?? actionID).sort(compareText);
 }
 
 function carryCheckpointForward(
@@ -616,16 +648,14 @@ function carryCheckpointForward(
 ): PlanExecutionCheckpointV1 {
   const parentGraph = normalizeGraph(parentGraphInput);
   const childGraph = normalizeGraph(childGraphInput);
-  const parentByID = new Map(parentGraph.map((node) => [node.actionID, node]));
+  const parentByKey = new Map(parentGraph.map((node) => [node.key, node]));
   const preserved = new Set(delta.preserved);
   const nodes: Record<string, ActionExecutionNodeV1> = {};
   for (const node of childGraph) {
-    const parentNode = parentCheckpoint.nodes[node.actionID];
-    const parentDefinition = parentByID.get(node.actionID);
+    const parentNodeByKey = parentByKey.get(node.key);
+    const parentNode = parentNodeByKey ? parentCheckpoint.nodes[parentNodeByKey.actionID] : undefined;
     const canCarrySuccess = !node.key.startsWith("quality-") && preserved.has(node.actionID)
-      && parentNode?.state === "succeeded"
-      && parentDefinition
-      && sameSet(parentDefinition.dependsOn, node.dependsOn);
+      && parentNode?.state === "succeeded";
     nodes[node.actionID] = {
       key: node.key,
       actionID: node.actionID,

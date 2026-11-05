@@ -684,6 +684,40 @@ export async function registerPlanningTools(
             },
             required: ["edits"], additionalProperties: false,
           },
+          architecture: {
+            type: "object", properties: {
+              mode: { type: "string", enum: ["respect", "change"] },
+              contractRef: { type: "string" },
+              contractHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+              modules: { type: "array", items: {
+                type: "object", properties: {
+                  id: { type: "string" },
+                  path: { type: "string" },
+                  layer: { type: "string" },
+                  reason: { type: "string" },
+                },
+                required: ["id", "path", "layer", "reason"], additionalProperties: false,
+              } },
+              dependencies: { type: "array", items: {
+                type: "object", properties: {
+                  from: { type: "string" },
+                  to: { type: "string" },
+                },
+                required: ["from", "to"], additionalProperties: false,
+              } },
+              change: {
+                type: "object", properties: {
+                  rationale: { type: "string" },
+                  alternatives: { type: "array", items: { type: "string" } },
+                  impact: { type: "string" },
+                  migration: { type: "string" },
+                  rollback: { type: "string" },
+                },
+                required: ["rationale", "alternatives", "impact", "migration", "rollback"], additionalProperties: false,
+              },
+            },
+            required: ["mode", "contractRef", "contractHash", "modules"], additionalProperties: false,
+          },
           dependencies: { type: "array", items: {
             type: "object", properties: { planID: { type: "string" }, revision: { type: "string" } },
             required: ["planID", "revision"], additionalProperties: false,
@@ -737,13 +771,75 @@ export async function registerPlanningTools(
           planningPreflight?: { validate(input: unknown): void };
         }).planningPreflight;
         if (preflightGate && normalizedActions.some((item) => item.action === "edit")) {
+          let completedKeys: string[] = [];
+          const activePlan = await readPlan(storage, resolved.scope.sessionID, authority);
+          if (activePlan?.version === 5 && (activePlan.phase === "running" || activePlan.phase === "paused")) {
+            try {
+              const activeCheckpoint = await recoveryForState(
+                activePlan,
+                storage,
+                authority,
+                resolved.directory,
+                projectRoot,
+              ).snapshot();
+              const activeGraph = actionGraphForPlan(activePlan);
+              completedKeys = activeGraph
+                .filter((node) => activeCheckpoint.nodes[node.actionID]?.state === "succeeded")
+                .map((node) => node.key);
+            } catch {
+              completedKeys = [];
+            }
+          }
           preflightGate.validate({
             root: projectRoot,
             directory: resolved.directory,
             actions: normalizedActions,
             verification: raw.verification,
             preflight: (raw as PlanInput & { preflight?: unknown }).preflight,
+            completedKeys,
           });
+        }
+        const architectureGate = (options as unknown as {
+          architectureGate?: { validate(input: unknown): { architecture?: unknown; changeHash?: string } };
+        }).architectureGate;
+        if (architectureGate && normalizedActions.some((item) => item.action === "edit")) {
+          const result = architectureGate.validate({
+            architecture: (raw as PlanInput & { architecture?: unknown }).architecture,
+            actions: normalizedActions,
+            level: raw.level,
+            presentation: raw.presentation,
+            project: resolved.scope.project,
+            projectRoot,
+            directory: resolved.directory,
+            env: options.env,
+          });
+          (raw as PlanInput & { architecture?: unknown }).architecture = result.architecture;
+          if (result.changeHash) {
+            const approved = result.architecture as { contractRef: string; contractHash: string };
+            await approvals.assert({
+              sessionID: resolved.scope.sessionID,
+              agent: call.agent,
+              source: { type: "tool", messageID: call.messageID, id: call.id },
+              action: "malahor_plan_architecture",
+              resources: [resolved.scope.project, approved.contractRef, approved.contractHash, result.changeHash],
+              save: [],
+            });
+            const fresh = await requireScope(call, options);
+            if (fresh.scope.sessionID !== resolved.scope.sessionID || fresh.scope.project !== resolved.scope.project
+              || fresh.scope.policyRevision !== resolved.scope.policyRevision || fresh.directory !== resolved.directory) {
+              throw new Error("El proyecto, la sesión o la política cambiaron durante la autorización de arquitectura.");
+            }
+            architectureGate.validate({
+              architecture: (raw as PlanInput & { architecture?: unknown }).architecture,
+              actions: normalizedActions,
+              level: raw.level,
+              presentation: raw.presentation,
+              project: resolved.scope.project,
+              projectRoot,
+              directory: resolved.directory,
+              env: options.env,
+            });
+          }
         }
         const intentContext = {
            project: resolved.scope.project,
@@ -1813,8 +1909,9 @@ function selectActionIDs(
   const kind = state.actionIntents.find((intent) => intent.actionID === actionIDs[0])?.kind;
   if (kind !== "edit") return actionIDs;
   const actionable = actionIDs.filter((actionID) => {
-    const nodeState = checkpoint.nodes[actionID]?.state;
-    return nodeState === "ready" || nodeState === "failed";
+    const node = checkpoint.nodes[actionID];
+    if (!node || (node.state !== "ready" && node.state !== "failed")) return false;
+    return node.dependsOn.every((dependency) => checkpoint.nodes[dependency]?.state === "succeeded");
   });
   return actionable.length > 0 ? actionable.slice(0, 1) : actionIDs.slice(0, 1);
 }
@@ -1831,11 +1928,19 @@ async function authorizeCheckpointActions(
   if (!actionIDs?.length) return { effect: "deny", code: "ACTION_NOT_DECLARED" };
   try {
     const recovery = recoveryForState(state, storage, authority, directory, projectRoot);
-    const checkpoint = await recovery.snapshot();
-    const selected = selectActionIDs(state, checkpoint, actionIDs);
+    let checkpoint = await recovery.snapshot();
+    let selected = selectActionIDs(state, checkpoint, actionIDs);
     const requested = new Set(selected);
     for (const actionID of selected) {
-      const decision = await recovery.evaluateAction(actionID);
+      let decision = await recovery.evaluateAction(actionID);
+      if (decision.effect === "deny" && decision.code === "DEPENDENCY_BLOCKED") {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        checkpoint = await recovery.snapshot();
+        selected = selectActionIDs(state, checkpoint, actionIDs);
+        if (selected.length === 1 && selected[0] === actionID) {
+          decision = await recovery.evaluateAction(actionID);
+        }
+      }
       if (decision.effect === "deny") {
         // El host puede comprobar el permiso después de tool.execute.before:
         // la reserva de esta misma llamada no es una llamada concurrente.

@@ -514,12 +514,17 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput
     actions,
     input.verification,
   );
+  const architecture = (input as PlanInput & { architecture?: unknown }).architecture;
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\0${item.revision}`);
   validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
-  const normalized: NormalizedPlanInput & { preflight?: PlanPreflightV1 } = {
+  const normalized: NormalizedPlanInput & {
+    preflight?: PlanPreflightV1;
+    architecture?: unknown;
+  } = {
     summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies,
     ...(preflightBundle.verification === undefined ? {} : { verification: preflightBundle.verification }),
     ...(preflightBundle.preflight === undefined ? {} : { preflight: preflightBundle.preflight }),
+    ...(architecture === undefined ? {} : { architecture }),
   };
   return input.level === undefined ? normalized : { level, ...normalized };
 }

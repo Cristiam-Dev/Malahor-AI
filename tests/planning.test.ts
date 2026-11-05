@@ -2062,6 +2062,65 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     options = { ...options, planningPreflight: { validate: validatePlanningPreflight } } as unknown as PluginAdapterOptions;
   }
 
+  function architectureFixture(): { contractRef: string; contractHash: string } {
+    const contract = [
+      "# Contrato de arquitectura",
+      "",
+      "```json",
+      JSON.stringify({
+        version: 1,
+        modules: [
+          { id: "app", path: ".", layer: "app", allowedDependencies: ["core"] },
+          { id: "core", path: "core", layer: "domain", allowedDependencies: [] },
+        ],
+        forbidden: [{ from: "core", to: "app" }],
+      }, null, 2),
+      "```",
+      "",
+    ].join("\n");
+    const target = path.join(home, "vault", "projects", "demo", "Architecture", "contract.md");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contract, "utf8");
+    return {
+      contractRef: "Architecture/contract.md",
+      contractHash: createHash("sha256").update(contract).digest("hex"),
+    };
+  }
+
+  async function enableArchitectureGate(): Promise<void> {
+    const { validateArchitecturePlan } = await import("../src/plugin/architecture-contract");
+    options = { ...options, architectureGate: { validate: validateArchitecturePlan } } as unknown as PluginAdapterOptions;
+  }
+
+  type ArchitectureFixture = PreflightFixture & {
+    architecture: {
+      mode: "respect" | "change";
+      contractRef: string;
+      contractHash: string;
+      modules: Array<{ id: string; path: string; layer: string; reason: string }>;
+      dependencies: Array<{ from: string; to: string }>;
+      change?: {
+        rationale: string;
+        alternatives: string[];
+        impact: string;
+        migration: string;
+        rollback: string;
+      };
+    };
+  };
+
+  function architectureInput(): ArchitectureFixture {
+    return {
+      ...preflightFixture(),
+      architecture: {
+        mode: "respect",
+        ...architectureFixture(),
+        modules: [{ id: "app", path: ".", layer: "app", reason: "Cambio del fixture." }],
+        dependencies: [],
+      },
+    };
+  }
+
   test("los schemas de planning mantienen la presentación estricta y hacen opcional el digest de run", async () => {
     const harness = await registeredTools();
     type Schema = {
@@ -2081,7 +2140,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     ]));
     expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted([
       "level", "specRef", "specHash", "taskDecisionRef", "summary", "steps", "presentation", "actions", "dependencies",
-      "verification", "preflight",
+      "verification", "preflight", "architecture",
     ]));
     expect(schema.additionalProperties).toBe(false);
     expect(schema.properties?.level?.enum).toEqual([1, 2]);
@@ -2127,6 +2186,13 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     ]));
     expect(preflightEdit.additionalProperties).toBe(false);
 
+    const architectureSchema = schema.properties?.architecture!;
+    expect(sorted(architectureSchema.required)).toEqual(sorted(["mode", "contractRef", "contractHash", "modules"]));
+    expect(architectureSchema.additionalProperties).toBe(false);
+    const architectureModule = architectureSchema.properties?.modules?.items!;
+    expect(sorted(architectureModule.required)).toEqual(sorted(["id", "path", "layer", "reason"]));
+    expect(architectureModule.additionalProperties).toBe(false);
+
     const runSchema = harness.definitions.get("run")?.input as Schema;
     expect(runSchema.type).toBe("object");
     expect(runSchema.required ?? []).toEqual([]);
@@ -2141,6 +2207,199 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       .rejects.toThrow(/SHA-256|versión/i);
     await expect(harness.execute("plan", { ...input(), specRef: "Product/not-sdd.md" }))
       .rejects.toThrow(/SDD|documentación canónica/i);
+  });
+
+  test("la arquitectura respect se firma con el contrato", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    await harness.execute("plan", architectureInput(), call(SESSION, "malahor", "msg_architecture_respect"));
+    const state = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(validState(state)).toBe(true);
+    expect((state.plan as unknown as { architecture?: { mode?: string } }).architecture?.mode).toBe("respect");
+  });
+
+  test("una revisión conserva la edición cuando el archivo pasa de may-create a must-exist", async () => {
+    const authority = createPlanningAuthority(Buffer.alloc(32, 94));
+    const fixtureRecords = new Map<string, unknown>();
+    const fixtureStorage = {
+      get: async (key: string) => fixtureRecords.get(key),
+      set: async (key: string, value: unknown) => { fixtureRecords.set(key, structuredClone(value)); },
+      remove: async (key: string) => { fixtureRecords.delete(key); },
+    };
+    const planID = "8".repeat(32);
+    const parentPresented = proposePlan(
+      scope("executor"), revisionInput(), NOW, "msg_stability_parent", planID, authority,
+    );
+    const parent = authorizePlan(parentPresented, parentPresented.digest, NOW + 1, authority);
+    fixtureRecords.set(planKey(SESSION), structuredClone(parent));
+    fixtureRecords.set(planRecordKey(parent.planID), structuredClone(parent));
+    fixtureRecords.set(planRevisionKey(parent.planID, parent.revision), structuredClone(parent));
+    const parentGraph = actionGraphForPlan(parent);
+    const parentIDs = actionIDsByKey(parent);
+    const recovery = createPlanRecovery({
+      plan: {
+        planID: parent.planID,
+        revision: parent.revision,
+        digest: parent.digest,
+        proofHash: planProofHash(parent),
+        phase: "running",
+      },
+      graph: parentGraph,
+      authority,
+      storage: fixtureStorage,
+      now: () => NOW + 2,
+    });
+    await recovery.recordAttempt({
+      actionID: parentIDs.root!,
+      outcome: "success",
+      canonicalInputHash: "sha256:stability-root",
+      resourceDigests: { before: ["sha256:stability-v1"], after: ["sha256:stability-v2"] },
+    });
+    fs.writeFileSync(path.join(repo, "root.ts"), "root\n", "utf8");
+    const candidate = proposePlan(
+      scope("executor"),
+      revisionInput({ changedDependency: true, added: true }),
+      NOW + 3,
+      "msg_stability_candidate",
+      planID,
+      authority,
+    );
+    const manager = createPlanRevisionRecovery({
+      parent,
+      checkpoint: await recovery.snapshot(),
+      storage: fixtureStorage,
+      authority,
+    });
+    const presented = await manager.presentCandidate(candidate);
+    const candidateIDs = actionIDsByKey(candidate);
+    expect(presented.delta.preserved).toContain(candidateIDs.root!);
+  });
+
+  test("una revisión con un bloque ya aplicado pasa el preflight", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    const value = architectureInput();
+    await harness.execute("plan", value, call(SESSION, "malahor", "msg_stability_revision_parent"));
+    await harness.execute("run", {}, call(SESSION, "malahor", "msg_stability_run"));
+    options = { ...options, toolRegistered: true };
+    const editCall = {
+      sessionID: SESSION,
+      agent: "malahor",
+      messageID: "msg_stability_edit",
+      id: "call_stability_edit",
+      tool: "edit",
+      input: {
+        path: path.join(repo, "file.ts"),
+        oldString: "export const fixture = \"original\";\n",
+        newString: "export const fixture = \"changed\";\n",
+      },
+    };
+    await evaluatePlanningTool(editCall, options, storage);
+    const completed = await completePlanningTool(editCall, options, storage);
+    expect(completed).toMatchObject({ ok: true, completed: 1 });
+    fs.writeFileSync(path.join(repo, "file.ts"), "export const fixture = \"changed\";\n", "utf8");
+    value.summary = "Revisión con bloque ya aplicado";
+    const revision = await harness.execute("plan", value, call(SESSION, "malahor", "msg_stability_revision"));
+    expect(revision.content).toMatch(/Progreso preservado|Cambios de esta revisión|revisión/i);
+  });
+
+  test("un plan con ediciones sin arquitectura se rechaza", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    const { architecture: _architecture, ...without } = architectureInput();
+    await expect(harness.execute("plan", without, call(SESSION, "malahor", "msg_architecture_missing")))
+      .rejects.toThrow(/architecture|arquitectura/i);
+  });
+
+  test("una ruta fuera del contrato exige mode change", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    const value = architectureInput();
+    value.architecture.modules = [{ id: "core", path: "core", layer: "domain", reason: "Fuera del contrato." }];
+    await expect(harness.execute("plan", value, call(SESSION, "malahor", "msg_architecture_outside")))
+      .rejects.toThrow(/módulo|change/i);
+  });
+
+  test("una dependencia prohibida se rechaza", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    const value = architectureInput();
+    value.architecture.modules = [
+      { id: "app", path: ".", layer: "app", reason: "App." },
+      { id: "core", path: "core", layer: "domain", reason: "Core." },
+    ];
+    value.architecture.dependencies = [{ from: "core", to: "app" }];
+    await expect(harness.execute("plan", value, call(SESSION, "malahor", "msg_architecture_forbidden")))
+      .rejects.toThrow(/dependencia|prohibida|permitida/i);
+  });
+
+  test("un cambio de arquitectura exige aprobación específica y se firma", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    const value = architectureInput();
+    value.level = 2;
+    value.presentation.risk = { ...value.presentation.risk, level: "medium", categories: ["architecture"] };
+    value.architecture = {
+      mode: "change",
+      ...architectureFixture(),
+      modules: [
+        { id: "app", path: ".", layer: "app", reason: "App." },
+        { id: "new", path: "new", layer: "app", reason: "Nuevo módulo." },
+      ],
+      dependencies: [{ from: "app", to: "new" }],
+      change: {
+        rationale: "El módulo nuevo separa una responsabilidad.",
+        alternatives: ["Mantener todo en app"],
+        impact: "Una frontera nueva y una dependencia declarada.",
+        migration: "Mover la responsabilidad en un paso.",
+        rollback: "Eliminar el módulo y volver a app.",
+      },
+    };
+    await harness.execute("plan", value, call(SESSION, "malahor", "msg_architecture_change"));
+    expect(harness.approvals.some((request) => request.action === "malahor_plan_architecture")).toBe(true);
+    const state = records.get(planKey(SESSION)) as PlanStateV5;
+    expect((state.plan as unknown as { architecture?: { mode?: string } }).architecture?.mode).toBe("change");
+  });
+
+  test("un cambio de arquitectura sin manifiesto se rechaza", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    const value = architectureInput();
+    value.level = 2;
+    value.presentation.risk = { ...value.presentation.risk, level: "medium", categories: ["architecture"] };
+    value.architecture = {
+      mode: "change",
+      ...architectureFixture(),
+      modules: [{ id: "app", path: ".", layer: "app", reason: "App." }],
+      dependencies: [],
+    };
+    await expect(harness.execute("plan", value, call(SESSION, "malahor", "msg_architecture_change_missing")))
+      .rejects.toThrow(/change|rationale|arquitectura/i);
+  });
+
+  test("un contrato con hash distinto se rechaza", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    await enableArchitectureGate();
+    const harness = await registeredTools();
+    const value = architectureInput();
+    value.architecture.contractHash = "0".repeat(64);
+    await expect(harness.execute("plan", value, call(SESSION, "malahor", "msg_architecture_hash")))
+      .rejects.toThrow(/SHA-256|contrato|hash/i);
   });
 
   test("el preflight rechaza un plan con ediciones sin bloque verificado", async () => {
