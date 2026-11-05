@@ -1404,6 +1404,58 @@ describe("adaptador: solicitudes de permiso y segunda frontera", () => {
     expect(closed).toMatchObject({ ok: true, completed: 1 });
   });
 
+  test("un shell con código distinto de cero marca la acción como fallida", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    await harness.execute("plan", input("shell"), call(SESSION, "malahor", "msg_shell_exit_plan"));
+    await harness.execute("run", {}, call(SESSION, "malahor", "msg_shell_exit_run"));
+    options = { ...options, toolRegistered: true };
+    const toolInput = {
+      sessionID: SESSION,
+      agent: "malahor",
+      messageID: "msg_shell_exit",
+      id: "call_shell_exit",
+      tool: "shell",
+      input: { command: "echo fixture", workdir: repo },
+    };
+    await evaluatePlanningTool(toolInput, options, storage);
+    await completePlanningTool({
+      ...toolInput,
+      status: "completed",
+      result: { metadata: { exitCode: 2 } },
+    }, options, storage);
+    const state = records.get(planKey(SESSION)) as PlanStateV5;
+    const checkpoint = records.get(planExecutionKey(state.planID, state.revision)) as PlanExecutionCheckpointV1;
+    const actionID = actionGraphForPlan(state).find((node) => node.key.startsWith("shell-"))!.actionID;
+    expect(checkpoint.nodes[actionID]?.state).toBe("failed");
+  });
+
+  test("un shell con código cero mantiene el éxito", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    await harness.execute("plan", input("shell"), call(SESSION, "malahor", "msg_shell_zero_plan"));
+    await harness.execute("run", {}, call(SESSION, "malahor", "msg_shell_zero_run"));
+    options = { ...options, toolRegistered: true };
+    const toolInput = {
+      sessionID: SESSION,
+      agent: "malahor",
+      messageID: "msg_shell_zero",
+      id: "call_shell_zero",
+      tool: "shell",
+      input: { command: "echo fixture", workdir: repo },
+    };
+    await evaluatePlanningTool(toolInput, options, storage);
+    await completePlanningTool({
+      ...toolInput,
+      status: "completed",
+      result: { metadata: { exitCode: 0 } },
+    }, options, storage);
+    const state = records.get(planKey(SESSION)) as PlanStateV5;
+    const checkpoint = records.get(planExecutionKey(state.planID, state.revision)) as PlanExecutionCheckpointV1;
+    const actionID = actionGraphForPlan(state).find((node) => node.key.startsWith("shell-"))!.actionID;
+    expect(checkpoint.nodes[actionID]?.state).toBe("succeeded");
+  });
+
   test("el cambio de modo siempre pide confirmacion nativa sin exponer la version interna", async () => {
     const preview = previewModeChange("ejecutar", env, repo);
     const resources = [preview.configFile, preview.current, preview.target];

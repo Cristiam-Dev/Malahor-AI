@@ -2128,6 +2128,10 @@ function toolCompletionStatus(input: Record<string, unknown>): "success" | "fail
   if (["error", "failed", "failure", "cancelled"].includes(text(input.status || output.status || result.status).toLowerCase())) {
     return "failure";
   }
+  const metadata = isRecord(result.metadata) ? result.metadata : {};
+  const exitCode = [input.exitCode, metadata.exitCode, metadata.exit, metadata.code]
+    .find((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (exitCode !== undefined && exitCode !== 0) return "failure";
   return "success";
 }
 
