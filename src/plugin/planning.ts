@@ -1098,6 +1098,7 @@ export async function injectPlanningInstructions(
         "Una unica edicion de bajo riesgo sobre un archivo regular existente no usa Planning ni SDD: define la llamada exacta y deja que el harness solicite una sola aprobacion nativa. No pidas go ni conviertas una accion ambigua en puntual.",
         "Creacion, borrado, movimiento, symlinks, multiples recursos, secretos, infraestructura, shell mutante y superficies criticas quedan fuera del carril puntual y fallan cerrados.",
         "Solo el trabajo considerable previamente expandido en una especificacion Markdown bajo SDD/ usa malahor_plan. Declara level 1 o 2 junto con specRef y specHash SHA-256 de esa version canonica.",
+        "Antes de malahor_plan, completa el dossier de preflight de planificacion-verificada: mapa de cambios por archivo con bloques contiguos, consumidores y aserciones, orden de gates y artefactos, simulacion del contrato runtime, fallos esperados y evidencia. Si falta un punto, no presentes el plan.",
         mode === "assistant" ? "Para trabajo considerable guia por pasos; la tool solicita revision del plan y despues malahor_run solicita la segunda confirmacion para ejecutar."
           : "Para trabajo considerable presenta el plan y solicita su aprobacion previa mediante malahor_run ANTES de ejecutar.",
         "Commit explicito es un flujo especializado sin Planning: no uses malahor_plan, malahor_run ni pidas go. La orden solo habilita preparar el manifest; la autorizacion ejecutable procede de una unica aprobacion nativa de la UI.",
