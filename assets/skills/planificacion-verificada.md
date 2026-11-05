@@ -119,3 +119,22 @@ ejecución. El plan no autoriza por sí solo. Las preguntas no son grants.
 OpenCode separa un agente Plan read-only de la construcción. Malahor adopta ese
 acierto: reconocimiento sin mutar el proyecto, plan artifact y handoff. La
 autorización sigue siendo de Malahor; el plan file no es un grant.
+
+## Contrato runtime del plan
+
+Cuando el port está activo, `malahor_plan` exige para todo plan con ediciones:
+
+- `preflight`: una entrada por edición con clave, ruta relativa, existencia,
+  bloque literal único, consumidores, tests y aserciones opcionales.
+- `verification`: cwd, pruebas pertinentes con targets y justificación, y build.
+- `architecture`: contrato canónico, hash, modo `respect` o `change`, módulos y
+  dependencias. `respect` rechaza rutas fuera del contrato y dependencias
+  prohibidas; `change` exige nivel 2, categoría de arquitectura y una aprobación
+  nativa específica antes de presentar.
+
+Los gates shell usan el código de salida del host: un código distinto de cero es
+fallo, no éxito. Si el host no expone el código, el resultado se reporta como
+limitación, no como verificación.
+
+La skill no sustituye esos campos: el dossier demuestra que están completos y
+el runtime los valida al presentar el plan.

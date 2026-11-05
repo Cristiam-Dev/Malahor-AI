@@ -310,6 +310,9 @@ describe("scaffold del plugin", () => {
       expect(text).toMatch(/edici[oó]n manual[\s\S]*revalidar/i);
       expectProgressiveDisclosureContract(text);
       expectNativeActionContract(text);
+      expect(text).toMatch(/architecture.*contractRef.*contractHash.*respect.*change/is);
+      expect(text).toMatch(/verification.*cwd.*pruebas.*build/is);
+      expect(text).toMatch(/c[oó]digo de salida.*distinto de cero.*fallo/is);
       expect(text).toMatch(/documentaci[oó]n mediante docs_\*/i);
       expect(text).toMatch(/Obsidian MCP ni fallback al repositorio/i);
     } finally {
