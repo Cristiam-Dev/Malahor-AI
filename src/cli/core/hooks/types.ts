@@ -369,11 +369,15 @@ export interface HookRemovalRemediation {
 
 export type HookRemediation = HookReplacementRemediation | HookRemovalRemediation;
 
+export type HookBlockClass = "approval-required" | "remediable-deny" | "control-unavailable" | "hard-deny" | "advisory";
+
 export interface HookViolation {
   id: string;
   decision: HookDecision;
   message: string;
   fix: string;
+  /** Clase cerrada de bloqueo; informativa y nunca concede autoridad. */
+  blockClass?: HookBlockClass;
   /** Motivo cerrado, sin payload ni rutas externas; la UI nunca lo interpreta como permiso. */
   diagnostic?: {
     code: "PATCH_NOT_EVALUABLE" | "SECRET_PRESENT" | "SECURITY_CONTROL_UNAVAILABLE";

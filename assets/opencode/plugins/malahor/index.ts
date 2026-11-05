@@ -7241,6 +7241,7 @@ function remoteGitGuard(context) {
   return [{
     id: "MAL-HOOK-GIT-REMOTE-DENY",
     decision: "deny",
+    blockClass: "hard-deny",
     message: `Operacion Git remota prohibida permanentemente (${detail}). Malahor solo opera Git local.`,
     fix: "No hay aprobacion, perfil, plan, token ni fallback que habilite red. Ejecuta fuera de Malahor bajo tu propia responsabilidad."
   }];
@@ -7255,6 +7256,7 @@ function dangerousGitGuard(context) {
     return [{
       id: "MAL-HOOK-GIT-DESTRUCTIVE-DENY",
       decision: "deny",
+      blockClass: "hard-deny",
       message: `Operacion local destructiva fuera del alcance permitido: ${detail}.`,
       fix: "No descartes, borres ni stages implicitamente con commit. Usa paths exactos y el flujo local especifico para cada efecto."
     }];
@@ -7265,6 +7267,7 @@ function dangerousGitGuard(context) {
   return [{
     id: "MAL-HOOK-GIT-DESTRUCTIVE",
     decision: "ask",
+    blockClass: "approval-required",
     message: `Operacion Git local destructiva: ${classification.operations.join(", ")}; target: ${target}.`,
     fix: "Muestra este preview y solicita una aprobacion humana de un solo uso vinculada al comando, proyecto, target y policy hash."
   }];
@@ -7355,6 +7358,7 @@ function secretScanGuard(context) {
   return [{
     id: "MAL-HOOK-SECRETS",
     decision: "deny",
+    blockClass: "remediable-deny",
     message: `Posibles secretos detectados: ${leaks.slice(0, 5).join(", ")}`,
     fix: "Remueve secretos, usa variables de entorno/secret manager y rota credenciales si fueron expuestas.",
     remediations
@@ -7388,6 +7392,7 @@ function patchSecretScanGuard(context) {
     return [{
       id: "MAL-HOOK-PATCH-UNEVALUABLE",
       decision: "deny",
+      blockClass: "control-unavailable",
       message: `No se pudo evaluar el patch: ${reason}${hunk ? ` (bloque ${hunk})` : ""}.`,
       fix: "Relee el archivo, comprueba contexto e indentación y solicita revalidación; el cambio sigue bloqueado. Si falla la lectura, repara el control antes de continuar.",
       diagnostic: failure
@@ -7399,6 +7404,7 @@ function patchSecretScanGuard(context) {
   return [{
     id: "MAL-HOOK-SECRETS",
     decision: "deny",
+    blockClass: "remediable-deny",
     message: `El patch conservaria o introduciria posibles secretos: ${leaks.slice(0, 5).join(", ")}`,
     fix: "Retira todos los hallazgos del archivo y no agregues credenciales, tokens o llaves.",
     diagnostic: { code: "SECRET_PRESENT", reason: "secret-in-result" }
@@ -8002,6 +8008,7 @@ function evaluateHookRules(context, rules = builtInHookRules) {
       return [{
         id: critical ? "MAL-HOOK-CONTROL-ERROR" : "MAL-HOOK-CONTROL-WARN",
         decision: critical ? "deny" : "warn",
+        blockClass: critical ? "control-unavailable" : "advisory",
         message: `El control ${rule.id} no pudo evaluarse; detalle omitido por seguridad.`,
         fix: critical ? "Corrige el control o la politica antes de ejecutar la operacion protegida." : "Revisa el control; la operacion auxiliar puede continuar con aviso."
       }];
@@ -8078,7 +8085,7 @@ function deniedResult(result, id, message) {
 function formatHookResult(result) {
   const lines = [`Hooks: ${result.decision.toUpperCase()} ${result.event} (${result.profile})`];
   for (const violation of result.violations) {
-    lines.push(`- ${violation.decision.toUpperCase()} ${violation.id}: ${violation.message}`);
+    lines.push(`- ${violation.decision.toUpperCase()} ${violation.id}${violation.blockClass ? ` [${violation.blockClass}]` : ""}: ${violation.message}`);
     lines.push(`  Fix: ${violation.fix}`);
     const remediation = formatHookRemediations(violation.remediations ?? []);
     if (remediation)
@@ -8377,7 +8384,7 @@ function formatPluginBlock(result) {
   const relevant = result.violations.filter((violation) => violation.decision === "deny" || violation.decision === "ask");
   const lines = [
     `Malahor bloqueo ${result.event}: ${result.decision.toUpperCase()}`,
-    ...relevant.map((violation) => `- ${violation.id}: ${violation.message}`)
+    ...relevant.map((violation) => `- ${violation.id}${violation.blockClass ? ` [${violation.blockClass}]` : ""}: ${violation.message}`)
   ];
   const remediation = formatHookRemediations(relevant.flatMap((violation) => violation.remediations ?? []));
   if (remediation)

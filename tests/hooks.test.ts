@@ -465,7 +465,7 @@ describe("malahor hooks", () => {
   });
 
   // follow-up: clasificación DENY incremental
-  test.skip("clasifica ASK aprobable y Git remoto inequívoco sin confundir sus bloqueos", () => {
+  test("clasifica ASK aprobable y Git remoto inequívoco sin confundir sus bloqueos", () => {
     const approval = runHooks(baseContext({
       event: "git.reset.before",
       command: "git reset --hard HEAD~1",
@@ -485,7 +485,7 @@ describe("malahor hooks", () => {
   });
 
   // follow-up: clasificación DENY incremental
-  test.skip("un hallazgo positivo de secreto es DENY remediable, no hard DENY", () => {
+  test("un hallazgo positivo de secreto es DENY remediable, no hard DENY", () => {
     const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-block-class-secret-"));
     const target = path.join(dir, "credential.ts");
     const identifier = ["access", "token"].join("_");
@@ -510,7 +510,7 @@ describe("malahor hooks", () => {
   });
 
   // follow-up: clasificación DENY incremental
-  test.skip("un patch sin resumen evaluable falla cerrado como control no disponible", () => {
+  test("un patch sin resumen evaluable falla cerrado como control no disponible", () => {
     const dir = fs.mkdtempSync(path.join("/tmp/opencode", "malahor-hooks-block-class-patch-"));
     const target = path.join(dir, "benign.ts");
     fs.writeFileSync(target, "export const ready = true;\n", "utf8");
@@ -957,7 +957,7 @@ describe("malahor hooks", () => {
   });
 
   // follow-up: clasificación DENY incremental
-  test.skip("error de control critico deniega y error auxiliar solo advierte", () => {
+  test("error de control critico deniega y error auxiliar solo advierte", () => {
     const critical: HookRule[] = [{
       id: "control-critico",
       run: () => { throw new Error("timeout"); },

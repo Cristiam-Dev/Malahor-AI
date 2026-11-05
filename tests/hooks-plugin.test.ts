@@ -917,7 +917,7 @@ describe("adaptador de plugin V2", () => {
   });
 
   // follow-up: clasificación DENY incremental
-  test.skip("un patch benigno que el parser no puede evaluar conserva fail-closed sin afirmar secreto", async () => {
+  test("un patch benigno que el parser no puede evaluar conserva fail-closed sin afirmar secreto", async () => {
     const relativePath = "src/benign-move.ts";
     const destination = "src/benign-moved.ts";
     writeSourceFixture(relativePath, "export const digest = 'sha256:before';");

@@ -376,7 +376,7 @@ export function formatPluginBlock(result: HookResult): string {
     .filter((violation) => violation.decision === "deny" || violation.decision === "ask");
   const lines = [
     `Malahor bloqueo ${result.event}: ${result.decision.toUpperCase()}`,
-    ...relevant.map((violation) => `- ${violation.id}: ${violation.message}`),
+    ...relevant.map((violation) => `- ${violation.id}${violation.blockClass ? ` [${violation.blockClass}]` : ""}: ${violation.message}`),
   ];
   const remediation = formatHookRemediations(relevant.flatMap((violation) => violation.remediations ?? []));
   if (remediation) lines.push(remediation);

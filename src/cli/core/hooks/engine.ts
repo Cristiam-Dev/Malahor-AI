@@ -43,6 +43,7 @@ export function evaluateHookRules(context: HookContext, rules: HookRule[] = buil
       return [{
         id: critical ? "MAL-HOOK-CONTROL-ERROR" : "MAL-HOOK-CONTROL-WARN",
         decision: critical ? "deny" : "warn",
+        blockClass: critical ? "control-unavailable" : "advisory",
         message: `El control ${rule.id} no pudo evaluarse; detalle omitido por seguridad.`,
         fix: critical
           ? "Corrige el control o la politica antes de ejecutar la operacion protegida."
@@ -143,7 +144,7 @@ export function formatHookResult(result: HookResult): string {
   const lines = [`Hooks: ${result.decision.toUpperCase()} ${result.event} (${result.profile})`];
 
   for (const violation of result.violations) {
-    lines.push(`- ${violation.decision.toUpperCase()} ${violation.id}: ${violation.message}`);
+    lines.push(`- ${violation.decision.toUpperCase()} ${violation.id}${violation.blockClass ? ` [${violation.blockClass}]` : ""}: ${violation.message}`);
     lines.push(`  Fix: ${violation.fix}`);
     const remediation = formatHookRemediations(violation.remediations ?? []);
     if (remediation) lines.push(...remediation.split("\n"));
