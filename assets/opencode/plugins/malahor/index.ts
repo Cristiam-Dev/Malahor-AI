@@ -11350,6 +11350,10 @@ function proposePlan(scope, input, now = Date.now(), presentationInteractionID =
   if (input.actionIntents !== undefined && (input.contractVersion !== PLAN_CONTRACT_VERSION || input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER)) {
     throw new Error("Los intents V5 requieren contrato y canonicalizador explícitos.");
   }
+  const taskDecisionRef = input.taskDecisionRef;
+  if (taskDecisionRef !== undefined && (typeof taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(taskDecisionRef))) {
+    throw new Error("Referencia de decisión de clasificación no evaluable.");
+  }
   const plan = normalizePlan(scope.mode, input);
   const actionIntents = normalizeActionIntents(input.actionIntents, plan.actions, scope.project);
   const actionGraph = normalizeActionGraph(input.actionGraph, plan.actions, actionIntents);
@@ -11365,6 +11369,7 @@ function proposePlan(scope, input, now = Date.now(), presentationInteractionID =
     actionIntents,
     actionGraph,
     ...spec,
+    ...taskDecisionRef === undefined ? {} : { taskDecisionRef },
     planID,
     ...scope,
     presentationInteractionID,
@@ -11408,7 +11413,7 @@ function validState(state, authority = DEFAULT_PLANNING_AUTHORITY) {
   if (!state || typeof state !== "object" || Array.isArray(state))
     return false;
   const value = state;
-  if (value.version !== 4 && value.version !== 5 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || !validPlan(value.plan, value.mode) || typeof value.proof !== "string")
+  if (value.version !== 4 && value.version !== 5 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || value.taskDecisionRef !== undefined && (typeof value.taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(value.taskDecisionRef)) || !validPlan(value.plan, value.mode) || typeof value.proof !== "string")
     return false;
   const plan = value.plan;
   const scope = {
@@ -15423,6 +15428,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
           level: { type: "integer", enum: [1, 2] },
           specRef: { type: "string", pattern: "^SDD/.+\\.md$" },
           specHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          taskDecisionRef: { type: "string", pattern: "^[a-f0-9]{64}$" },
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
           presentation: {
@@ -15509,6 +15515,20 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
           throw new Error("malahor_plan admite hasta 12 acciones por slice; divide el trabajo en fases y presenta un plan nuevo.");
         }
         const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+        const taskClassifier = options.taskClassifier;
+        if (taskClassifier) {
+          const decision = taskClassifier.requireRoute(resolved.scope.sessionID, "sdd", {
+            sessionID: resolved.scope.sessionID,
+            project: resolved.scope.project,
+            policyRevision: resolved.scope.policyRevision,
+            mode: resolved.scope.mode,
+            root: projectRoot
+          });
+          if (raw.taskDecisionRef !== undefined && raw.taskDecisionRef !== decision.decisionRef) {
+            throw new Error("La planificación requiere una decisión sdd vigente y exacta.");
+          }
+          raw.taskDecisionRef = decision.decisionRef;
+        }
         const newRepoDoc = actions?.find((item) => item.action === "edit" && isProtectedDocumentationPath(projectRoot, item.resource) && !fs19.existsSync(item.resource));
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
@@ -56461,6 +56481,7 @@ async function setupV2(context3) {
           Promise.resolve().then(() => (init_direct_task_execution(), exports_direct_task_execution))
         ]);
         const taskClassifier = createTaskClassifier2();
+        options.taskClassifier = taskClassifier;
         const directTasks = createDirectTaskRegistry2();
         const classifierRegistration = await registerTaskClassificationTool2(planningTools, taskClassifier, resolveCommitWorkflowScope);
         if (classifierRegistration && typeof classifierRegistration.dispose === "function") {

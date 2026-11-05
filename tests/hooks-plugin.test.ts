@@ -1901,6 +1901,26 @@ describe("adaptador de plugin V2", () => {
         expect(typeof candidate).toBe("function");
         return candidate as (value: unknown, call: Record<string, string>) => Promise<unknown>;
       };
+      await execute("task_classify")({
+        schema: 1,
+        understood: true,
+        requestedEffect: "mutation",
+        userRequestedPlanning: true,
+        symptomOrCauseUnknown: false,
+        signals: {
+          specification: "high", discovery: "low", scope: "medium",
+          openDecisions: "low", reversibility: "high", verifiability: "high",
+        },
+        closure: {
+          action: "known", targets: "known", verification: "objective",
+          discovery: "none", openDecisionCount: 0,
+        },
+        proof: {
+          effect: "Repara la serialización exacta del stage sin ampliar recursos.",
+          targets: "src/core y tests/fixture.test.ts",
+          verification: "La prueba de reparación de stage termina con código cero.",
+        },
+      }, { sessionID, agent: "malahor", messageID: "msg_classify", id: "call_classify" });
       const plannedCommand = "git add -- src/core tests/fixture.test.ts";
       const actualCommand = "git add -- src/core/a.ts src/core/b.ts tests/fixture.test.ts";
       await execute("plan")({

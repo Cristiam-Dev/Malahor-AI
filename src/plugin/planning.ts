@@ -593,6 +593,7 @@ export async function registerPlanningTools(
           level: { type: "integer", enum: [1, 2] },
           specRef: { type: "string", pattern: "^SDD/.+\\.md$" },
           specHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          taskDecisionRef: { type: "string", pattern: "^[a-f0-9]{64}$" },
           summary: { type: "string" },
           steps: { type: "array", items: { type: "string" } },
           presentation: {
@@ -666,6 +667,20 @@ export async function registerPlanningTools(
            throw new Error("malahor_plan admite hasta 12 acciones por slice; divide el trabajo en fases y presenta un plan nuevo.");
          }
          const projectRoot = planningProjectRoot(resolved.scope.project, resolved.directory, options.env);
+        const taskClassifier = options.taskClassifier;
+        if (taskClassifier) {
+          const decision = taskClassifier.requireRoute(resolved.scope.sessionID, "sdd", {
+            sessionID: resolved.scope.sessionID,
+            project: resolved.scope.project,
+            policyRevision: resolved.scope.policyRevision,
+            mode: resolved.scope.mode,
+            root: projectRoot,
+          });
+          if (raw.taskDecisionRef !== undefined && raw.taskDecisionRef !== decision.decisionRef) {
+            throw new Error("La planificación requiere una decisión sdd vigente y exacta.");
+          }
+          raw.taskDecisionRef = decision.decisionRef;
+        }
         const newRepoDoc = actions?.find((item) => item.action === "edit"
           && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));
          if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);

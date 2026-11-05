@@ -409,6 +409,7 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
             import("./direct-task-execution"),
           ]);
         const taskClassifier = createTaskClassifier();
+        options.taskClassifier = taskClassifier;
         const directTasks = createDirectTaskRegistry();
         const classifierRegistration = await registerTaskClassificationTool(
           planningTools as unknown as import("./task-classification").TaskClassificationTools,

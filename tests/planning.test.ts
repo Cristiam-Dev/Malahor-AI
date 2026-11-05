@@ -2028,7 +2028,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       "level", "specRef", "specHash", "summary", "steps", "presentation", "actions",
     ]));
     expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted([
-      "level", "specRef", "specHash", "summary", "steps", "presentation", "actions", "dependencies",
+      "level", "specRef", "specHash", "taskDecisionRef", "summary", "steps", "presentation", "actions", "dependencies",
     ]));
     expect(schema.additionalProperties).toBe(false);
     expect(schema.properties?.level?.enum).toEqual([1, 2]);
@@ -2389,6 +2389,60 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       options,
       storage,
     )).resolves.toBeUndefined();
+  });
+
+  test("malahor_plan exige una decisión sdd vigente cuando el clasificador está disponible", async () => {
+    configure("ejecutar");
+    const decisionRef = "a".repeat(64);
+    options = {
+      ...options,
+      taskClassifier: {
+        requireRoute: () => { throw new Error("No hay una clasificación vigente para esta sesión."); },
+      } as unknown as NonNullable<typeof options.taskClassifier>,
+    };
+    const withoutDecision = await registeredTools();
+    await expect(withoutDecision.execute(
+      "plan",
+      input(),
+      call(SESSION, "malahor", "msg_f2_missing"),
+    )).rejects.toThrow(/clasificación|decisión sdd/i);
+
+    options = {
+      ...options,
+      taskClassifier: {
+        requireRoute: () => ({ decisionRef }),
+      } as unknown as NonNullable<typeof options.taskClassifier>,
+    };
+    const harness = await registeredTools();
+    await expect(harness.execute(
+      "plan",
+      { ...input(), taskDecisionRef: "b".repeat(64) },
+      call(SESSION, "malahor", "msg_f2_mismatch"),
+    )).rejects.toThrow(/decisión sdd|clasificación/i);
+
+    await harness.execute("plan", input(), call(SESSION, "malahor", "msg_f2_auto"));
+    let state = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(state.taskDecisionRef).toBe(decisionRef);
+
+    const result = await harness.execute(
+      "plan",
+      { ...input(), taskDecisionRef: decisionRef },
+      call(SESSION, "malahor", "msg_f2_ok"),
+    );
+    state = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(state.taskDecisionRef).toBe(decisionRef);
+    expect(result.content).toContain(FOREGROUND_START);
+  });
+
+  test("sin clasificador, malahor_plan conserva compatibilidad", async () => {
+    configure("ejecutar");
+    const harness = await registeredTools();
+    await expect(harness.execute(
+      "plan",
+      input(),
+      call(SESSION, "malahor", "msg_f2_compat"),
+    )).resolves.toBeDefined();
+    expect((records.get(planKey(SESSION)) as PlanStateV5).taskDecisionRef).toBeUndefined();
   });
 
   test("los errores de Planning indican el siguiente paso", async () => {

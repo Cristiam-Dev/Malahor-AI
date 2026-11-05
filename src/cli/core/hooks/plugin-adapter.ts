@@ -37,6 +37,20 @@ export interface SessionProjectHints {
   targetPaths?: string[];
 }
 
+export interface TaskRouteGate {
+  requireRoute(
+    sessionID: string,
+    route: "sdd",
+    scope: {
+      sessionID: string;
+      project: string;
+      policyRevision: string;
+      mode: "advisor" | "assistant" | "executor";
+      root: string;
+    },
+  ): { decisionRef: string };
+}
+
 export interface PluginAdapterOptions {
   cwd: string;
   permissionRegistered?: boolean;
@@ -49,6 +63,7 @@ export interface PluginAdapterOptions {
   ) => Promise<ResolvedSessionProject | undefined>;
   resolveParentSession?: (sessionID: string) => Promise<{ parentID: string; agent: string } | undefined>;
   gitIntentRegistry?: GitIntentRegistry;
+  taskClassifier?: TaskRouteGate;
   env?: NodeJS.ProcessEnv;
 }
 

@@ -64,6 +64,8 @@ export interface PlanInput {
   actionGraph?: PlanActionGraphNodeV1[];
   specRef?: string;
   specHash?: string;
+  /** Referencia de la decisión de clasificación que autorizó planificar. */
+  taskDecisionRef?: string;
 }
 
 export interface NormalizedPlanInput {
@@ -121,6 +123,8 @@ export interface PlanStateV5 extends PlanStateBase {
   specHash?: string;
   /** Firma de la fase previa al primer checkpoint; inmutable al pausar o reanudar. */
   executionAnchor?: string;
+  /** Referencia firmada de la decisión de clasificación; no altera el digest. */
+  taskDecisionRef?: string;
 }
 
 export type PlanState = LegacyPlanState | PlanStateV5;
@@ -300,6 +304,10 @@ export function proposePlan(
     && (input.contractVersion !== PLAN_CONTRACT_VERSION || input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER)) {
     throw new Error("Los intents V5 requieren contrato y canonicalizador explícitos.");
   }
+  const taskDecisionRef = input.taskDecisionRef;
+  if (taskDecisionRef !== undefined && (typeof taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(taskDecisionRef))) {
+    throw new Error("Referencia de decisión de clasificación no evaluable.");
+  }
   const plan = normalizePlan(scope.mode, input);
   const actionIntents = normalizeActionIntents(input.actionIntents, plan.actions, scope.project);
   const actionGraph = normalizeActionGraph(input.actionGraph, plan.actions, actionIntents);
@@ -318,6 +326,7 @@ export function proposePlan(
     actionIntents,
     actionGraph,
     ...spec,
+    ...(taskDecisionRef === undefined ? {} : { taskDecisionRef }),
     planID, ...scope, presentationInteractionID, plan, digest, revision,
     phase: "presented", createdAt: now, updatedAt: now, proof: "",
   }, authority);
@@ -398,6 +407,8 @@ export function validState(state: unknown, authority: PlanningAuthority = DEFAUL
     || typeof value.phase !== "string" || !PHASES.has(value.phase as PlanPhase)
     || !validTime(value.createdAt) || !validTime(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number)
     || !validOptionalTimes(value)
+    || (value.taskDecisionRef !== undefined
+      && (typeof value.taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(value.taskDecisionRef)))
     || !validPlan(value.plan, value.mode as MalahorMode)
     || typeof value.proof !== "string") return false;
   const plan = value.plan as NormalizedPlanInput;
