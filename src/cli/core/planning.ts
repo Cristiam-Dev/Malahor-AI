@@ -455,6 +455,23 @@ export function renderPlan(
   return renderPlanPresentation(state, options);
 }
 
+export interface PlanPreflightEditV1 {
+  key: string;
+  path: string;
+  existence: "must-exist" | "may-create";
+  block?: string;
+  consumers: string[];
+  tests: string[];
+  assertions?: string[];
+}
+
+export interface PlanPreflightV1 {
+  edits: PlanPreflightEditV1[];
+  runtime?: Array<{ contract: string; evidence: string }>;
+  failures?: string[];
+  evidence?: Array<{ claim: string; source: string }>;
+}
+
 function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput {
   if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
     throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
@@ -492,13 +509,146 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput
   if (JSON.stringify(visibleInput).length > 12_000) throw new Error("El plan es demasiado grande para una revision visible.");
   const presentation = normalizePlanPresentation(input.presentation, mode, level);
   const actions = normalizePlannedActions(input.actions);
+  const preflightBundle = normalizePlanPreflight(
+    (input as PlanInput & { preflight?: unknown }).preflight,
+    actions,
+    input.verification,
+  );
   const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\0${item.revision}`);
   validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
-  const normalized = {
+  const normalized: NormalizedPlanInput & { preflight?: PlanPreflightV1 } = {
     summary: input.summary.trim(), steps: [...input.steps], presentation, actions, dependencies: normalizedDependencies,
-    ...(input.verification === undefined ? {} : { verification: normalizePlanVerification(input.verification) }),
+    ...(preflightBundle.verification === undefined ? {} : { verification: preflightBundle.verification }),
+    ...(preflightBundle.preflight === undefined ? {} : { preflight: preflightBundle.preflight }),
   };
   return input.level === undefined ? normalized : { level, ...normalized };
+}
+
+export function normalizePlanPreflight(
+  value: unknown,
+  actions: PlannedAction[],
+  verification: PlanVerificationV1 | undefined,
+): { preflight?: PlanPreflightV1; verification?: PlanVerificationV1 } {
+  const editActions = actions.filter((action) => action.action === "edit");
+  if (value === undefined) {
+    return verification === undefined ? {} : { verification: normalizePlanVerification(verification) };
+  }
+  if (editActions.length === 0) throw new Error("El preflight no aplica a un plan sin ediciones.");
+  if (editActions.some((action) => action.key === undefined)) {
+    throw new Error("El preflight exige clave explícita en cada edición.");
+  }
+  if (!isRecord(value)) throw new Error("Preflight inválido: se espera un objeto.");
+  const record = value;
+  assertExactKeys(record, ["edits", "runtime", "failures", "evidence"], "Preflight");
+  if (!Array.isArray(record.edits) || record.edits.length === 0 || record.edits.length > 12) {
+    throw new Error("Preflight inválido: edits debe declarar entre 1 y 12 bloques.");
+  }
+  const edits: PlanPreflightEditV1[] = [];
+  const keys = new Set<string>();
+  for (const raw of record.edits) {
+    if (!isRecord(raw)) throw new Error("Preflight inválido: cada edición debe ser un objeto.");
+    assertExactKeys(raw, ["key", "path", "existence", "block", "consumers", "tests", "assertions"], "Edición del preflight");
+    const key = typeof raw.key === "string" ? raw.key.trim().toLowerCase() : "";
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(key) || keys.has(key)) {
+      throw new Error("Preflight inválido: clave de edición no evaluable o duplicada.");
+    }
+    keys.add(key);
+    const relative = normalizePreflightPath(raw.path, "path");
+    const existence = raw.existence;
+    if (existence !== "must-exist" && existence !== "may-create") {
+      throw new Error("Preflight inválido: existence debe ser must-exist o may-create.");
+    }
+    const block = raw.block;
+    if (existence === "must-exist") {
+      if (typeof block !== "string" || block.length === 0 || block.length > 8_000) {
+        throw new Error("Preflight inválido: must-exist requiere un bloque literal de hasta 8000 caracteres.");
+      }
+    } else if (block !== undefined) {
+      throw new Error("Preflight inválido: may-create no declara bloque previo.");
+    }
+    const consumers = normalizePreflightPaths(raw.consumers, "consumers");
+    const tests = normalizePreflightPaths(raw.tests, "tests");
+    const assertions = normalizePreflightTextList(raw.assertions, "assertions", 50, 2_000);
+    edits.push({
+      key, path: relative, existence,
+      ...(typeof block === "string" ? { block } : {}),
+      consumers, tests,
+      ...(assertions.length > 0 ? { assertions } : {}),
+    });
+  }
+  const actionKeys = new Set(editActions.map((action) => action.key!));
+  for (const key of actionKeys) if (!keys.has(key)) throw new Error(`Preflight inválido: falta la edición ${key}.`);
+  for (const key of keys) if (!actionKeys.has(key)) throw new Error(`Preflight inválido: la edición ${key} no corresponde a una acción.`);
+  const runtime = normalizePreflightObjects(record.runtime, "runtime", ["contract", "evidence"] as const);
+  const failures = normalizePreflightTextList(record.failures, "failures", 20, 2_000);
+  const evidence = normalizePreflightObjects(record.evidence, "evidence", ["claim", "source"] as const);
+  const preflight: PlanPreflightV1 = {
+    edits,
+    ...(runtime.length > 0 ? { runtime } : {}),
+    ...(failures.length > 0 ? { failures } : {}),
+    ...(evidence.length > 0 ? { evidence } : {}),
+  };
+  if (JSON.stringify(preflight).length > 32_000) throw new Error("El preflight es demasiado grande para una revisión firmada.");
+  if (verification === undefined) throw new Error("El preflight con ediciones requiere verification con pruebas pertinentes y build.");
+  return { preflight, verification: normalizePlanVerification(verification) };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const set = new Set(allowed);
+  if (Object.keys(value).some((key) => !set.has(key))) throw new Error(`${label}: campo no admitido.`);
+}
+
+function normalizePreflightPath(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096 || /[\u0000\r\n]/u.test(value)) {
+    throw new Error(`Preflight inválido: ${field} debe ser una ruta relativa.`);
+  }
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized)
+    || normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Preflight inválido: ${field} debe ser una ruta relativa sin traversal.`);
+  }
+  return normalized;
+}
+
+function normalizePreflightPaths(value: unknown, field: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 50) throw new Error(`Preflight inválido: ${field} admite hasta 50 rutas.`);
+  return [...new Set(value.map((item) => normalizePreflightPath(item, field)))];
+}
+
+function normalizePreflightTextList(value: unknown, field: string, max: number, maxLength: number): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > max
+    || value.some((item) => typeof item !== "string" || !item.trim() || item.length > maxLength)) {
+    throw new Error(`Preflight inválido: ${field} inválido.`);
+  }
+  return value.map((item) => (item as string).trim());
+}
+
+function normalizePreflightObjects<T extends string>(
+  value: unknown,
+  field: string,
+  keys: readonly T[],
+): Array<Record<T, string>> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 20) throw new Error(`Preflight inválido: ${field} admite hasta 20 entradas.`);
+  return value.map((item) => {
+    if (!isRecord(item)) throw new Error(`Preflight inválido: ${field} inválido.`);
+    assertExactKeys(item, keys, `Preflight ${field}`);
+    const result = {} as Record<T, string>;
+    for (const key of keys) {
+      const entry = item[key];
+      if (typeof entry !== "string" || !entry.trim() || entry.length > 2_000) {
+        throw new Error(`Preflight inválido: ${field}.${key} inválido.`);
+      }
+      result[key] = entry.trim();
+    }
+    return result;
+  });
 }
 
 export function normalizePlannedActions(actions: PlannedAction[]): PlannedAction[] {

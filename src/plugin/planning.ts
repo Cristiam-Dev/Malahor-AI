@@ -637,6 +637,53 @@ export async function registerPlanningTools(
             },
             required: ["action", "resource"], additionalProperties: false,
           } },
+          verification: {
+            type: "object", properties: {
+              cwd: { type: "string" },
+              tests: { type: "array", items: {
+                type: "object", properties: {
+                  command: { type: "string" },
+                  targets: { type: "array", items: { type: "string" } },
+                  rationale: { type: "string" },
+                },
+                required: ["command", "targets", "rationale"], additionalProperties: false,
+              } },
+              build: { type: "string" },
+            },
+            required: ["cwd", "tests", "build"], additionalProperties: false,
+          },
+          preflight: {
+            type: "object", properties: {
+              edits: { type: "array", items: {
+                type: "object", properties: {
+                  key: { type: "string" },
+                  path: { type: "string" },
+                  existence: { type: "string", enum: ["must-exist", "may-create"] },
+                  block: { type: "string" },
+                  consumers: { type: "array", items: { type: "string" } },
+                  tests: { type: "array", items: { type: "string" } },
+                  assertions: { type: "array", items: { type: "string" } },
+                },
+                required: ["key", "path", "existence", "consumers", "tests"], additionalProperties: false,
+              } },
+              runtime: { type: "array", items: {
+                type: "object", properties: {
+                  contract: { type: "string" },
+                  evidence: { type: "string" },
+                },
+                required: ["contract", "evidence"], additionalProperties: false,
+              } },
+              failures: { type: "array", items: { type: "string" } },
+              evidence: { type: "array", items: {
+                type: "object", properties: {
+                  claim: { type: "string" },
+                  source: { type: "string" },
+                },
+                required: ["claim", "source"], additionalProperties: false,
+              } },
+            },
+            required: ["edits"], additionalProperties: false,
+          },
           dependencies: { type: "array", items: {
             type: "object", properties: { planID: { type: "string" }, revision: { type: "string" } },
             required: ["planID", "revision"], additionalProperties: false,
@@ -685,6 +732,19 @@ export async function registerPlanningTools(
           && isProtectedDocumentationPath(projectRoot, item.resource) && !fs.existsSync(item.resource));
          if (newRepoDoc) throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const normalizedActions = normalizePlannedActions(actions ?? []);
+        // El port valida archivos y bloques; la tool solo lo invoca cuando hay ediciones.
+        const preflightGate = (options as unknown as {
+          planningPreflight?: { validate(input: unknown): void };
+        }).planningPreflight;
+        if (preflightGate && normalizedActions.some((item) => item.action === "edit")) {
+          preflightGate.validate({
+            root: projectRoot,
+            directory: resolved.directory,
+            actions: normalizedActions,
+            verification: raw.verification,
+            preflight: (raw as PlanInput & { preflight?: unknown }).preflight,
+          });
+        }
         const intentContext = {
            project: resolved.scope.project,
            root: projectRoot,

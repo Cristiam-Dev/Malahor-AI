@@ -373,6 +373,11 @@ async function setupV2(context: Record<string, unknown>): Promise<Cleanup | void
     if (planningTools && approvalPort && planStorage && planningAuthority
       && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {
+        // Activa el gate de preflight en producción; si el import falla, no se registran las tools.
+        const { validatePlanningPreflight } = await import("./planning-preflight");
+        (options as unknown as { planningPreflight?: { validate(input: unknown): void } }).planningPreflight = {
+          validate: validatePlanningPreflight,
+        };
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function") cleanups.push(() => registration.dispose?.());
         capabilities["planning.v5"] = true;

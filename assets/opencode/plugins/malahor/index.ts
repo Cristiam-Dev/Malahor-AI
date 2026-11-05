@@ -12,6 +12,105 @@ var __export = (target, all) => {
 };
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
+// src/cli/core/planning-authority.ts
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import fs2 from "node:fs";
+import path2 from "node:path";
+function createPlanningAuthority(secret) {
+  if (!(secret instanceof Uint8Array) || secret.byteLength !== KEY_BYTES) {
+    throw new Error(`La autoridad de planeacion requiere ${KEY_BYTES} bytes.`);
+  }
+  const key = Buffer.from(secret);
+  const fingerprint = createHash("sha256").update(key).digest("hex");
+  return {
+    fingerprint,
+    sign: (payload) => createHmac("sha256", key).update(payload).digest("hex"),
+    verify: (payload, proof) => {
+      if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof))
+        return false;
+      const expected = createHmac("sha256", key).update(payload).digest();
+      return timingSafeEqual(expected, Buffer.from(proof, "hex"));
+    }
+  };
+}
+function createEphemeralPlanningAuthority() {
+  return createPlanningAuthority(randomBytes(KEY_BYTES));
+}
+function planningKeyPath(secretsDirectory) {
+  return path2.join(path2.resolve(secretsDirectory), KEY_FILE);
+}
+function loadPlanningAuthority(secretsDirectory) {
+  const directory = path2.resolve(secretsDirectory);
+  ensurePrivateDirectory(directory);
+  const file = planningKeyPath(directory);
+  if (!fs2.existsSync(file))
+    createKey(file);
+  return createPlanningAuthority(readKey(file));
+}
+function createKey(file) {
+  const content = `${randomBytes(KEY_BYTES).toString("hex")}
+`;
+  try {
+    const descriptor = fs2.openSync(file, "wx", 384);
+    try {
+      fs2.writeFileSync(descriptor, content, "utf8");
+      fs2.fsyncSync(descriptor);
+    } finally {
+      fs2.closeSync(descriptor);
+    }
+    secureChmod(file, 384);
+  } catch (error) {
+    if (!isAlreadyExists(error))
+      throw error;
+  }
+}
+function readKey(file) {
+  const stat = fs2.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error("La clave de planeacion debe ser un archivo regular privado, sin enlaces.");
+  }
+  assertOwned(stat, "La clave de planeacion pertenece a otro usuario.");
+  assertPrivateMode(stat, 63, "La clave de planeacion requiere permisos privados.");
+  if (stat.size > 256)
+    throw new Error("La clave de planeacion tiene un formato invalido.");
+  const value = fs2.readFileSync(file, "utf8");
+  if (!/^[a-f0-9]{64}\n?$/.test(value))
+    throw new Error("La clave de planeacion tiene un formato invalido.");
+  return Buffer.from(value.trim(), "hex");
+}
+function ensurePrivateDirectory(directory) {
+  if (!fs2.existsSync(directory))
+    fs2.mkdirSync(directory, { recursive: true, mode: 448 });
+  const stat = fs2.lstatSync(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error("El directorio de secretos de planeacion debe ser un directorio real.");
+  }
+  assertOwned(stat, "El directorio de secretos de planeacion pertenece a otro usuario.");
+  assertPrivateMode(stat, 63, "El directorio de secretos de planeacion requiere permisos privados.");
+  secureChmod(directory, 448);
+}
+function assertOwned(stat, message) {
+  if (process.getuid && stat.uid !== process.getuid())
+    throw new Error(message);
+}
+function assertPrivateMode(stat, mask, message) {
+  if (process.platform !== "win32" && (stat.mode & mask) !== 0)
+    throw new Error(message);
+}
+function secureChmod(target, mode) {
+  try {
+    fs2.chmodSync(target, mode);
+  } catch (error) {
+    if (process.platform !== "win32")
+      throw error;
+  }
+}
+function isAlreadyExists(error) {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+var KEY_FILE = "planning.key", KEY_BYTES = 32;
+var init_planning_authority = () => {};
+
 // src/cli/core/git-command-policy.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
 function classifyGitCommand(command, options = {}) {
@@ -2884,6 +2983,1369 @@ var init_action_intent = __esm(() => {
   };
 });
 
+// src/cli/core/plan-presentation.ts
+function normalizePlanPresentation(value, mode, level = 1) {
+  if (!isRecord6(value))
+    throw new Error("El plan necesita una presentacion humana estructurada.");
+  const objective = normalizedText(value.objective, "objetivo", 1000);
+  const outcome = normalizedText(value.outcome, "resultado", 1000);
+  const steps = normalizedSteps(value.steps);
+  const impact = normalizedImpact(value.impact);
+  const risk = normalizedRisk(value.risk);
+  const exclusions = normalizedList(value.exclusions, "exclusiones");
+  const completionCriteria = normalizedList(value.completionCriteria, "criterios de finalizacion");
+  if (mode === "advisor") {
+    if (steps.length !== 0 || impact.length !== 0) {
+      throw new Error("Asesor solo presenta concepto: sin pasos ni impacto ejecutable.");
+    }
+  } else if (level !== 0) {
+    if (steps.length === 0)
+      throw new Error("La presentacion del plan requiere una ruta con pasos breves.");
+    if (impact.length === 0)
+      throw new Error("La presentacion debe declarar su impacto por area.");
+  }
+  if (completionCriteria.length === 0) {
+    throw new Error("La presentacion debe declarar criterios de finalizacion.");
+  }
+  if (level === 0 && (steps.length > 2 || impact.length > 1 || exclusions.length > 3 || completionCriteria.length > 3 || risk.level !== "low" || risk.categories.length > 0)) {
+    throw new Error("Nivel 0 exige presentacion minima, riesgo bajo y ninguna categoria critica.");
+  }
+  return { objective, outcome, steps, impact, risk, exclusions, completionCriteria };
+}
+function validPlanPresentation(value, mode, level = 1) {
+  try {
+    if (!isRecord6(value))
+      return false;
+    return samePresentation(value, normalizePlanPresentation(value, mode, level));
+  } catch {
+    return false;
+  }
+}
+function renderPlanPresentation(state, options = {}) {
+  const view = typeof options === "string" ? options : options.view ?? "summary";
+  return view === "technical" ? renderTechnicalView(state) : renderSummaryView(state);
+}
+function renderPlanRevisionPresentation(state, revision, options = {}) {
+  const view = typeof options === "string" ? options : options.view ?? "summary";
+  const base = renderPlanPresentation(state, view);
+  return view === "technical" ? `${base}
+
+${renderRevisionTechnical(revision, state)}` : insertBeforeNextAction(base, renderRevisionSummary(revision));
+}
+function renderRevisionSummary(revision) {
+  const progress = revision.progress;
+  const delta = revision.delta;
+  return [
+    "## Progreso preservado",
+    `- Completadas: ${progress.succeeded}; listas: ${progress.ready}; esperando: ${progress.waiting}; bloqueadas: ${progress.blocked}.`,
+    `- En curso: ${progress.inFlight}; con fallo técnico pendiente: ${progress.failed}; total: ${progress.total}.`,
+    "- El trabajo independiente ya confirmado se mantiene; los bloqueos y permisos pendientes no se trasladan a la revisión nueva.",
+    ...revision.actions && revision.actions.length > 0 ? ["", "## Estado por acción", ...revision.actions.map(actionStateLine)] : [],
+    "",
+    "## Cambios de esta revisión",
+    `- Preservadas: ${delta.preserved.length}.`,
+    `- Cambiadas: ${delta.changed.length}.`,
+    `- Añadidas: ${delta.added.length}.`,
+    `- Retiradas: ${delta.removed.length}.`,
+    `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}.`,
+    `- Punto de reanudación: ${revisionResumePoint(progress, delta)}.`
+  ].join(`
+`);
+}
+function renderRevisionTechnical(revision, state) {
+  const progress = revision.progress;
+  const delta = revision.delta;
+  return [
+    "## Recuperación incremental",
+    "### Lineage",
+    `- Revisión padre: ${revision.parentRevision}`,
+    `- Revisión candidata: ${state.revision}`,
+    `- Digest candidato: ${state.digest}`,
+    "",
+    "### Progreso del checkpoint padre",
+    `- Total: ${progress.total}`,
+    `- Completadas: ${progress.succeeded}`,
+    `- Listas: ${progress.ready}`,
+    `- Esperando: ${progress.waiting}`,
+    `- Bloqueadas: ${progress.blocked}`,
+    `- En curso: ${progress.inFlight}`,
+    `- Fallidas: ${progress.failed}`,
+    ...revision.actions && revision.actions.length > 0 ? ["", "### Estado por acción", ...revision.actions.map(actionStateLine)] : [],
+    "",
+    "### Delta firmado",
+    ...revisionDeltaTechnicalLines("Preservadas", delta.preserved),
+    ...revisionDeltaTechnicalLines("Cambiadas", delta.changed),
+    ...revisionDeltaTechnicalLines("Añadidas", delta.added),
+    ...revisionDeltaTechnicalLines("Retiradas", delta.removed),
+    `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}`
+  ].join(`
+`);
+}
+function actionStateLine(action) {
+  return `- ${action.key}: ${action.state}${action.dependsOn.length > 0 ? ` (depende de: ${action.dependsOn.join(", ")})` : ""}`;
+}
+function revisionDeltaTechnicalLines(label, actionIDs) {
+  return actionIDs.length > 0 ? [`- ${label}:`, ...actionIDs.map((actionID) => `  - ${actionID}`)] : [`- ${label}: ninguna`];
+}
+function revisionResumePoint(progress, delta) {
+  if (progress.inFlight > 0)
+    return "las llamadas en curso se reinician y vuelven a cruzar sus controles";
+  if (progress.blocked > 0 || progress.failed > 0) {
+    return "se conservan solo los éxitos idénticos y se reintentan las ramas cambiadas tras la aprobación";
+  }
+  if (delta.changed.length > 0 || delta.added.length > 0) {
+    return "continúa después de los éxitos idénticos y comienza las acciones cambiadas o añadidas";
+  }
+  return "continúa desde el último éxito verificable";
+}
+function insertBeforeNextAction(base, section) {
+  const marker = `
+## Qué debes hacer ahora
+`;
+  const index = base.indexOf(marker);
+  if (index < 0)
+    return `${base}
+
+${section}`;
+  return `${base.slice(0, index)}
+
+${section}${base.slice(index)}`;
+}
+function renderSummaryView(state) {
+  if (planLevel(state) === 0)
+    return renderLevelZeroSummary(state);
+  const presentation = state.plan.presentation;
+  const critical = requiresReinforcedControls(presentation.risk);
+  const lines = [
+    planSummaryHeading(state),
+    `Estado: ${phaseStatus(state)}`,
+    "",
+    "## Objetivo",
+    safeText(presentation.objective),
+    "",
+    "## Al terminar",
+    safeText(presentation.outcome)
+  ];
+  if (presentation.steps.length > 0) {
+    lines.push("", "## Ruta", ...presentation.steps.map((step, index) => `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`));
+  }
+  if (state.plan.actions.length > 0) {
+    lines.push("", "## Acciones", ...state.plan.actions.map(({ action, key, dependsOn }) => `- ${key ?? "sin-clave"}: ${action}${dependsOn && dependsOn.length > 0 ? ` (depende de: ${dependsOn.join(", ")})` : " (sin dependencias)"}`));
+  }
+  if (presentation.impact.length > 0) {
+    lines.push("", "## Impacto", ...impactLines(presentation.impact));
+  }
+  lines.push("", "## Riesgo", `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`, `- ${safeText(presentation.risk.summary)}`);
+  if (critical)
+    lines.push("", ...reinforcedControlLines(presentation.risk));
+  lines.push("", "## Qué debes hacer ahora", nextAction(state), "", "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.");
+  return lines.join(`
+`);
+}
+function renderLevelZeroSummary(state) {
+  const presentation = state.plan.presentation;
+  const lines = [
+    planSummaryHeading(state),
+    `Estado: ${phaseStatus(state)}`,
+    "",
+    "## Cambio",
+    safeText(presentation.objective),
+    "",
+    "## Resultado",
+    safeText(presentation.outcome),
+    "",
+    "## Riesgo",
+    `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
+    `- ${safeText(presentation.risk.summary)}`,
+    "",
+    "## Qué debes hacer ahora",
+    nextAction(state),
+    "",
+    "Si necesitas revisar las rutas, comandos o la identidad firmada, usa `/malahor-plan detalles`."
+  ];
+  return lines.join(`
+`);
+}
+function renderTechnicalView(state) {
+  return [
+    planIdentity(state),
+    `Estado: ${phaseStatus(state)}`,
+    "",
+    "## Detalle técnico",
+    ...technicalBody(state)
+  ].join(`
+`);
+}
+function technicalBody(state) {
+  const presentation = state.plan.presentation;
+  const lines = [
+    "### Riesgo y control",
+    `- Nivel de trabajo: ${planLevel(state)}`,
+    `- Contrato de autorización: V${state.version}`,
+    `- Nivel: ${riskLevelLabel(presentation.risk.level)}`
+  ];
+  if (state.version === 5) {
+    lines.push(`- Canonicalizador: ${state.canonicalizerVersion}`);
+  } else if (!["completed", "revoked", "superseded"].includes(state.phase)) {
+    lines.push("- Compatibilidad: este V4 activo no puede ejecutarse; requiere una revisión V5 visible.");
+  }
+  if (presentation.risk.categories.length > 0) {
+    lines.push(`- Categorías críticas: ${presentation.risk.categories.join(", ")}`);
+  }
+  lines.push(`- Resumen: ${safeText(presentation.risk.summary)}`, `- Detalles: ${safeText(presentation.risk.details)}`);
+  if (planLevel(state) === 0 && presentation.steps.length > 0) {
+    lines.push("", "### Ruta firmada", ...presentation.steps.map((step, index) => `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`));
+  }
+  if (planLevel(state) === 0 && presentation.impact.length > 0) {
+    lines.push("", "### Impacto firmado", ...impactLines(presentation.impact));
+  }
+  lines.push("", "### Criterios de cierre", ...presentation.completionCriteria.map((item) => `- ${safeText(item)}`));
+  if (presentation.exclusions.length > 0) {
+    lines.push("", "### Exclusiones", ...presentation.exclusions.map((item) => `- ${safeText(item)}`));
+  }
+  if (state.plan.dependencies.length > 0) {
+    lines.push("", "### Dependencias", ...state.plan.dependencies.map(({ planID, revision }) => `- ${planID}@${revision}`));
+  }
+  if (state.plan.actions.length > 0) {
+    lines.push("", "### Acciones exactas", ...state.plan.actions.map(({ action, resource, key, dependsOn }) => `- ${action}: ${safeJson(resource)} (clave: ${key ?? "sin-clave"}${dependsOn && dependsOn.length > 0 ? `; depende de: ${dependsOn.join(", ")}` : "; sin dependencias"})`));
+  }
+  if (state.version === 5 && state.actionIntents.length > 0) {
+    lines.push("", "### Intents firmados", ...state.actionIntents.map((intent, index) => `- ${index + 1}. ${intent.kind}: ${intent.actionID}`));
+  }
+  lines.push("", "### Autorización", ...approvalLines(state), "", "### Identidad firmada", `- Plan: ${state.planID}`, `- Revisión: ${state.revision}`, `- Digest: ${state.digest}`, "", "### Vigencia", "- Sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.");
+  return lines;
+}
+function impactLines(impact) {
+  const groups = new Map;
+  for (const item of impact)
+    groups.set(item.area, [...groups.get(item.area) ?? [], item.description]);
+  return [...groups].map(([area, descriptions]) => `- **${safeText(area)}:** ${descriptions.map(safeText).join(" ")}`);
+}
+function approvalLines(state) {
+  if (["completed", "revoked", "superseded"].includes(state.phase)) {
+    return [`- No hay aprobación pendiente; el plan está ${phaseLabel(state.phase)}.`];
+  }
+  if (state.mode === "advisor")
+    return ["- No requiere aprobación: el modo asesor no ejecuta acciones."];
+  if (["running", "paused", "blocked"].includes(state.phase)) {
+    return ["- La ejecución ya fue autorizada para esta revisión y únicamente para sus acciones exactas."];
+  }
+  if (state.mode === "executor") {
+    return ["- Requiere aprobación previa en un turno posterior antes de ejecutar las acciones exactas."];
+  }
+  if (state.phase === "presented") {
+    return [
+      "- Primera confirmación: revisar este plan; no autoriza la ejecución.",
+      "- Segunda confirmación: en un turno posterior, autorizar únicamente sus acciones exactas."
+    ];
+  }
+  return [
+    "- Primera confirmación completada: el plan fue revisado sin autorizar su ejecución.",
+    "- Falta la segunda confirmación para ejecutar únicamente sus acciones exactas."
+  ];
+}
+function nextAction(state) {
+  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
+    return "No ejecutes esta revisión: usa un contrato V4 legado. Puedes consultarla o revocarla; para continuar presenta una revisión V5 equivalente y vuelve a aprobarla.";
+  }
+  if (state.phase === "completed") {
+    return "No tienes que hacer nada más: el trabajo de este plan terminó. Si necesitas otro cambio, solicítalo como una tarea nueva.";
+  }
+  if (state.phase === "revoked") {
+    return "Este plan fue cancelado y ya no puede ejecutarse. Si todavía necesitas el cambio, pide un plan nuevo con el alcance actualizado.";
+  }
+  if (state.phase === "superseded") {
+    return "No apruebes ni ejecutes esta versión: fue reemplazada por una revisión posterior. Revisa únicamente el plan más reciente.";
+  }
+  if (state.phase === "paused") {
+    return "La ejecución está detenida. Cuando quieras continuar exactamente con este alcance, solicita reanudar el plan; cualquier cambio requiere una revisión nueva.";
+  }
+  if (state.phase === "blocked") {
+    return "El plan no puede continuar porque aún tiene dependencias pendientes. Resuélvelas y solicita reanudarlo; Malahor nunca lo iniciará automáticamente.";
+  }
+  if (state.phase === "running") {
+    return "El plan ya está aprobado. Malahor puede continuar únicamente con el alcance firmado; no necesitas responder salvo que quieras pausarlo o cambiarlo.";
+  }
+  if (state.mode === "advisor") {
+    return "Revisa la recomendación y decide si quieres convertirla en una tarea ejecutable. En modo asesor no se realizan cambios.";
+  }
+  if (state.mode === "assistant" && state.phase === "presented") {
+    return "Revisa el alcance y completa la primera confirmación. Ese paso solo registra que lo has revisado: no inicia cambios. Después podrás responder `go` en un turno nuevo para pedir la autorización de ejecución.";
+  }
+  if (state.mode === "assistant") {
+    return "Si el plan te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor abrirá la segunda confirmación y, si la aceptas, ejecutará únicamente este alcance.";
+  }
+  return "Si el alcance te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor pedirá la aprobación de esta revisión y, si se concede, ejecutará únicamente lo descrito; esa respuesta no autoriza operaciones adicionales ni evita otros guardrails.";
+}
+function planSummaryHeading(state) {
+  return `Plan de trabajo Malahor · nivel ${planLevel(state)}`;
+}
+function planIdentity(state) {
+  return `Plan Malahor (${state.mode} · nivel ${planLevel(state)}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
+}
+function phaseStatus(state) {
+  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
+    return "bloqueado: requiere revisión V5";
+  }
+  if (state.phase === "presented") {
+    return state.mode === "assistant" ? "esperando tu revisión" : state.mode === "executor" ? "esperando tu aprobación" : "presentado para consulta";
+  }
+  if (state.phase === "reviewed")
+    return "revisado; esperando autorización para ejecutar";
+  if (state.phase === "running")
+    return "aprobado y en ejecución";
+  if (state.phase === "paused")
+    return "en pausa";
+  if (state.phase === "blocked")
+    return "bloqueado por dependencias";
+  if (state.phase === "completed")
+    return "completado";
+  if (state.phase === "revoked")
+    return "cancelado";
+  return "reemplazado por otra revisión";
+}
+function planLevel(state) {
+  return state.plan.level === 0 || state.plan.level === 2 ? state.plan.level : 1;
+}
+function phaseLabel(phase) {
+  if (phase === "completed")
+    return "completado";
+  if (phase === "revoked")
+    return "revocado";
+  return "reemplazado";
+}
+function riskLevelLabel(level) {
+  if (level === "low")
+    return "bajo";
+  if (level === "medium")
+    return "medio";
+  return "alto";
+}
+function requiresReinforcedControls(risk) {
+  return risk.level === "high" || risk.categories.length > 0;
+}
+function reinforcedControlLines(risk) {
+  const lines = [
+    "## Controles reforzados",
+    `- ${safeText(risk.details)}`
+  ];
+  if (risk.categories.length > 0) {
+    lines.push(`- **Áreas sensibles:** ${risk.categories.map(riskCategoryLabel).join(", ")}.`);
+  }
+  lines.push("- La ejecución se detendrá si cambia el alcance o falla un guardrail obligatorio.");
+  return lines;
+}
+function riskCategoryLabel(category) {
+  if (category === "security")
+    return "seguridad";
+  if (category === "data")
+    return "datos";
+  if (category === "architecture")
+    return "arquitectura";
+  return "destrucción";
+}
+function safeJson(value) {
+  return JSON.stringify(value).replace(/[<>&`]/gu, (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`);
+}
+function safeText(value) {
+  return value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
+}
+function normalizedSteps(value) {
+  if (!Array.isArray(value) || value.length > MAX_STEPS) {
+    throw new Error("Pasos de presentacion invalidos o demasiado extensos.");
+  }
+  return value.map((step) => {
+    if (!isRecord6(step))
+      throw new Error("Paso de presentacion invalido.");
+    return {
+      title: normalizedText(step.title, "titulo de paso", 160),
+      description: normalizedText(step.description, "descripcion de paso", 500)
+    };
+  });
+}
+function normalizedImpact(value) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw new Error("Lista de impacto invalida o demasiado extensa.");
+  }
+  return value.map((item) => {
+    if (!isRecord6(item))
+      throw new Error("Elemento de impacto invalido.");
+    return {
+      area: normalizedText(item.area, "area de impacto", 120),
+      description: normalizedText(item.description, "descripcion de impacto", 500)
+    };
+  });
+}
+function normalizedRisk(value) {
+  if (!isRecord6(value))
+    throw new Error("Riesgo de presentacion invalido.");
+  if (typeof value.level !== "string" || !RISK_LEVELS.has(value.level)) {
+    throw new Error("Nivel de riesgo invalido.");
+  }
+  if (!Array.isArray(value.categories) || value.categories.length > RISK_CATEGORIES.size) {
+    throw new Error("Categorias de riesgo invalidas.");
+  }
+  const categories = value.categories.map((category) => {
+    if (typeof category !== "string" || !RISK_CATEGORIES.has(category)) {
+      throw new Error("Categoria de riesgo invalida.");
+    }
+    return category;
+  });
+  if (new Set(categories).size !== categories.length)
+    throw new Error("Categorias de riesgo duplicadas.");
+  return {
+    level: value.level,
+    categories,
+    summary: normalizedText(value.summary, "resumen de riesgo", 500),
+    details: normalizedText(value.details, "detalles de riesgo", 1500)
+  };
+}
+function normalizedList(value, label) {
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
+    throw new Error(`Lista de ${label} invalida o demasiado extensa.`);
+  }
+  return value.map((item) => normalizedText(item, label, 1000));
+}
+function normalizedText(value, label, max) {
+  if (typeof value !== "string")
+    throw new Error(`Campo de ${label} invalido.`);
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized || normalized.length > max)
+    throw new Error(`Campo de ${label} invalido o demasiado extenso.`);
+  return normalized;
+}
+function samePresentation(value, normalized) {
+  if (!hasExactKeys(value, [
+    "objective",
+    "outcome",
+    "steps",
+    "impact",
+    "risk",
+    "exclusions",
+    "completionCriteria"
+  ]))
+    return false;
+  return value.objective === normalized.objective && value.outcome === normalized.outcome && sameSteps(value.steps, normalized.steps) && sameImpact(value.impact, normalized.impact) && sameRisk(value.risk, normalized.risk) && sameStrings(value.exclusions, normalized.exclusions) && sameStrings(value.completionCriteria, normalized.completionCriteria);
+}
+function sameSteps(value, normalized) {
+  return Array.isArray(value) && value.length === normalized.length && value.every((step, index) => {
+    if (!isRecord6(step) || !hasExactKeys(step, ["title", "description"]))
+      return false;
+    const expected = normalized[index];
+    return step.title === expected.title && step.description === expected.description;
+  });
+}
+function sameImpact(value, normalized) {
+  return Array.isArray(value) && value.length === normalized.length && value.every((item, index) => {
+    if (!isRecord6(item) || !hasExactKeys(item, ["area", "description"]))
+      return false;
+    const expected = normalized[index];
+    return item.area === expected.area && item.description === expected.description;
+  });
+}
+function sameRisk(value, normalized) {
+  if (!isRecord6(value) || !hasExactKeys(value, ["level", "categories", "summary", "details"]))
+    return false;
+  return value.level === normalized.level && sameStrings(value.categories, normalized.categories) && value.summary === normalized.summary && value.details === normalized.details;
+}
+function sameStrings(value, normalized) {
+  return Array.isArray(value) && value.length === normalized.length && value.every((item, index) => item === normalized[index]);
+}
+function hasExactKeys(value, expected) {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+function isRecord6(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var MAX_STEPS = 5, MAX_ITEMS = 30, RISK_LEVELS, RISK_CATEGORIES;
+var init_plan_presentation = __esm(() => {
+  RISK_LEVELS = new Set(["low", "medium", "high"]);
+  RISK_CATEGORIES = new Set([
+    "security",
+    "data",
+    "architecture",
+    "destructive"
+  ]);
+});
+
+// src/cli/core/planning.ts
+import { createHash as createHash9, randomBytes as randomBytes4 } from "node:crypto";
+async function presentPlan(scope, input, presentationInteractionID, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
+  return serialize(scope.sessionID, async () => {
+    const now = Date.now();
+    const stored = await adapter.loadActive(scope.sessionID);
+    const previous = validState(stored, authority) && stored.sessionID === scope.sessionID ? stored : undefined;
+    const current = previous && samePlanScope(previous, scope) ? previous : undefined;
+    const planID = current && !TERMINAL.has(current.phase) ? current.planID : randomID();
+    const state = proposePlan(scope, input, now, presentationInteractionID, planID, authority);
+    await assertDependencyGraph(state, adapter, authority);
+    if (previous && !TERMINAL.has(previous.phase)) {
+      await adapter.save(seal({ ...previous, phase: "superseded", supersededAt: now, updatedAt: now }, authority));
+    }
+    await adapter.save(state);
+    if (scope.mode !== "assistant")
+      return state;
+    await adapter.confirm("review", state);
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, state, authority))
+      throw new Error("El plan cambio durante la revision: vuelve a presentarlo.");
+    const reviewed = reviewPlan(fresh, state.digest, Date.now(), authority);
+    await adapter.save(reviewed);
+    return reviewed;
+  });
+}
+async function requestPlanExecution(scope, digest2, executionInteractionID, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
+  return serialize(scope.sessionID, async () => {
+    if (!validInteractionID(executionInteractionID))
+      throw new Error("Turno de ejecucion no evaluable.");
+    const stored = await adapter.loadActive(scope.sessionID);
+    if (isActiveLegacyPlan(stored)) {
+      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan activo debe presentarse como una revisión V5.");
+    }
+    if (!validState(stored, authority) || stored.version !== 5 || stored.digest !== digest2 || !samePlanScope(stored, scope) || stored.plan.actions.length === 0 || (stored.mode === "assistant" ? stored.phase !== "reviewed" : stored.phase !== "presented")) {
+      throw new Error("No hay un plan ejecutable vigente.");
+    }
+    if (stored.presentationInteractionID === executionInteractionID) {
+      throw new Error("El plan debe quedar visible y terminar su turno de presentacion. Espera una solicitud posterior del usuario antes de pedir aprobacion.");
+    }
+    if (stored.mode === "advisor")
+      throw new Error("Primero revisa el plan.");
+    await adapter.confirm("run", stored);
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, stored, authority))
+      throw new Error("El plan cambio durante la orden: vuelve a presentarlo.");
+    const pending = await pendingDependencies(fresh, adapter, authority);
+    const next = pending.length > 0 ? blockPlan(fresh, pending, Date.now(), authority) : authorizePlanAfterDependencyValidation(fresh, fresh.digest, Date.now(), authority);
+    await adapter.save(next);
+    return next;
+  });
+}
+async function controlPlan(scope, command, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
+  return serialize(scope.sessionID, async () => {
+    const stored = await adapter.loadActive(scope.sessionID);
+    if (!validState(stored, authority) || !samePlanScope(stored, scope))
+      throw new Error("No hay un plan vigente para esta sesion.");
+    if (command === "status")
+      return stored;
+    if (command === "revoke") {
+      if (TERMINAL.has(stored.phase))
+        throw new Error("El plan ya esta cerrado.");
+      const next2 = seal({ ...stored, phase: "revoked", revokedAt: Date.now(), updatedAt: Date.now() }, authority);
+      await adapter.save(next2);
+      return next2;
+    }
+    if (stored.version !== 5) {
+      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan V4 solo puede consultarse o revocarse.");
+    }
+    if (command === "pause") {
+      if (stored.phase !== "running")
+        throw new Error("Solo un plan en ejecucion puede pausarse.");
+      const next2 = seal({
+        ...stored,
+        executionAnchor: planExecutionProofHash(stored),
+        phase: "paused",
+        pausedAt: Date.now(),
+        updatedAt: Date.now()
+      }, authority);
+      await adapter.save(next2);
+      return next2;
+    }
+    if (command === "resume") {
+      if (stored.phase !== "paused" && stored.phase !== "blocked")
+        throw new Error("Solo un plan pausado o bloqueado puede reanudarse.");
+      await adapter.confirm("resume", stored);
+      const fresh2 = await adapter.loadActive(scope.sessionID);
+      if (!sameRevision(fresh2, stored, authority))
+        throw new Error("El plan cambio durante la reanudacion.");
+      const pending2 = await pendingDependencies(fresh2, adapter, authority);
+      const now2 = Date.now();
+      const next2 = pending2.length > 0 ? blockPlan(fresh2, pending2, now2, authority) : seal({
+        ...fresh2,
+        phase: "running",
+        startedAt: fresh2.startedAt ?? now2,
+        updatedAt: now2,
+        blockedBy: undefined,
+        blockedAt: undefined,
+        pausedAt: undefined
+      }, authority);
+      await adapter.save(next2);
+      return next2;
+    }
+    if (stored.phase !== "running" && stored.phase !== "paused") {
+      throw new Error("Solo un plan iniciado puede completarse.");
+    }
+    await adapter.confirm("complete", stored);
+    const fresh = await adapter.loadActive(scope.sessionID);
+    if (!sameRevision(fresh, stored, authority))
+      throw new Error("El plan cambio durante el cierre.");
+    const pending = await pendingDependencies(fresh, adapter, authority);
+    if (pending.length > 0)
+      throw new Error("El plan no puede completarse con dependencias pendientes.");
+    const now = Date.now();
+    const next = seal({ ...fresh, phase: "completed", completedAt: now, updatedAt: now }, authority);
+    await adapter.save(next);
+    return next;
+  });
+}
+async function serialize(sessionID, operation) {
+  const previous = transitions.get(sessionID) ?? Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const current = previous.then(() => gate);
+  transitions.set(sessionID, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (transitions.get(sessionID) === current)
+      transitions.delete(sessionID);
+  }
+}
+function proposePlan(scope, input, now = Date.now(), presentationInteractionID = CORE_INTERACTION_ID, planID = randomID(), authority = DEFAULT_PLANNING_AUTHORITY) {
+  validateScope(scope, now);
+  if (!validInteractionID(presentationInteractionID))
+    throw new Error("Turno de presentacion no evaluable.");
+  if (!/^[a-f0-9]{32}$/.test(planID))
+    throw new Error("Identidad de plan no evaluable.");
+  if (input.contractVersion !== undefined && input.contractVersion !== PLAN_CONTRACT_VERSION) {
+    throw new Error("Versión de contrato de planning no soportada.");
+  }
+  if (input.canonicalizerVersion !== undefined && input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER) {
+    throw new Error("Versión de canonicalizador no soportada.");
+  }
+  if (input.actionIntents !== undefined && (input.contractVersion !== PLAN_CONTRACT_VERSION || input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER)) {
+    throw new Error("Los intents V5 requieren contrato y canonicalizador explícitos.");
+  }
+  const taskDecisionRef = input.taskDecisionRef;
+  if (taskDecisionRef !== undefined && (typeof taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(taskDecisionRef))) {
+    throw new Error("Referencia de decisión de clasificación no evaluable.");
+  }
+  const plan = normalizePlan(scope.mode, input);
+  const actionIntents = normalizeActionIntents(input.actionIntents, plan.actions, scope.project);
+  const actionGraph = normalizeActionGraph(input.actionGraph, plan.actions, actionIntents);
+  const actionIntentSource = input.actionIntents === undefined ? "compatibility" : "canonical";
+  const spec = normalizeSpecReference(input.specRef, input.specHash);
+  const revision = randomID();
+  const digest2 = digestPlanV5(scope, plan, planID, revision, presentationInteractionID, actionIntents, actionIntentSource, spec, actionGraph);
+  return seal({
+    version: 5,
+    contractVersion: PLAN_CONTRACT_VERSION,
+    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+    actionIntentSource,
+    actionIntents,
+    actionGraph,
+    ...spec,
+    ...taskDecisionRef === undefined ? {} : { taskDecisionRef },
+    planID,
+    ...scope,
+    presentationInteractionID,
+    plan,
+    digest: digest2,
+    revision,
+    phase: "presented",
+    createdAt: now,
+    updatedAt: now,
+    proof: ""
+  }, authority);
+}
+function reviewPlan(state, digest2, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
+  assertCurrent(state, digest2, now, authority);
+  if (state.mode !== "assistant" || state.phase !== "presented")
+    throw new Error("Revision de plan no aplicable.");
+  return seal({ ...state, phase: "reviewed", reviewedAt: now, updatedAt: now }, authority);
+}
+function authorizePlanAfterDependencyValidation(state, digest2, now, authority) {
+  assertCurrent(state, digest2, now, authority);
+  assertReadyForAuthorization(state);
+  return startPlan(state, now, authority);
+}
+function assertReadyForAuthorization(state) {
+  if (state.mode === "advisor" || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) {
+    throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
+  }
+}
+function startPlan(state, now, authority) {
+  return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
+}
+function planExecutionProofHash(state) {
+  return state.executionAnchor ?? createHash9("sha256").update(state.proof).digest("hex");
+}
+function planAllows(state, scope, operation, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
+  if (!validState(state, authority) || state.version !== 5 || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor" || !samePlanScope(state, scope) || state.createdAt > now || state.updatedAt > now)
+    return false;
+  return state.plan.actions.some(({ action, resource }) => action === operation.action && resource === operation.resource);
+}
+function validState(state, authority = DEFAULT_PLANNING_AUTHORITY) {
+  if (!state || typeof state !== "object" || Array.isArray(state))
+    return false;
+  const value = state;
+  if (value.version !== 4 && value.version !== 5 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || value.taskDecisionRef !== undefined && (typeof value.taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(value.taskDecisionRef)) || !validPlan(value.plan, value.mode) || typeof value.proof !== "string")
+    return false;
+  const plan = value.plan;
+  const scope = {
+    sessionID: value.sessionID,
+    project: value.project,
+    mode: value.mode,
+    policyRevision: value.policyRevision
+  };
+  let expected;
+  if (value.version === 5) {
+    if (value.contractVersion !== PLAN_CONTRACT_VERSION || value.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER || value.actionIntentSource !== "canonical" && value.actionIntentSource !== "compatibility" || !Array.isArray(value.actionIntents) || !value.actionIntents.every(validActionIntentV1) || value.actionIntents.some((intent) => intent.project !== value.project) || value.executionAnchor !== undefined && (typeof value.executionAnchor !== "string" || !/^[a-f0-9]{64}$/.test(value.executionAnchor)) || !validSpecReference(value.specRef, value.specHash) || value.actionGraph !== undefined && !validActionGraph(value.actionGraph, value.actionIntents))
+      return false;
+    if (plan.actions.length === 0 !== (value.actionIntents.length === 0))
+      return false;
+    expected = digestPlanV5(scope, plan, value.planID, value.revision, value.presentationInteractionID, value.actionIntents, value.actionIntentSource, specReferenceFromState(value), value.actionGraph);
+  } else {
+    expected = digestPlanV4(scope, plan, value.planID, value.revision, value.presentationInteractionID);
+  }
+  if (expected !== value.digest || !validPhase(value))
+    return false;
+  return authority.verify(statePayload(value), value.proof);
+}
+function renderPlan(state, options = {}) {
+  return renderPlanPresentation(state, options);
+}
+function normalizePlan(mode, input) {
+  if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
+    throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
+  }
+  const level = normalizePlanLevel(input.level);
+  const dependencies = input.dependencies ?? [];
+  if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || !Array.isArray(dependencies) || input.steps.length > 30 || input.actions.length > 80 || dependencies.length > 30) {
+    throw new Error("Pasos, acciones o dependencias invalidos o demasiado extensos.");
+  }
+  if (mode === "advisor" && (input.steps.length !== 0 || input.actions.length !== 0 || dependencies.length !== 0)) {
+    throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
+  }
+  if (mode !== "advisor" && input.steps.length === 0)
+    throw new Error("El plan requiere pasos visibles.");
+  if (mode !== "advisor" && input.actions.length === 0)
+    throw new Error("El plan requiere acciones o efectos exactos.");
+  if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000))
+    throw new Error("Paso de plan invalido.");
+  if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action) || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {
+    throw new Error("La accion debe ser edit, shell o subagent con recurso exacto.");
+  }
+  if (dependencies.some((item) => !item || !/^[a-f0-9]{32}$/.test(item.planID) || !/^[a-f0-9]{32}$/.test(item.revision))) {
+    throw new Error("Dependencia de plan invalida.");
+  }
+  const visibleInput = {
+    level: input.level,
+    summary: input.summary,
+    steps: input.steps,
+    presentation: input.presentation,
+    actions: input.actions,
+    dependencies,
+    verification: input.verification,
+    specRef: input.specRef,
+    specHash: input.specHash
+  };
+  if (JSON.stringify(visibleInput).length > 12000)
+    throw new Error("El plan es demasiado grande para una revision visible.");
+  const presentation = normalizePlanPresentation(input.presentation, mode, level);
+  const actions = normalizePlannedActions(input.actions);
+  const preflightBundle = normalizePlanPreflight(input.preflight, actions, input.verification);
+  const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\x00${item.revision}`);
+  validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
+  const normalized = {
+    summary: input.summary.trim(),
+    steps: [...input.steps],
+    presentation,
+    actions,
+    dependencies: normalizedDependencies,
+    ...preflightBundle.verification === undefined ? {} : { verification: preflightBundle.verification },
+    ...preflightBundle.preflight === undefined ? {} : { preflight: preflightBundle.preflight }
+  };
+  return input.level === undefined ? normalized : { level, ...normalized };
+}
+function normalizePlanPreflight(value, actions, verification) {
+  const editActions = actions.filter((action) => action.action === "edit");
+  if (value === undefined) {
+    return verification === undefined ? {} : { verification: normalizePlanVerification(verification) };
+  }
+  if (editActions.length === 0)
+    throw new Error("El preflight no aplica a un plan sin ediciones.");
+  if (editActions.some((action) => action.key === undefined)) {
+    throw new Error("El preflight exige clave explícita en cada edición.");
+  }
+  if (!isRecord7(value))
+    throw new Error("Preflight inválido: se espera un objeto.");
+  const record = value;
+  assertExactKeys(record, ["edits", "runtime", "failures", "evidence"], "Preflight");
+  if (!Array.isArray(record.edits) || record.edits.length === 0 || record.edits.length > 12) {
+    throw new Error("Preflight inválido: edits debe declarar entre 1 y 12 bloques.");
+  }
+  const edits = [];
+  const keys = new Set;
+  for (const raw of record.edits) {
+    if (!isRecord7(raw))
+      throw new Error("Preflight inválido: cada edición debe ser un objeto.");
+    assertExactKeys(raw, ["key", "path", "existence", "block", "consumers", "tests", "assertions"], "Edición del preflight");
+    const key = typeof raw.key === "string" ? raw.key.trim().toLowerCase() : "";
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(key) || keys.has(key)) {
+      throw new Error("Preflight inválido: clave de edición no evaluable o duplicada.");
+    }
+    keys.add(key);
+    const relative = normalizePreflightPath(raw.path, "path");
+    const existence = raw.existence;
+    if (existence !== "must-exist" && existence !== "may-create") {
+      throw new Error("Preflight inválido: existence debe ser must-exist o may-create.");
+    }
+    const block = raw.block;
+    if (existence === "must-exist") {
+      if (typeof block !== "string" || block.length === 0 || block.length > 8000) {
+        throw new Error("Preflight inválido: must-exist requiere un bloque literal de hasta 8000 caracteres.");
+      }
+    } else if (block !== undefined) {
+      throw new Error("Preflight inválido: may-create no declara bloque previo.");
+    }
+    const consumers = normalizePreflightPaths(raw.consumers, "consumers");
+    const tests = normalizePreflightPaths(raw.tests, "tests");
+    const assertions = normalizePreflightTextList(raw.assertions, "assertions", 50, 2000);
+    edits.push({
+      key,
+      path: relative,
+      existence,
+      ...typeof block === "string" ? { block } : {},
+      consumers,
+      tests,
+      ...assertions.length > 0 ? { assertions } : {}
+    });
+  }
+  const actionKeys = new Set(editActions.map((action) => action.key));
+  for (const key of actionKeys)
+    if (!keys.has(key))
+      throw new Error(`Preflight inválido: falta la edición ${key}.`);
+  for (const key of keys)
+    if (!actionKeys.has(key))
+      throw new Error(`Preflight inválido: la edición ${key} no corresponde a una acción.`);
+  const runtime = normalizePreflightObjects(record.runtime, "runtime", ["contract", "evidence"]);
+  const failures = normalizePreflightTextList(record.failures, "failures", 20, 2000);
+  const evidence = normalizePreflightObjects(record.evidence, "evidence", ["claim", "source"]);
+  const preflight = {
+    edits,
+    ...runtime.length > 0 ? { runtime } : {},
+    ...failures.length > 0 ? { failures } : {},
+    ...evidence.length > 0 ? { evidence } : {}
+  };
+  if (JSON.stringify(preflight).length > 32000)
+    throw new Error("El preflight es demasiado grande para una revisión firmada.");
+  if (verification === undefined)
+    throw new Error("El preflight con ediciones requiere verification con pruebas pertinentes y build.");
+  return { preflight, verification: normalizePlanVerification(verification) };
+}
+function isRecord7(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function assertExactKeys(value, allowed, label) {
+  const set = new Set(allowed);
+  if (Object.keys(value).some((key) => !set.has(key)))
+    throw new Error(`${label}: campo no admitido.`);
+}
+function normalizePreflightPath(value, field) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4096 || /[\u0000\r\n]/u.test(value)) {
+    throw new Error(`Preflight inválido: ${field} debe ser una ruta relativa.`);
+  }
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized) || normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Preflight inválido: ${field} debe ser una ruta relativa sin traversal.`);
+  }
+  return normalized;
+}
+function normalizePreflightPaths(value, field) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value) || value.length > 50)
+    throw new Error(`Preflight inválido: ${field} admite hasta 50 rutas.`);
+  return [...new Set(value.map((item) => normalizePreflightPath(item, field)))];
+}
+function normalizePreflightTextList(value, field, max, maxLength) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value) || value.length > max || value.some((item) => typeof item !== "string" || !item.trim() || item.length > maxLength)) {
+    throw new Error(`Preflight inválido: ${field} inválido.`);
+  }
+  return value.map((item) => item.trim());
+}
+function normalizePreflightObjects(value, field, keys) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value) || value.length > 20)
+    throw new Error(`Preflight inválido: ${field} admite hasta 20 entradas.`);
+  return value.map((item) => {
+    if (!isRecord7(item))
+      throw new Error(`Preflight inválido: ${field} inválido.`);
+    assertExactKeys(item, keys, `Preflight ${field}`);
+    const result = {};
+    for (const key of keys) {
+      const entry = item[key];
+      if (typeof entry !== "string" || !entry.trim() || entry.length > 2000) {
+        throw new Error(`Preflight inválido: ${field}.${key} inválido.`);
+      }
+      result[key] = entry.trim();
+    }
+    return result;
+  });
+}
+function normalizePlannedActions(actions) {
+  const normalized = actions.map((item) => {
+    const key = item.key === undefined ? derivedActionKey(item.action, item.resource) : normalizeActionKey(item.key);
+    const dependsOn = item.dependsOn === undefined ? [] : [...new Set(item.dependsOn.map(normalizeActionKey))].sort(compareText2);
+    return { action: item.action, resource: item.resource, key, dependsOn };
+  });
+  const unique2 = new Map;
+  for (const item of normalized) {
+    const identity = `${item.action}\x00${item.resource}\x00${item.key}`;
+    const previous = unique2.get(identity);
+    if (previous && !sameStrings2(previous.dependsOn ?? [], item.dependsOn ?? [])) {
+      throw new Error("Una acción duplicada no puede declarar dependencias distintas.");
+    }
+    unique2.set(identity, item);
+  }
+  const result = [...unique2.values()].sort((left, right) => compareText2(`${left.action}\x00${left.resource}\x00${left.key}`, `${right.action}\x00${right.resource}\x00${right.key}`));
+  validateLogicalActionGraph(result);
+  assertChainedEdits(result);
+  return result;
+}
+function assertChainedEdits(actions) {
+  const byKey = new Map(actions.map((action) => [action.key, action]));
+  const reaches = (from, to) => {
+    const seen = new Set;
+    const stack = [from];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current === to)
+        return true;
+      if (seen.has(current))
+        continue;
+      seen.add(current);
+      for (const dependency of byKey.get(current)?.dependsOn ?? [])
+        stack.push(dependency);
+    }
+    return false;
+  };
+  const editsByResource = new Map;
+  for (const action of actions) {
+    if (action.action !== "edit")
+      continue;
+    const keys = editsByResource.get(action.resource) ?? [];
+    keys.push(action.key);
+    editsByResource.set(action.resource, keys);
+  }
+  for (const keys of editsByResource.values()) {
+    for (const left of keys) {
+      for (const right of keys) {
+        if (left === right)
+          continue;
+        if (!reaches(left, right) && !reaches(right, left)) {
+          throw new Error("Las ediciones del mismo archivo deben encadenarse con dependencias.");
+        }
+      }
+    }
+  }
+}
+function normalizeActionKey(value) {
+  if (typeof value !== "string")
+    throw new Error("Clave lógica de acción inválida.");
+  const normalized = value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-");
+  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(normalized)) {
+    throw new Error("Clave lógica de acción inválida.");
+  }
+  return normalized;
+}
+function derivedActionKey(action, resource) {
+  const prefix = action === "subagent" ? "delegate" : action;
+  return `${prefix}-${createHash9("sha256").update(`${action}\x00${resource}`).digest("hex").slice(0, 16)}`;
+}
+function validateLogicalActionGraph(actions) {
+  const keys = actions.map((action) => action.key);
+  if (new Set(keys).size !== keys.length)
+    throw new Error("Las claves lógicas de acción deben ser únicas.");
+  const known = new Set(keys);
+  if (actions.some((action) => (action.dependsOn ?? []).some((dependency) => !known.has(dependency)))) {
+    throw new Error("Una dependencia de acción no existe en el plan.");
+  }
+  const byKey = new Map(actions.map((action) => [action.key, action]));
+  const visiting = new Set;
+  const visited = new Set;
+  const visit2 = (key) => {
+    if (visited.has(key))
+      return;
+    if (visiting.has(key))
+      throw new Error("Ciclo de dependencias entre acciones detectado.");
+    visiting.add(key);
+    for (const dependency of byKey.get(key)?.dependsOn ?? [])
+      visit2(dependency);
+    visiting.delete(key);
+    visited.add(key);
+  };
+  for (const key of keys)
+    visit2(key);
+}
+function normalizeActionIntents(value, actions, project) {
+  if (value === undefined)
+    return compatibilityActionIntents(actions, project);
+  if (!Array.isArray(value) || value.length > 240 || value.some((intent) => !validActionIntentV1(intent))) {
+    throw new Error("ActionIntentV1 inválido o demasiado extenso.");
+  }
+  if (actions.length === 0 !== (value.length === 0)) {
+    throw new Error("Las acciones visibles y los intents firmados deben declarar el mismo alcance vacío/no vacío.");
+  }
+  if (value.some((intent) => intent.project !== project)) {
+    throw new Error("Los intents pertenecen a otro proyecto.");
+  }
+  return structuredClone(value);
+}
+function normalizeActionGraph(value, actions, intents) {
+  if (value !== undefined) {
+    if (!validActionGraph(value, intents))
+      throw new Error("Grafo de acciones firmado inválido.");
+    return structuredClone(value);
+  }
+  if (actions.length === intents.length && actions.every((action) => action.key)) {
+    const actionIDByKey = new Map(actions.map((action, index) => [action.key, intents[index].actionID]));
+    return actions.map((action, index) => ({
+      key: action.key,
+      actionID: intents[index].actionID,
+      dependsOn: (action.dependsOn ?? []).map((key) => actionIDByKey.get(key))
+    }));
+  }
+  return intents.map((intent, index) => ({
+    key: `legacy-${index + 1}-${intent.actionID.slice(0, 12)}`,
+    actionID: intent.actionID,
+    dependsOn: []
+  }));
+}
+function validActionGraph(value, intents) {
+  if (!Array.isArray(value) || value.length !== intents.length)
+    return false;
+  const intentIDs = new Set(intents.map((intent) => intent.actionID));
+  const nodes = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      return false;
+    const node = raw;
+    if (typeof node.key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(node.key) || typeof node.actionID !== "string" || !intentIDs.has(node.actionID) || !Array.isArray(node.dependsOn) || node.dependsOn.some((dependency) => typeof dependency !== "string" || !intentIDs.has(dependency)))
+      return false;
+    nodes.push({ key: node.key, actionID: node.actionID, dependsOn: node.dependsOn });
+  }
+  if (new Set(nodes.map((node) => node.key)).size !== nodes.length || new Set(nodes.map((node) => node.actionID)).size !== nodes.length)
+    return false;
+  try {
+    validateActionIDGraph(nodes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function validateActionIDGraph(nodes) {
+  const byID = new Map(nodes.map((node) => [node.actionID, node]));
+  const visiting = new Set;
+  const visited = new Set;
+  const visit2 = (actionID) => {
+    if (visited.has(actionID))
+      return;
+    if (visiting.has(actionID))
+      throw new Error("Ciclo de dependencias entre intents detectado.");
+    visiting.add(actionID);
+    for (const dependency of byID.get(actionID)?.dependsOn ?? []) {
+      if (!byID.has(dependency))
+        throw new Error("Dependencia de intent inexistente.");
+      visit2(dependency);
+    }
+    visiting.delete(actionID);
+    visited.add(actionID);
+  };
+  for (const node of nodes)
+    visit2(node.actionID);
+}
+function actionGraphForPlan(state) {
+  if (state.actionGraph)
+    return structuredClone(state.actionGraph);
+  return state.actionIntents.map((intent, index) => ({
+    key: `legacy-${index + 1}-${intent.actionID.slice(0, 12)}`,
+    actionID: intent.actionID,
+    dependsOn: []
+  }));
+}
+function normalizeSpecReference(specRef, specHash) {
+  if (specRef === undefined && specHash === undefined)
+    return {};
+  if (typeof specRef !== "string" || typeof specHash !== "string") {
+    throw new Error("Referencia SDD no evaluable.");
+  }
+  const normalizedRef = specRef.trim();
+  const segments = normalizedRef.split("/");
+  if (!normalizedRef || normalizedRef.length > 1024 || /[\u0000\r\n]/u.test(normalizedRef) || !normalizedRef.startsWith("SDD/") || !normalizedRef.endsWith(".md") || normalizedRef.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..") || !/^[a-f0-9]{64}$/.test(specHash)) {
+    throw new Error("Referencia SDD no evaluable: usa un Markdown relativo bajo SDD/ y su SHA-256.");
+  }
+  return { specRef: normalizedRef, specHash };
+}
+function normalizePlanLevel(value) {
+  if (value === undefined)
+    return 1;
+  if (value === 0 || value === 1 || value === 2)
+    return value;
+  throw new Error("Nivel de plan invalido: usa 0, 1 o 2.");
+}
+function validatePlanLevel(level, mode, steps, presentation, actions, dependencies) {
+  if (level !== 0)
+    return;
+  const editTargets = new Set(actions.filter((item) => item.action === "edit").map((item) => item.resource));
+  if (mode === "advisor")
+    throw new Error("Nivel 0 requiere un modo de ejecucion; asesor solo presenta conceptos.");
+  if (steps.length > 3 || presentation.steps.length > 2 || presentation.impact.length > 1 || presentation.exclusions.length > 3 || presentation.completionCriteria.length > 3) {
+    throw new Error("Nivel 0 exige un plan minimo: hasta tres pasos internos, dos pasos visibles y listas breves.");
+  }
+  if (presentation.risk.level !== "low" || presentation.risk.categories.length > 0) {
+    throw new Error("Nivel 0 solo admite riesgo bajo y ninguna categoria critica.");
+  }
+  if (dependencies.length > 0)
+    throw new Error("Nivel 0 no admite dependencias entre planes.");
+  if (actions.some((item) => item.action === "subagent"))
+    throw new Error("Nivel 0 no usa subagentes.");
+  if (editTargets.size > 1)
+    throw new Error("Nivel 0 solo puede modificar un archivo existente.");
+}
+async function assertDependencyGraph(state, adapter, authority) {
+  const visit2 = async (dependencies, trail) => {
+    for (const dependency of dependencies) {
+      if (dependency.planID === state.planID || trail.has(dependency.planID))
+        throw new Error("Ciclo de dependencias de plan detectado.");
+      const raw = await adapter.loadPlan(dependency.planID);
+      if (!validState(raw, authority) || raw.project !== state.project || raw.revision !== dependency.revision) {
+        throw new Error(`Dependencia de plan no evaluable: ${dependency.planID}.`);
+      }
+      const next = new Set(trail);
+      next.add(dependency.planID);
+      await visit2(raw.plan.dependencies, next);
+    }
+  };
+  await visit2(state.plan.dependencies, new Set([state.planID]));
+}
+async function pendingDependencies(state, adapter, authority) {
+  const pending = [];
+  for (const dependency of state.plan.dependencies) {
+    const raw = await adapter.loadPlan(dependency.planID);
+    if (!validState(raw, authority) || raw.project !== state.project || raw.revision !== dependency.revision || raw.phase !== "completed")
+      pending.push(dependency);
+  }
+  return pending;
+}
+function blockPlan(state, blockedBy, now, authority) {
+  return seal({
+    ...state,
+    phase: "blocked",
+    authorizedAt: state.authorizedAt ?? now,
+    blockedAt: now,
+    blockedBy,
+    updatedAt: now
+  }, authority);
+}
+function assertCurrent(state, digest2, now, authority) {
+  if (!validState(state, authority) || state.version !== 5 || state.digest !== digest2 || !Number.isFinite(now) || state.createdAt > now) {
+    throw new Error("Plan cambiado o no evaluable: vuelve a presentarlo.");
+  }
+}
+function seal(state, authority) {
+  const next = { ...state, proof: "" };
+  return { ...next, proof: authority.sign(statePayload(next)) };
+}
+function statePayload(value) {
+  const { proof: _proof, ...payload } = value;
+  return canonical2(payload);
+}
+function digestPlanV4(scope, plan, planID, revision, presentationInteractionID) {
+  return createHash9("sha256").update(canonical2({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
+}
+function digestPlanV5(scope, plan, planID, revision, presentationInteractionID, actionIntents, actionIntentSource, spec, actionGraph) {
+  return createHash9("sha256").update(canonical2({
+    contractVersion: PLAN_CONTRACT_VERSION,
+    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
+    scope,
+    plan,
+    planID,
+    revision,
+    presentationInteractionID,
+    actionIntentSource,
+    actionIntents,
+    ...actionGraph ? { actionGraph } : {},
+    ...spec
+  })).digest("hex");
+}
+function sameRevision(value, expected, authority) {
+  return validState(value, authority) && value.planID === expected.planID && value.version === expected.version && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
+}
+function samePlanScope(state, scope) {
+  return state.sessionID === scope.sessionID && state.project === scope.project && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
+}
+function validPlan(value, mode) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const plan = value;
+  const level = plan.level === undefined ? 1 : plan.level;
+  if (level !== 0 && level !== 1 && level !== 2)
+    return false;
+  const structurallyValid = typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions) && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string") && validPlanPresentation(plan.presentation, mode, level) && validPlannedActions(plan.actions) && (plan.verification === undefined || validPlanVerification(plan.verification)) && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && /^[a-f0-9]{32}$/.test(String(entry.planID)) && /^[a-f0-9]{32}$/.test(String(entry.revision)));
+  if (!structurallyValid)
+    return false;
+  try {
+    validatePlanLevel(level, mode, plan.steps, plan.presentation, plan.actions, plan.dependencies);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function normalizePlanVerification(value) {
+  if (!validPlanVerification(value))
+    throw new Error("Verificación del plan inválida: requiere tests pertinentes y build.");
+  return structuredClone(value);
+}
+function validPlanVerification(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const { cwd, tests, build } = value;
+  if (!Array.isArray(tests) || tests.length === 0 || tests.length > 12 || typeof cwd !== "string" || !cwd.trim() || cwd.length > 4096 || typeof build !== "string" || !build.trim() || build.length > 4096)
+    return false;
+  const commands = new Set;
+  for (const entry of tests) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const { command, targets, rationale } = entry;
+    if (typeof command !== "string" || !command.trim() || command.length > 4096 || commands.has(command) || typeof rationale !== "string" || !rationale.trim() || rationale.length > 1000 || !Array.isArray(targets) || targets.length === 0 || targets.length > 50 || targets.some((target) => typeof target !== "string" || !target.trim() || target.length > 4096))
+      return false;
+    commands.add(command);
+  }
+  return !commands.has(build);
+}
+function validPlannedActions(value) {
+  const actions = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const action = entry;
+    if (!ACTIONS.has(String(action.action)) || typeof action.resource !== "string")
+      return false;
+    if (action.key !== undefined && (typeof action.key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(action.key)))
+      return false;
+    if (action.dependsOn !== undefined && (!Array.isArray(action.dependsOn) || action.dependsOn.some((dependency) => typeof dependency !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(dependency))))
+      return false;
+    actions.push({
+      action: action.action,
+      resource: action.resource,
+      ...typeof action.key === "string" ? { key: action.key } : {},
+      ...Array.isArray(action.dependsOn) ? { dependsOn: action.dependsOn } : {}
+    });
+  }
+  const legacy = actions.every((action) => action.key === undefined && action.dependsOn === undefined);
+  if (legacy)
+    return true;
+  if (actions.some((action) => action.key === undefined || action.dependsOn === undefined))
+    return false;
+  try {
+    validateLogicalActionGraph(actions);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function validPhase(value) {
+  const phase = value.phase;
+  if (value.mode === "advisor" && phase !== "presented" && phase !== "revoked" && phase !== "superseded")
+    return false;
+  if (phase === "reviewed" && (value.mode !== "assistant" || !validTime(value.reviewedAt)))
+    return false;
+  if (["running", "paused", "blocked", "completed"].includes(phase) && (!validTime(value.authorizedAt) || phase !== "blocked" && !validTime(value.startedAt)))
+    return false;
+  if (phase === "paused" && !validTime(value.pausedAt))
+    return false;
+  if (phase === "blocked" && (!validTime(value.blockedAt) || !Array.isArray(value.blockedBy) || value.blockedBy.length === 0))
+    return false;
+  if (phase === "completed" && !validTime(value.completedAt))
+    return false;
+  if (phase === "revoked" && !validTime(value.revokedAt))
+    return false;
+  if (phase === "superseded" && !validTime(value.supersededAt))
+    return false;
+  return true;
+}
+function validOptionalTimes(value) {
+  return ["reviewedAt", "authorizedAt", "startedAt", "pausedAt", "blockedAt", "completedAt", "revokedAt", "supersededAt"].every((key) => value[key] === undefined || validTime(value[key]));
+}
+function validSpecReference(specRef, specHash) {
+  try {
+    const normalized = normalizeSpecReference(specRef, specHash);
+    return specRef === undefined && specHash === undefined ? normalized.specRef === undefined && normalized.specHash === undefined : normalized.specRef === specRef && normalized.specHash === specHash;
+  } catch {
+    return false;
+  }
+}
+function specReferenceFromState(value) {
+  return typeof value.specRef === "string" && typeof value.specHash === "string" ? { specRef: value.specRef, specHash: value.specHash } : {};
+}
+function isActiveLegacyPlan(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const state = value;
+  return state.version === 4 && typeof state.phase === "string" && !TERMINAL.has(state.phase);
+}
+function validateScope(scope, now) {
+  if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
+    throw new Error("Sesion/proyecto/politica de plan no evaluable.");
+  }
+}
+function validTime(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+function validInteractionID(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+function randomID() {
+  return randomBytes4(16).toString("hex");
+}
+function uniqueSorted(items, key) {
+  return [...new Map(items.map((item) => [key(item), { ...item }])).values()].sort((left, right) => compareText2(key(left), key(right)));
+}
+function canonical2(value) {
+  if (Array.isArray(value))
+    return `[${value.map(canonical2).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText2(left, right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical2(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function compareText2(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function sameStrings2(left, right) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+var ACTIONS, PHASES, TERMINAL, CORE_INTERACTION_ID = "core:direct", PLAN_CONTRACT_VERSION = 5, DEFAULT_PLANNING_AUTHORITY, transitions;
+var init_planning = __esm(() => {
+  init_action_intent();
+  init_planning_authority();
+  init_plan_presentation();
+  ACTIONS = new Set(["edit", "shell", "subagent"]);
+  PHASES = new Set([
+    "presented",
+    "reviewed",
+    "running",
+    "paused",
+    "blocked",
+    "completed",
+    "revoked",
+    "superseded"
+  ]);
+  TERMINAL = new Set(["completed", "revoked", "superseded"]);
+  DEFAULT_PLANNING_AUTHORITY = createEphemeralPlanningAuthority();
+  transitions = new Map;
+});
+
 // src/cli/core/read-only-shell-policy.ts
 import fs15 from "node:fs";
 import path19 from "node:path";
@@ -3494,6 +4956,122 @@ var init_read_only_shell_policy = __esm(() => {
   COMMIT_MESSAGE_TYPES = new Set(COMMIT_TYPES);
 });
 
+// src/plugin/planning-preflight.ts
+var exports_planning_preflight = {};
+__export(exports_planning_preflight, {
+  validatePlanningPreflight: () => validatePlanningPreflight
+});
+import fs21 from "node:fs";
+import path27 from "node:path";
+function validatePlanningPreflight(value3) {
+  if (!isRecord16(value3))
+    throw new Error("Preflight del plan inválido: se espera un objeto.");
+  const input = value3;
+  if (typeof input.root !== "string" || !input.root.trim() || typeof input.directory !== "string" || !input.directory.trim() || !Array.isArray(input.actions)) {
+    throw new Error("Preflight del plan inválido: falta la raíz, el directorio o las acciones.");
+  }
+  const normalized = normalizePlanPreflight(input.preflight, input.actions, input.verification);
+  if (!normalized.preflight) {
+    if (input.actions.some((action) => action.action === "edit")) {
+      throw new Error("Preflight inválido: un plan con ediciones requiere preflight verificado.");
+    }
+    return;
+  }
+  const root = fs21.realpathSync(input.root);
+  const base = path27.resolve(input.directory);
+  const editActions = input.actions.filter((action) => action.action === "edit");
+  const mayCreate = new Set;
+  for (const edit of normalized.preflight.edits) {
+    const action = editActions.find((item) => item.key === edit.key);
+    if (!action)
+      throw new Error(`Preflight inválido: la edición ${edit.key} no tiene acción.`);
+    const target = path27.resolve(base, edit.path);
+    if (target !== path27.resolve(action.resource)) {
+      throw new Error(`Preflight inválido: la edición ${edit.key} no coincide con el recurso de la acción.`);
+    }
+    assertInside(target, root, edit.path);
+    if (edit.existence === "must-exist") {
+      const stat = lstatRegular(target, edit.path);
+      if (!stat.isFile())
+        throw new Error(`Preflight inválido: ${edit.path} no es un archivo regular.`);
+      if (stat.size > 2 * 1024 * 1024)
+        throw new Error(`Preflight inválido: ${edit.path} excede 2 MB.`);
+      const content = fs21.readFileSync(target, "utf8");
+      const occurrences = content.split(edit.block).length - 1;
+      if (occurrences !== 1) {
+        throw new Error(`Preflight inválido: el bloque de ${edit.key} aparece ${occurrences} veces en ${edit.path}; debe aparecer exactamente una vez.`);
+      }
+    } else {
+      if (fs21.existsSync(target))
+        throw new Error(`Preflight inválido: may-create exige que ${edit.path} no exista.`);
+      mayCreate.add(target);
+      const parent = path27.dirname(target);
+      assertInside(parent, root, edit.path);
+      if (!lstatRegular(parent, edit.path).isDirectory()) {
+        throw new Error(`Preflight inválido: el directorio padre de ${edit.path} no existe.`);
+      }
+    }
+  }
+  for (const edit of normalized.preflight.edits) {
+    for (const [field, entries4] of [["consumers", edit.consumers], ["tests", edit.tests]]) {
+      for (const entry of entries4) {
+        const target = path27.resolve(base, entry);
+        assertInside(target, root, entry);
+        if (!fs21.existsSync(target)) {
+          if (!mayCreate.has(target))
+            throw new Error(`Preflight inválido: ${field} ${entry} no existe.`);
+          continue;
+        }
+        lstatRegular(target, entry);
+      }
+    }
+  }
+  if (normalized.preflight.edits.some((edit) => isCodePath(edit.path)) && normalized.preflight.edits.every((edit) => edit.tests.length === 0)) {
+    throw new Error("Preflight inválido: una edición de código requiere al menos un test declarado.");
+  }
+  const verification = normalized.verification;
+  if (!verification)
+    throw new Error("Preflight inválido: falta verification.");
+  const cwd = path27.resolve(base, verification.cwd);
+  assertInside(cwd, root, "verification.cwd");
+  if (!lstatRegular(cwd, "verification.cwd").isDirectory()) {
+    throw new Error("Preflight inválido: verification.cwd no es un directorio.");
+  }
+  for (const test of verification.tests) {
+    for (const target of test.targets) {
+      const resolved2 = path27.resolve(base, target);
+      assertInside(resolved2, root, target);
+      if (!fs21.existsSync(resolved2)) {
+        if (!mayCreate.has(resolved2))
+          throw new Error(`Preflight inválido: el target ${target} no existe.`);
+        continue;
+      }
+      lstatRegular(resolved2, target);
+    }
+  }
+}
+function assertInside(target, root, label) {
+  const relative = path27.relative(root, target);
+  if (relative === "" || !relative.startsWith("..") && !path27.isAbsolute(relative))
+    return;
+  throw new Error(`Preflight inválido: ${label} queda fuera de la raíz del proyecto.`);
+}
+function lstatRegular(target, label) {
+  const stat = fs21.lstatSync(target);
+  if (stat.isSymbolicLink())
+    throw new Error(`Preflight inválido: ${label} no puede ser un symlink.`);
+  return stat;
+}
+function isCodePath(value3) {
+  return /(^|\/)(src|tests|scripts)\//.test(value3) || /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i.test(value3);
+}
+function isRecord16(value3) {
+  return typeof value3 === "object" && value3 !== null && !Array.isArray(value3);
+}
+var init_planning_preflight = __esm(() => {
+  init_planning();
+});
+
 // src/cli/core/task-classification.ts
 import { createHash as createHash18 } from "node:crypto";
 function parseTaskAssessment(value3) {
@@ -3926,8 +5504,8 @@ __export(exports_direct_task_execution, {
   DIRECT_GRANT_MISMATCH: () => DIRECT_GRANT_MISMATCH
 });
 import { createHash as createHash19 } from "node:crypto";
-import fs21 from "node:fs";
-import path27 from "node:path";
+import fs22 from "node:fs";
+import path28 from "node:path";
 function createDirectTaskRegistry() {
   const grants = new Map;
   const completed = new Map;
@@ -4087,7 +5665,7 @@ function parseMutation(value3) {
   if (kind !== "edit" && kind !== "write" && kind !== "patch")
     throw new Error("Tipo de mutación directa inválido.");
   const target = text3(record5.path, "path");
-  if (!target || path27.isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target) || target.startsWith("~") || /[*?\[\]{}]/.test(target))
+  if (!target || path28.isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target) || target.startsWith("~") || /[*?\[\]{}]/.test(target))
     throw new Error("Ruta de mutación directa inválida.");
   const existence = record5.existence === "may-create" ? "may-create" : record5.existence === "must-exist" || record5.existence === undefined ? "must-exist" : undefined;
   if (!existence)
@@ -4117,10 +5695,10 @@ function parseVerification(value3) {
   return { kind: "shell", argv: [...record5.argv], ...cwd ? { cwd } : {} };
 }
 function compileEnvelope(input, scope3) {
-  const root = path27.resolve(scope3.root);
+  const root = path28.resolve(scope3.root);
   const actions = [];
   for (const mutation of input.mutations) {
-    const absolute = path27.resolve(root, mutation.path);
+    const absolute = path28.resolve(root, mutation.path);
     if (!inside8(absolute, root) || absolute === root)
       throw new Error(`Ruta de mutación fuera de la raíz: ${mutation.path}.`);
     if (isProtectedDocumentationPath(root, absolute) || classifyInfrastructurePath(root, absolute).protected) {
@@ -4135,7 +5713,7 @@ function compileEnvelope(input, scope3) {
     }
     if (exists2 && !isRegular(absolute))
       throw new Error(`La ruta no es un archivo regular: ${mutation.path}.`);
-    const relativePath = path27.relative(root, absolute).split(path27.sep).join("/");
+    const relativePath = path28.relative(root, absolute).split(path28.sep).join("/");
     const existence = mutation.existence ?? "must-exist";
     const intent = canonicalizeDirectTaskMutation({
       project: scope3.project,
@@ -4156,7 +5734,7 @@ function compileEnvelope(input, scope3) {
     });
   }
   const verification = input.verification.map((item) => {
-    const cwd = item.cwd ? path27.resolve(root, item.cwd) : root;
+    const cwd = item.cwd ? path28.resolve(root, item.cwd) : root;
     if (!inside8(cwd, root))
       throw new Error("El cwd de verificación queda fuera de la raíz.");
     const command = item.argv.join(" ");
@@ -4188,7 +5766,7 @@ function candidateForTool2(tool, value3) {
   const rawPath = tool === "patch" ? parsePatchOperations(typeof record5.patchText === "string" ? record5.patchText : "")[0]?.path : record5.path ?? record5.filePath;
   if (typeof rawPath !== "string" || !rawPath.trim())
     return;
-  const normalized = path27.normalize(rawPath).split(path27.sep).join("/");
+  const normalized = path28.normalize(rawPath).split(path28.sep).join("/");
   if (normalized.startsWith("../") || normalized === "..")
     return;
   return {
@@ -4203,7 +5781,7 @@ function normalizeScope4(scope3) {
     project: scope3.project,
     policyRevision: scope3.policyRevision,
     mode: scope3.mode,
-    root: path27.resolve(scope3.root)
+    root: path28.resolve(scope3.root)
   };
 }
 function sameScope4(left2, right) {
@@ -4230,22 +5808,22 @@ function text3(value3, field) {
 }
 function existsRegular(target) {
   try {
-    return fs21.lstatSync(target).isFile();
+    return fs22.lstatSync(target).isFile();
   } catch {
     return false;
   }
 }
 function isRegular(target) {
   try {
-    const stat = fs21.lstatSync(target);
+    const stat = fs22.lstatSync(target);
     return stat.isFile() && !stat.isSymbolicLink();
   } catch {
     return false;
   }
 }
 function inside8(target, root) {
-  const relative = path27.relative(root, target);
-  return relative === "" || !relative.startsWith("..") && !path27.isAbsolute(relative);
+  const relative = path28.relative(root, target);
+  return relative === "" || !relative.startsWith("..") && !path28.isAbsolute(relative);
 }
 function sha2565(value3) {
   return createHash19("sha256").update(value3).digest("hex");
@@ -4300,9 +5878,9 @@ var init_direct_task_execution = __esm(() => {
 });
 
 // src/plugin/index.ts
-import fs22 from "node:fs";
+import fs23 from "node:fs";
 import os2 from "node:os";
-import path28 from "node:path";
+import path29 from "node:path";
 import { isMainThread, workerData as workerData2 } from "node:worker_threads";
 
 // src/cli/core/paths.ts
@@ -4452,104 +6030,8 @@ function normalizeForCompare(value) {
   return value.replaceAll("\\", "/").replace(/\/+$/g, "").toLowerCase();
 }
 
-// src/cli/core/planning-authority.ts
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import fs2 from "node:fs";
-import path2 from "node:path";
-var KEY_FILE = "planning.key";
-var KEY_BYTES = 32;
-function createPlanningAuthority(secret) {
-  if (!(secret instanceof Uint8Array) || secret.byteLength !== KEY_BYTES) {
-    throw new Error(`La autoridad de planeacion requiere ${KEY_BYTES} bytes.`);
-  }
-  const key = Buffer.from(secret);
-  const fingerprint = createHash("sha256").update(key).digest("hex");
-  return {
-    fingerprint,
-    sign: (payload) => createHmac("sha256", key).update(payload).digest("hex"),
-    verify: (payload, proof) => {
-      if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof))
-        return false;
-      const expected = createHmac("sha256", key).update(payload).digest();
-      return timingSafeEqual(expected, Buffer.from(proof, "hex"));
-    }
-  };
-}
-function createEphemeralPlanningAuthority() {
-  return createPlanningAuthority(randomBytes(KEY_BYTES));
-}
-function planningKeyPath(secretsDirectory) {
-  return path2.join(path2.resolve(secretsDirectory), KEY_FILE);
-}
-function loadPlanningAuthority(secretsDirectory) {
-  const directory = path2.resolve(secretsDirectory);
-  ensurePrivateDirectory(directory);
-  const file = planningKeyPath(directory);
-  if (!fs2.existsSync(file))
-    createKey(file);
-  return createPlanningAuthority(readKey(file));
-}
-function createKey(file) {
-  const content = `${randomBytes(KEY_BYTES).toString("hex")}
-`;
-  try {
-    const descriptor = fs2.openSync(file, "wx", 384);
-    try {
-      fs2.writeFileSync(descriptor, content, "utf8");
-      fs2.fsyncSync(descriptor);
-    } finally {
-      fs2.closeSync(descriptor);
-    }
-    secureChmod(file, 384);
-  } catch (error) {
-    if (!isAlreadyExists(error))
-      throw error;
-  }
-}
-function readKey(file) {
-  const stat = fs2.lstatSync(file);
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
-    throw new Error("La clave de planeacion debe ser un archivo regular privado, sin enlaces.");
-  }
-  assertOwned(stat, "La clave de planeacion pertenece a otro usuario.");
-  assertPrivateMode(stat, 63, "La clave de planeacion requiere permisos privados.");
-  if (stat.size > 256)
-    throw new Error("La clave de planeacion tiene un formato invalido.");
-  const value = fs2.readFileSync(file, "utf8");
-  if (!/^[a-f0-9]{64}\n?$/.test(value))
-    throw new Error("La clave de planeacion tiene un formato invalido.");
-  return Buffer.from(value.trim(), "hex");
-}
-function ensurePrivateDirectory(directory) {
-  if (!fs2.existsSync(directory))
-    fs2.mkdirSync(directory, { recursive: true, mode: 448 });
-  const stat = fs2.lstatSync(directory);
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error("El directorio de secretos de planeacion debe ser un directorio real.");
-  }
-  assertOwned(stat, "El directorio de secretos de planeacion pertenece a otro usuario.");
-  assertPrivateMode(stat, 63, "El directorio de secretos de planeacion requiere permisos privados.");
-  secureChmod(directory, 448);
-}
-function assertOwned(stat, message) {
-  if (process.getuid && stat.uid !== process.getuid())
-    throw new Error(message);
-}
-function assertPrivateMode(stat, mask, message) {
-  if (process.platform !== "win32" && (stat.mode & mask) !== 0)
-    throw new Error(message);
-}
-function secureChmod(target, mode) {
-  try {
-    fs2.chmodSync(target, mode);
-  } catch (error) {
-    if (process.platform !== "win32")
-      throw error;
-  }
-}
-function isAlreadyExists(error) {
-  return error instanceof Error && "code" in error && error.code === "EEXIST";
-}
+// src/plugin/index.ts
+init_planning_authority();
 
 // src/cli/core/context.ts
 import fs4 from "node:fs";
@@ -10702,1237 +12184,8 @@ function hash(input) {
 // src/plugin/planning.ts
 init_action_intent();
 
-// src/cli/core/planning.ts
-init_action_intent();
-import { createHash as createHash9, randomBytes as randomBytes4 } from "node:crypto";
-
-// src/cli/core/plan-presentation.ts
-var MAX_STEPS = 5;
-var MAX_ITEMS = 30;
-var RISK_LEVELS = new Set(["low", "medium", "high"]);
-var RISK_CATEGORIES = new Set([
-  "security",
-  "data",
-  "architecture",
-  "destructive"
-]);
-function normalizePlanPresentation(value, mode, level = 1) {
-  if (!isRecord6(value))
-    throw new Error("El plan necesita una presentacion humana estructurada.");
-  const objective = normalizedText(value.objective, "objetivo", 1000);
-  const outcome = normalizedText(value.outcome, "resultado", 1000);
-  const steps = normalizedSteps(value.steps);
-  const impact = normalizedImpact(value.impact);
-  const risk = normalizedRisk(value.risk);
-  const exclusions = normalizedList(value.exclusions, "exclusiones");
-  const completionCriteria = normalizedList(value.completionCriteria, "criterios de finalizacion");
-  if (mode === "advisor") {
-    if (steps.length !== 0 || impact.length !== 0) {
-      throw new Error("Asesor solo presenta concepto: sin pasos ni impacto ejecutable.");
-    }
-  } else if (level !== 0) {
-    if (steps.length === 0)
-      throw new Error("La presentacion del plan requiere una ruta con pasos breves.");
-    if (impact.length === 0)
-      throw new Error("La presentacion debe declarar su impacto por area.");
-  }
-  if (completionCriteria.length === 0) {
-    throw new Error("La presentacion debe declarar criterios de finalizacion.");
-  }
-  if (level === 0 && (steps.length > 2 || impact.length > 1 || exclusions.length > 3 || completionCriteria.length > 3 || risk.level !== "low" || risk.categories.length > 0)) {
-    throw new Error("Nivel 0 exige presentacion minima, riesgo bajo y ninguna categoria critica.");
-  }
-  return { objective, outcome, steps, impact, risk, exclusions, completionCriteria };
-}
-function validPlanPresentation(value, mode, level = 1) {
-  try {
-    if (!isRecord6(value))
-      return false;
-    return samePresentation(value, normalizePlanPresentation(value, mode, level));
-  } catch {
-    return false;
-  }
-}
-function renderPlanPresentation(state, options = {}) {
-  const view = typeof options === "string" ? options : options.view ?? "summary";
-  return view === "technical" ? renderTechnicalView(state) : renderSummaryView(state);
-}
-function renderPlanRevisionPresentation(state, revision, options = {}) {
-  const view = typeof options === "string" ? options : options.view ?? "summary";
-  const base = renderPlanPresentation(state, view);
-  return view === "technical" ? `${base}
-
-${renderRevisionTechnical(revision, state)}` : insertBeforeNextAction(base, renderRevisionSummary(revision));
-}
-function renderRevisionSummary(revision) {
-  const progress = revision.progress;
-  const delta = revision.delta;
-  return [
-    "## Progreso preservado",
-    `- Completadas: ${progress.succeeded}; listas: ${progress.ready}; esperando: ${progress.waiting}; bloqueadas: ${progress.blocked}.`,
-    `- En curso: ${progress.inFlight}; con fallo técnico pendiente: ${progress.failed}; total: ${progress.total}.`,
-    "- El trabajo independiente ya confirmado se mantiene; los bloqueos y permisos pendientes no se trasladan a la revisión nueva.",
-    ...revision.actions && revision.actions.length > 0 ? ["", "## Estado por acción", ...revision.actions.map(actionStateLine)] : [],
-    "",
-    "## Cambios de esta revisión",
-    `- Preservadas: ${delta.preserved.length}.`,
-    `- Cambiadas: ${delta.changed.length}.`,
-    `- Añadidas: ${delta.added.length}.`,
-    `- Retiradas: ${delta.removed.length}.`,
-    `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}.`,
-    `- Punto de reanudación: ${revisionResumePoint(progress, delta)}.`
-  ].join(`
-`);
-}
-function renderRevisionTechnical(revision, state) {
-  const progress = revision.progress;
-  const delta = revision.delta;
-  return [
-    "## Recuperación incremental",
-    "### Lineage",
-    `- Revisión padre: ${revision.parentRevision}`,
-    `- Revisión candidata: ${state.revision}`,
-    `- Digest candidato: ${state.digest}`,
-    "",
-    "### Progreso del checkpoint padre",
-    `- Total: ${progress.total}`,
-    `- Completadas: ${progress.succeeded}`,
-    `- Listas: ${progress.ready}`,
-    `- Esperando: ${progress.waiting}`,
-    `- Bloqueadas: ${progress.blocked}`,
-    `- En curso: ${progress.inFlight}`,
-    `- Fallidas: ${progress.failed}`,
-    ...revision.actions && revision.actions.length > 0 ? ["", "### Estado por acción", ...revision.actions.map(actionStateLine)] : [],
-    "",
-    "### Delta firmado",
-    ...revisionDeltaTechnicalLines("Preservadas", delta.preserved),
-    ...revisionDeltaTechnicalLines("Cambiadas", delta.changed),
-    ...revisionDeltaTechnicalLines("Añadidas", delta.added),
-    ...revisionDeltaTechnicalLines("Retiradas", delta.removed),
-    `- Alcance o presentación firmada: ${delta.planChanged ? "actualizada" : "sin cambios adicionales"}`
-  ].join(`
-`);
-}
-function actionStateLine(action) {
-  return `- ${action.key}: ${action.state}${action.dependsOn.length > 0 ? ` (depende de: ${action.dependsOn.join(", ")})` : ""}`;
-}
-function revisionDeltaTechnicalLines(label, actionIDs) {
-  return actionIDs.length > 0 ? [`- ${label}:`, ...actionIDs.map((actionID) => `  - ${actionID}`)] : [`- ${label}: ninguna`];
-}
-function revisionResumePoint(progress, delta) {
-  if (progress.inFlight > 0)
-    return "las llamadas en curso se reinician y vuelven a cruzar sus controles";
-  if (progress.blocked > 0 || progress.failed > 0) {
-    return "se conservan solo los éxitos idénticos y se reintentan las ramas cambiadas tras la aprobación";
-  }
-  if (delta.changed.length > 0 || delta.added.length > 0) {
-    return "continúa después de los éxitos idénticos y comienza las acciones cambiadas o añadidas";
-  }
-  return "continúa desde el último éxito verificable";
-}
-function insertBeforeNextAction(base, section) {
-  const marker = `
-## Qué debes hacer ahora
-`;
-  const index = base.indexOf(marker);
-  if (index < 0)
-    return `${base}
-
-${section}`;
-  return `${base.slice(0, index)}
-
-${section}${base.slice(index)}`;
-}
-function renderSummaryView(state) {
-  if (planLevel(state) === 0)
-    return renderLevelZeroSummary(state);
-  const presentation = state.plan.presentation;
-  const critical = requiresReinforcedControls(presentation.risk);
-  const lines = [
-    planSummaryHeading(state),
-    `Estado: ${phaseStatus(state)}`,
-    "",
-    "## Objetivo",
-    safeText(presentation.objective),
-    "",
-    "## Al terminar",
-    safeText(presentation.outcome)
-  ];
-  if (presentation.steps.length > 0) {
-    lines.push("", "## Ruta", ...presentation.steps.map((step, index) => `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`));
-  }
-  if (state.plan.actions.length > 0) {
-    lines.push("", "## Acciones", ...state.plan.actions.map(({ action, key, dependsOn }) => `- ${key ?? "sin-clave"}: ${action}${dependsOn && dependsOn.length > 0 ? ` (depende de: ${dependsOn.join(", ")})` : " (sin dependencias)"}`));
-  }
-  if (presentation.impact.length > 0) {
-    lines.push("", "## Impacto", ...impactLines(presentation.impact));
-  }
-  lines.push("", "## Riesgo", `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`, `- ${safeText(presentation.risk.summary)}`);
-  if (critical)
-    lines.push("", ...reinforcedControlLines(presentation.risk));
-  lines.push("", "## Qué debes hacer ahora", nextAction(state), "", "Si necesitas revisar rutas, comandos, criterios o la identidad firmada, usa `/malahor-plan detalles`.");
-  return lines.join(`
-`);
-}
-function renderLevelZeroSummary(state) {
-  const presentation = state.plan.presentation;
-  const lines = [
-    planSummaryHeading(state),
-    `Estado: ${phaseStatus(state)}`,
-    "",
-    "## Cambio",
-    safeText(presentation.objective),
-    "",
-    "## Resultado",
-    safeText(presentation.outcome),
-    "",
-    "## Riesgo",
-    `- **Nivel:** ${riskLevelLabel(presentation.risk.level)}`,
-    `- ${safeText(presentation.risk.summary)}`,
-    "",
-    "## Qué debes hacer ahora",
-    nextAction(state),
-    "",
-    "Si necesitas revisar las rutas, comandos o la identidad firmada, usa `/malahor-plan detalles`."
-  ];
-  return lines.join(`
-`);
-}
-function renderTechnicalView(state) {
-  return [
-    planIdentity(state),
-    `Estado: ${phaseStatus(state)}`,
-    "",
-    "## Detalle técnico",
-    ...technicalBody(state)
-  ].join(`
-`);
-}
-function technicalBody(state) {
-  const presentation = state.plan.presentation;
-  const lines = [
-    "### Riesgo y control",
-    `- Nivel de trabajo: ${planLevel(state)}`,
-    `- Contrato de autorización: V${state.version}`,
-    `- Nivel: ${riskLevelLabel(presentation.risk.level)}`
-  ];
-  if (state.version === 5) {
-    lines.push(`- Canonicalizador: ${state.canonicalizerVersion}`);
-  } else if (!["completed", "revoked", "superseded"].includes(state.phase)) {
-    lines.push("- Compatibilidad: este V4 activo no puede ejecutarse; requiere una revisión V5 visible.");
-  }
-  if (presentation.risk.categories.length > 0) {
-    lines.push(`- Categorías críticas: ${presentation.risk.categories.join(", ")}`);
-  }
-  lines.push(`- Resumen: ${safeText(presentation.risk.summary)}`, `- Detalles: ${safeText(presentation.risk.details)}`);
-  if (planLevel(state) === 0 && presentation.steps.length > 0) {
-    lines.push("", "### Ruta firmada", ...presentation.steps.map((step, index) => `${index + 1}. ${safeText(step.title)} — ${safeText(step.description)}`));
-  }
-  if (planLevel(state) === 0 && presentation.impact.length > 0) {
-    lines.push("", "### Impacto firmado", ...impactLines(presentation.impact));
-  }
-  lines.push("", "### Criterios de cierre", ...presentation.completionCriteria.map((item) => `- ${safeText(item)}`));
-  if (presentation.exclusions.length > 0) {
-    lines.push("", "### Exclusiones", ...presentation.exclusions.map((item) => `- ${safeText(item)}`));
-  }
-  if (state.plan.dependencies.length > 0) {
-    lines.push("", "### Dependencias", ...state.plan.dependencies.map(({ planID, revision }) => `- ${planID}@${revision}`));
-  }
-  if (state.plan.actions.length > 0) {
-    lines.push("", "### Acciones exactas", ...state.plan.actions.map(({ action, resource, key, dependsOn }) => `- ${action}: ${safeJson(resource)} (clave: ${key ?? "sin-clave"}${dependsOn && dependsOn.length > 0 ? `; depende de: ${dependsOn.join(", ")}` : "; sin dependencias"})`));
-  }
-  if (state.version === 5 && state.actionIntents.length > 0) {
-    lines.push("", "### Intents firmados", ...state.actionIntents.map((intent, index) => `- ${index + 1}. ${intent.kind}: ${intent.actionID}`));
-  }
-  lines.push("", "### Autorización", ...approvalLines(state), "", "### Identidad firmada", `- Plan: ${state.planID}`, `- Revisión: ${state.revision}`, `- Digest: ${state.digest}`, "", "### Vigencia", "- Sin caducidad temporal; cambia solo por revisión, estado, proyecto, modo o política.");
-  return lines;
-}
-function impactLines(impact) {
-  const groups = new Map;
-  for (const item of impact)
-    groups.set(item.area, [...groups.get(item.area) ?? [], item.description]);
-  return [...groups].map(([area, descriptions]) => `- **${safeText(area)}:** ${descriptions.map(safeText).join(" ")}`);
-}
-function approvalLines(state) {
-  if (["completed", "revoked", "superseded"].includes(state.phase)) {
-    return [`- No hay aprobación pendiente; el plan está ${phaseLabel(state.phase)}.`];
-  }
-  if (state.mode === "advisor")
-    return ["- No requiere aprobación: el modo asesor no ejecuta acciones."];
-  if (["running", "paused", "blocked"].includes(state.phase)) {
-    return ["- La ejecución ya fue autorizada para esta revisión y únicamente para sus acciones exactas."];
-  }
-  if (state.mode === "executor") {
-    return ["- Requiere aprobación previa en un turno posterior antes de ejecutar las acciones exactas."];
-  }
-  if (state.phase === "presented") {
-    return [
-      "- Primera confirmación: revisar este plan; no autoriza la ejecución.",
-      "- Segunda confirmación: en un turno posterior, autorizar únicamente sus acciones exactas."
-    ];
-  }
-  return [
-    "- Primera confirmación completada: el plan fue revisado sin autorizar su ejecución.",
-    "- Falta la segunda confirmación para ejecutar únicamente sus acciones exactas."
-  ];
-}
-function nextAction(state) {
-  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
-    return "No ejecutes esta revisión: usa un contrato V4 legado. Puedes consultarla o revocarla; para continuar presenta una revisión V5 equivalente y vuelve a aprobarla.";
-  }
-  if (state.phase === "completed") {
-    return "No tienes que hacer nada más: el trabajo de este plan terminó. Si necesitas otro cambio, solicítalo como una tarea nueva.";
-  }
-  if (state.phase === "revoked") {
-    return "Este plan fue cancelado y ya no puede ejecutarse. Si todavía necesitas el cambio, pide un plan nuevo con el alcance actualizado.";
-  }
-  if (state.phase === "superseded") {
-    return "No apruebes ni ejecutes esta versión: fue reemplazada por una revisión posterior. Revisa únicamente el plan más reciente.";
-  }
-  if (state.phase === "paused") {
-    return "La ejecución está detenida. Cuando quieras continuar exactamente con este alcance, solicita reanudar el plan; cualquier cambio requiere una revisión nueva.";
-  }
-  if (state.phase === "blocked") {
-    return "El plan no puede continuar porque aún tiene dependencias pendientes. Resuélvelas y solicita reanudarlo; Malahor nunca lo iniciará automáticamente.";
-  }
-  if (state.phase === "running") {
-    return "El plan ya está aprobado. Malahor puede continuar únicamente con el alcance firmado; no necesitas responder salvo que quieras pausarlo o cambiarlo.";
-  }
-  if (state.mode === "advisor") {
-    return "Revisa la recomendación y decide si quieres convertirla en una tarea ejecutable. En modo asesor no se realizan cambios.";
-  }
-  if (state.mode === "assistant" && state.phase === "presented") {
-    return "Revisa el alcance y completa la primera confirmación. Ese paso solo registra que lo has revisado: no inicia cambios. Después podrás responder `go` en un turno nuevo para pedir la autorización de ejecución.";
-  }
-  if (state.mode === "assistant") {
-    return "Si el plan te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor abrirá la segunda confirmación y, si la aceptas, ejecutará únicamente este alcance.";
-  }
-  return "Si el alcance te parece correcto, responde `go` o `implementa` en un turno nuevo. Malahor pedirá la aprobación de esta revisión y, si se concede, ejecutará únicamente lo descrito; esa respuesta no autoriza operaciones adicionales ni evita otros guardrails.";
-}
-function planSummaryHeading(state) {
-  return `Plan de trabajo Malahor · nivel ${planLevel(state)}`;
-}
-function planIdentity(state) {
-  return `Plan Malahor (${state.mode} · nivel ${planLevel(state)}) · ${state.planID.slice(0, 12)} · revisión ${state.revision.slice(0, 12)}`;
-}
-function phaseStatus(state) {
-  if (state.version === 4 && !["completed", "revoked", "superseded"].includes(state.phase)) {
-    return "bloqueado: requiere revisión V5";
-  }
-  if (state.phase === "presented") {
-    return state.mode === "assistant" ? "esperando tu revisión" : state.mode === "executor" ? "esperando tu aprobación" : "presentado para consulta";
-  }
-  if (state.phase === "reviewed")
-    return "revisado; esperando autorización para ejecutar";
-  if (state.phase === "running")
-    return "aprobado y en ejecución";
-  if (state.phase === "paused")
-    return "en pausa";
-  if (state.phase === "blocked")
-    return "bloqueado por dependencias";
-  if (state.phase === "completed")
-    return "completado";
-  if (state.phase === "revoked")
-    return "cancelado";
-  return "reemplazado por otra revisión";
-}
-function planLevel(state) {
-  return state.plan.level === 0 || state.plan.level === 2 ? state.plan.level : 1;
-}
-function phaseLabel(phase) {
-  if (phase === "completed")
-    return "completado";
-  if (phase === "revoked")
-    return "revocado";
-  return "reemplazado";
-}
-function riskLevelLabel(level) {
-  if (level === "low")
-    return "bajo";
-  if (level === "medium")
-    return "medio";
-  return "alto";
-}
-function requiresReinforcedControls(risk) {
-  return risk.level === "high" || risk.categories.length > 0;
-}
-function reinforcedControlLines(risk) {
-  const lines = [
-    "## Controles reforzados",
-    `- ${safeText(risk.details)}`
-  ];
-  if (risk.categories.length > 0) {
-    lines.push(`- **Áreas sensibles:** ${risk.categories.map(riskCategoryLabel).join(", ")}.`);
-  }
-  lines.push("- La ejecución se detendrá si cambia el alcance o falla un guardrail obligatorio.");
-  return lines;
-}
-function riskCategoryLabel(category) {
-  if (category === "security")
-    return "seguridad";
-  if (category === "data")
-    return "datos";
-  if (category === "architecture")
-    return "arquitectura";
-  return "destrucción";
-}
-function safeJson(value) {
-  return JSON.stringify(value).replace(/[<>&`]/gu, (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`);
-}
-function safeText(value) {
-  return value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
-}
-function normalizedSteps(value) {
-  if (!Array.isArray(value) || value.length > MAX_STEPS) {
-    throw new Error("Pasos de presentacion invalidos o demasiado extensos.");
-  }
-  return value.map((step) => {
-    if (!isRecord6(step))
-      throw new Error("Paso de presentacion invalido.");
-    return {
-      title: normalizedText(step.title, "titulo de paso", 160),
-      description: normalizedText(step.description, "descripcion de paso", 500)
-    };
-  });
-}
-function normalizedImpact(value) {
-  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
-    throw new Error("Lista de impacto invalida o demasiado extensa.");
-  }
-  return value.map((item) => {
-    if (!isRecord6(item))
-      throw new Error("Elemento de impacto invalido.");
-    return {
-      area: normalizedText(item.area, "area de impacto", 120),
-      description: normalizedText(item.description, "descripcion de impacto", 500)
-    };
-  });
-}
-function normalizedRisk(value) {
-  if (!isRecord6(value))
-    throw new Error("Riesgo de presentacion invalido.");
-  if (typeof value.level !== "string" || !RISK_LEVELS.has(value.level)) {
-    throw new Error("Nivel de riesgo invalido.");
-  }
-  if (!Array.isArray(value.categories) || value.categories.length > RISK_CATEGORIES.size) {
-    throw new Error("Categorias de riesgo invalidas.");
-  }
-  const categories = value.categories.map((category) => {
-    if (typeof category !== "string" || !RISK_CATEGORIES.has(category)) {
-      throw new Error("Categoria de riesgo invalida.");
-    }
-    return category;
-  });
-  if (new Set(categories).size !== categories.length)
-    throw new Error("Categorias de riesgo duplicadas.");
-  return {
-    level: value.level,
-    categories,
-    summary: normalizedText(value.summary, "resumen de riesgo", 500),
-    details: normalizedText(value.details, "detalles de riesgo", 1500)
-  };
-}
-function normalizedList(value, label) {
-  if (!Array.isArray(value) || value.length > MAX_ITEMS) {
-    throw new Error(`Lista de ${label} invalida o demasiado extensa.`);
-  }
-  return value.map((item) => normalizedText(item, label, 1000));
-}
-function normalizedText(value, label, max) {
-  if (typeof value !== "string")
-    throw new Error(`Campo de ${label} invalido.`);
-  const normalized = value.trim().replace(/\s+/g, " ");
-  if (!normalized || normalized.length > max)
-    throw new Error(`Campo de ${label} invalido o demasiado extenso.`);
-  return normalized;
-}
-function samePresentation(value, normalized) {
-  if (!hasExactKeys(value, [
-    "objective",
-    "outcome",
-    "steps",
-    "impact",
-    "risk",
-    "exclusions",
-    "completionCriteria"
-  ]))
-    return false;
-  return value.objective === normalized.objective && value.outcome === normalized.outcome && sameSteps(value.steps, normalized.steps) && sameImpact(value.impact, normalized.impact) && sameRisk(value.risk, normalized.risk) && sameStrings(value.exclusions, normalized.exclusions) && sameStrings(value.completionCriteria, normalized.completionCriteria);
-}
-function sameSteps(value, normalized) {
-  return Array.isArray(value) && value.length === normalized.length && value.every((step, index) => {
-    if (!isRecord6(step) || !hasExactKeys(step, ["title", "description"]))
-      return false;
-    const expected = normalized[index];
-    return step.title === expected.title && step.description === expected.description;
-  });
-}
-function sameImpact(value, normalized) {
-  return Array.isArray(value) && value.length === normalized.length && value.every((item, index) => {
-    if (!isRecord6(item) || !hasExactKeys(item, ["area", "description"]))
-      return false;
-    const expected = normalized[index];
-    return item.area === expected.area && item.description === expected.description;
-  });
-}
-function sameRisk(value, normalized) {
-  if (!isRecord6(value) || !hasExactKeys(value, ["level", "categories", "summary", "details"]))
-    return false;
-  return value.level === normalized.level && sameStrings(value.categories, normalized.categories) && value.summary === normalized.summary && value.details === normalized.details;
-}
-function sameStrings(value, normalized) {
-  return Array.isArray(value) && value.length === normalized.length && value.every((item, index) => item === normalized[index]);
-}
-function hasExactKeys(value, expected) {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
-}
-function isRecord6(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// src/cli/core/planning.ts
-var ACTIONS = new Set(["edit", "shell", "subagent"]);
-var PHASES = new Set([
-  "presented",
-  "reviewed",
-  "running",
-  "paused",
-  "blocked",
-  "completed",
-  "revoked",
-  "superseded"
-]);
-var TERMINAL = new Set(["completed", "revoked", "superseded"]);
-var CORE_INTERACTION_ID = "core:direct";
-var PLAN_CONTRACT_VERSION = 5;
-var DEFAULT_PLANNING_AUTHORITY = createEphemeralPlanningAuthority();
-var transitions = new Map;
-async function presentPlan(scope, input, presentationInteractionID, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
-  return serialize(scope.sessionID, async () => {
-    const now = Date.now();
-    const stored = await adapter.loadActive(scope.sessionID);
-    const previous = validState(stored, authority) && stored.sessionID === scope.sessionID ? stored : undefined;
-    const current = previous && samePlanScope(previous, scope) ? previous : undefined;
-    const planID = current && !TERMINAL.has(current.phase) ? current.planID : randomID();
-    const state = proposePlan(scope, input, now, presentationInteractionID, planID, authority);
-    await assertDependencyGraph(state, adapter, authority);
-    if (previous && !TERMINAL.has(previous.phase)) {
-      await adapter.save(seal({ ...previous, phase: "superseded", supersededAt: now, updatedAt: now }, authority));
-    }
-    await adapter.save(state);
-    if (scope.mode !== "assistant")
-      return state;
-    await adapter.confirm("review", state);
-    const fresh = await adapter.loadActive(scope.sessionID);
-    if (!sameRevision(fresh, state, authority))
-      throw new Error("El plan cambio durante la revision: vuelve a presentarlo.");
-    const reviewed = reviewPlan(fresh, state.digest, Date.now(), authority);
-    await adapter.save(reviewed);
-    return reviewed;
-  });
-}
-async function requestPlanExecution(scope, digest2, executionInteractionID, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
-  return serialize(scope.sessionID, async () => {
-    if (!validInteractionID(executionInteractionID))
-      throw new Error("Turno de ejecucion no evaluable.");
-    const stored = await adapter.loadActive(scope.sessionID);
-    if (isActiveLegacyPlan(stored)) {
-      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan activo debe presentarse como una revisión V5.");
-    }
-    if (!validState(stored, authority) || stored.version !== 5 || stored.digest !== digest2 || !samePlanScope(stored, scope) || stored.plan.actions.length === 0 || (stored.mode === "assistant" ? stored.phase !== "reviewed" : stored.phase !== "presented")) {
-      throw new Error("No hay un plan ejecutable vigente.");
-    }
-    if (stored.presentationInteractionID === executionInteractionID) {
-      throw new Error("El plan debe quedar visible y terminar su turno de presentacion. Espera una solicitud posterior del usuario antes de pedir aprobacion.");
-    }
-    if (stored.mode === "advisor")
-      throw new Error("Primero revisa el plan.");
-    await adapter.confirm("run", stored);
-    const fresh = await adapter.loadActive(scope.sessionID);
-    if (!sameRevision(fresh, stored, authority))
-      throw new Error("El plan cambio durante la orden: vuelve a presentarlo.");
-    const pending = await pendingDependencies(fresh, adapter, authority);
-    const next = pending.length > 0 ? blockPlan(fresh, pending, Date.now(), authority) : authorizePlanAfterDependencyValidation(fresh, fresh.digest, Date.now(), authority);
-    await adapter.save(next);
-    return next;
-  });
-}
-async function controlPlan(scope, command, adapter, authority = DEFAULT_PLANNING_AUTHORITY) {
-  return serialize(scope.sessionID, async () => {
-    const stored = await adapter.loadActive(scope.sessionID);
-    if (!validState(stored, authority) || !samePlanScope(stored, scope))
-      throw new Error("No hay un plan vigente para esta sesion.");
-    if (command === "status")
-      return stored;
-    if (command === "revoke") {
-      if (TERMINAL.has(stored.phase))
-        throw new Error("El plan ya esta cerrado.");
-      const next2 = seal({ ...stored, phase: "revoked", revokedAt: Date.now(), updatedAt: Date.now() }, authority);
-      await adapter.save(next2);
-      return next2;
-    }
-    if (stored.version !== 5) {
-      throw new Error("PLAN_SCHEMA_UPGRADE_REQUIRED: el plan V4 solo puede consultarse o revocarse.");
-    }
-    if (command === "pause") {
-      if (stored.phase !== "running")
-        throw new Error("Solo un plan en ejecucion puede pausarse.");
-      const next2 = seal({
-        ...stored,
-        executionAnchor: planExecutionProofHash(stored),
-        phase: "paused",
-        pausedAt: Date.now(),
-        updatedAt: Date.now()
-      }, authority);
-      await adapter.save(next2);
-      return next2;
-    }
-    if (command === "resume") {
-      if (stored.phase !== "paused" && stored.phase !== "blocked")
-        throw new Error("Solo un plan pausado o bloqueado puede reanudarse.");
-      await adapter.confirm("resume", stored);
-      const fresh2 = await adapter.loadActive(scope.sessionID);
-      if (!sameRevision(fresh2, stored, authority))
-        throw new Error("El plan cambio durante la reanudacion.");
-      const pending2 = await pendingDependencies(fresh2, adapter, authority);
-      const now2 = Date.now();
-      const next2 = pending2.length > 0 ? blockPlan(fresh2, pending2, now2, authority) : seal({
-        ...fresh2,
-        phase: "running",
-        startedAt: fresh2.startedAt ?? now2,
-        updatedAt: now2,
-        blockedBy: undefined,
-        blockedAt: undefined,
-        pausedAt: undefined
-      }, authority);
-      await adapter.save(next2);
-      return next2;
-    }
-    if (stored.phase !== "running" && stored.phase !== "paused") {
-      throw new Error("Solo un plan iniciado puede completarse.");
-    }
-    await adapter.confirm("complete", stored);
-    const fresh = await adapter.loadActive(scope.sessionID);
-    if (!sameRevision(fresh, stored, authority))
-      throw new Error("El plan cambio durante el cierre.");
-    const pending = await pendingDependencies(fresh, adapter, authority);
-    if (pending.length > 0)
-      throw new Error("El plan no puede completarse con dependencias pendientes.");
-    const now = Date.now();
-    const next = seal({ ...fresh, phase: "completed", completedAt: now, updatedAt: now }, authority);
-    await adapter.save(next);
-    return next;
-  });
-}
-async function serialize(sessionID, operation) {
-  const previous = transitions.get(sessionID) ?? Promise.resolve();
-  let release;
-  const gate = new Promise((resolve) => {
-    release = resolve;
-  });
-  const current = previous.then(() => gate);
-  transitions.set(sessionID, current);
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (transitions.get(sessionID) === current)
-      transitions.delete(sessionID);
-  }
-}
-function proposePlan(scope, input, now = Date.now(), presentationInteractionID = CORE_INTERACTION_ID, planID = randomID(), authority = DEFAULT_PLANNING_AUTHORITY) {
-  validateScope(scope, now);
-  if (!validInteractionID(presentationInteractionID))
-    throw new Error("Turno de presentacion no evaluable.");
-  if (!/^[a-f0-9]{32}$/.test(planID))
-    throw new Error("Identidad de plan no evaluable.");
-  if (input.contractVersion !== undefined && input.contractVersion !== PLAN_CONTRACT_VERSION) {
-    throw new Error("Versión de contrato de planning no soportada.");
-  }
-  if (input.canonicalizerVersion !== undefined && input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER) {
-    throw new Error("Versión de canonicalizador no soportada.");
-  }
-  if (input.actionIntents !== undefined && (input.contractVersion !== PLAN_CONTRACT_VERSION || input.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER)) {
-    throw new Error("Los intents V5 requieren contrato y canonicalizador explícitos.");
-  }
-  const taskDecisionRef = input.taskDecisionRef;
-  if (taskDecisionRef !== undefined && (typeof taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(taskDecisionRef))) {
-    throw new Error("Referencia de decisión de clasificación no evaluable.");
-  }
-  const plan = normalizePlan(scope.mode, input);
-  const actionIntents = normalizeActionIntents(input.actionIntents, plan.actions, scope.project);
-  const actionGraph = normalizeActionGraph(input.actionGraph, plan.actions, actionIntents);
-  const actionIntentSource = input.actionIntents === undefined ? "compatibility" : "canonical";
-  const spec = normalizeSpecReference(input.specRef, input.specHash);
-  const revision = randomID();
-  const digest2 = digestPlanV5(scope, plan, planID, revision, presentationInteractionID, actionIntents, actionIntentSource, spec, actionGraph);
-  return seal({
-    version: 5,
-    contractVersion: PLAN_CONTRACT_VERSION,
-    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
-    actionIntentSource,
-    actionIntents,
-    actionGraph,
-    ...spec,
-    ...taskDecisionRef === undefined ? {} : { taskDecisionRef },
-    planID,
-    ...scope,
-    presentationInteractionID,
-    plan,
-    digest: digest2,
-    revision,
-    phase: "presented",
-    createdAt: now,
-    updatedAt: now,
-    proof: ""
-  }, authority);
-}
-function reviewPlan(state, digest2, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
-  assertCurrent(state, digest2, now, authority);
-  if (state.mode !== "assistant" || state.phase !== "presented")
-    throw new Error("Revision de plan no aplicable.");
-  return seal({ ...state, phase: "reviewed", reviewedAt: now, updatedAt: now }, authority);
-}
-function authorizePlanAfterDependencyValidation(state, digest2, now, authority) {
-  assertCurrent(state, digest2, now, authority);
-  assertReadyForAuthorization(state);
-  return startPlan(state, now, authority);
-}
-function assertReadyForAuthorization(state) {
-  if (state.mode === "advisor" || (state.mode === "assistant" ? state.phase !== "reviewed" : state.phase !== "presented")) {
-    throw new Error("Falta la revision del plan o el modo no permite ejecucion.");
-  }
-}
-function startPlan(state, now, authority) {
-  return seal({ ...state, phase: "running", authorizedAt: now, startedAt: now, updatedAt: now }, authority);
-}
-function planExecutionProofHash(state) {
-  return state.executionAnchor ?? createHash9("sha256").update(state.proof).digest("hex");
-}
-function planAllows(state, scope, operation, now = Date.now(), authority = DEFAULT_PLANNING_AUTHORITY) {
-  if (!validState(state, authority) || state.version !== 5 || state.phase !== "running" || state.mode === "advisor" || scope.mode === "advisor" || !samePlanScope(state, scope) || state.createdAt > now || state.updatedAt > now)
-    return false;
-  return state.plan.actions.some(({ action, resource }) => action === operation.action && resource === operation.resource);
-}
-function validState(state, authority = DEFAULT_PLANNING_AUTHORITY) {
-  if (!state || typeof state !== "object" || Array.isArray(state))
-    return false;
-  const value = state;
-  if (value.version !== 4 && value.version !== 5 || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.sessionID !== "string" || typeof value.project !== "string" || !["advisor", "assistant", "executor"].includes(String(value.mode)) || typeof value.policyRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.policyRevision) || !validInteractionID(value.presentationInteractionID) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.phase !== "string" || !PHASES.has(value.phase) || !validTime(value.createdAt) || !validTime(value.updatedAt) || value.updatedAt < value.createdAt || !validOptionalTimes(value) || value.taskDecisionRef !== undefined && (typeof value.taskDecisionRef !== "string" || !/^[a-f0-9]{64}$/.test(value.taskDecisionRef)) || !validPlan(value.plan, value.mode) || typeof value.proof !== "string")
-    return false;
-  const plan = value.plan;
-  const scope = {
-    sessionID: value.sessionID,
-    project: value.project,
-    mode: value.mode,
-    policyRevision: value.policyRevision
-  };
-  let expected;
-  if (value.version === 5) {
-    if (value.contractVersion !== PLAN_CONTRACT_VERSION || value.canonicalizerVersion !== ACTION_INTENT_CANONICALIZER || value.actionIntentSource !== "canonical" && value.actionIntentSource !== "compatibility" || !Array.isArray(value.actionIntents) || !value.actionIntents.every(validActionIntentV1) || value.actionIntents.some((intent) => intent.project !== value.project) || value.executionAnchor !== undefined && (typeof value.executionAnchor !== "string" || !/^[a-f0-9]{64}$/.test(value.executionAnchor)) || !validSpecReference(value.specRef, value.specHash) || value.actionGraph !== undefined && !validActionGraph(value.actionGraph, value.actionIntents))
-      return false;
-    if (plan.actions.length === 0 !== (value.actionIntents.length === 0))
-      return false;
-    expected = digestPlanV5(scope, plan, value.planID, value.revision, value.presentationInteractionID, value.actionIntents, value.actionIntentSource, specReferenceFromState(value), value.actionGraph);
-  } else {
-    expected = digestPlanV4(scope, plan, value.planID, value.revision, value.presentationInteractionID);
-  }
-  if (expected !== value.digest || !validPhase(value))
-    return false;
-  return authority.verify(statePayload(value), value.proof);
-}
-function renderPlan(state, options = {}) {
-  return renderPlanPresentation(state, options);
-}
-function normalizePlan(mode, input) {
-  if (!input || typeof input.summary !== "string" || !input.summary.trim() || input.summary.length > 4000) {
-    throw new Error("El plan necesita un resumen no vacio (maximo 4000 caracteres).");
-  }
-  const level = normalizePlanLevel(input.level);
-  const dependencies = input.dependencies ?? [];
-  if (!Array.isArray(input.steps) || !Array.isArray(input.actions) || !Array.isArray(dependencies) || input.steps.length > 30 || input.actions.length > 80 || dependencies.length > 30) {
-    throw new Error("Pasos, acciones o dependencias invalidos o demasiado extensos.");
-  }
-  if (mode === "advisor" && (input.steps.length !== 0 || input.actions.length !== 0 || dependencies.length !== 0)) {
-    throw new Error("Asesor solo presenta un concepto, sin pasos ni ejecucion.");
-  }
-  if (mode !== "advisor" && input.steps.length === 0)
-    throw new Error("El plan requiere pasos visibles.");
-  if (mode !== "advisor" && input.actions.length === 0)
-    throw new Error("El plan requiere acciones o efectos exactos.");
-  if (input.steps.some((step) => typeof step !== "string" || !step.trim() || step.length > 1000))
-    throw new Error("Paso de plan invalido.");
-  if (input.actions.some((item) => !item || typeof item.action !== "string" || !ACTIONS.has(item.action) || typeof item.resource !== "string" || !item.resource.trim() || item.resource.length > 4096)) {
-    throw new Error("La accion debe ser edit, shell o subagent con recurso exacto.");
-  }
-  if (dependencies.some((item) => !item || !/^[a-f0-9]{32}$/.test(item.planID) || !/^[a-f0-9]{32}$/.test(item.revision))) {
-    throw new Error("Dependencia de plan invalida.");
-  }
-  const visibleInput = {
-    level: input.level,
-    summary: input.summary,
-    steps: input.steps,
-    presentation: input.presentation,
-    actions: input.actions,
-    dependencies,
-    verification: input.verification,
-    specRef: input.specRef,
-    specHash: input.specHash
-  };
-  if (JSON.stringify(visibleInput).length > 12000)
-    throw new Error("El plan es demasiado grande para una revision visible.");
-  const presentation = normalizePlanPresentation(input.presentation, mode, level);
-  const actions = normalizePlannedActions(input.actions);
-  const normalizedDependencies = uniqueSorted(dependencies, (item) => `${item.planID}\x00${item.revision}`);
-  validatePlanLevel(level, mode, input.steps, presentation, actions, normalizedDependencies);
-  const normalized = {
-    summary: input.summary.trim(),
-    steps: [...input.steps],
-    presentation,
-    actions,
-    dependencies: normalizedDependencies,
-    ...input.verification === undefined ? {} : { verification: normalizePlanVerification(input.verification) }
-  };
-  return input.level === undefined ? normalized : { level, ...normalized };
-}
-function normalizePlannedActions(actions) {
-  const normalized = actions.map((item) => {
-    const key = item.key === undefined ? derivedActionKey(item.action, item.resource) : normalizeActionKey(item.key);
-    const dependsOn = item.dependsOn === undefined ? [] : [...new Set(item.dependsOn.map(normalizeActionKey))].sort(compareText2);
-    return { action: item.action, resource: item.resource, key, dependsOn };
-  });
-  const unique2 = new Map;
-  for (const item of normalized) {
-    const identity = `${item.action}\x00${item.resource}\x00${item.key}`;
-    const previous = unique2.get(identity);
-    if (previous && !sameStrings2(previous.dependsOn ?? [], item.dependsOn ?? [])) {
-      throw new Error("Una acción duplicada no puede declarar dependencias distintas.");
-    }
-    unique2.set(identity, item);
-  }
-  const result = [...unique2.values()].sort((left, right) => compareText2(`${left.action}\x00${left.resource}\x00${left.key}`, `${right.action}\x00${right.resource}\x00${right.key}`));
-  validateLogicalActionGraph(result);
-  assertChainedEdits(result);
-  return result;
-}
-function assertChainedEdits(actions) {
-  const byKey = new Map(actions.map((action) => [action.key, action]));
-  const reaches = (from, to) => {
-    const seen = new Set;
-    const stack = [from];
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (current === to)
-        return true;
-      if (seen.has(current))
-        continue;
-      seen.add(current);
-      for (const dependency of byKey.get(current)?.dependsOn ?? [])
-        stack.push(dependency);
-    }
-    return false;
-  };
-  const editsByResource = new Map;
-  for (const action of actions) {
-    if (action.action !== "edit")
-      continue;
-    const keys = editsByResource.get(action.resource) ?? [];
-    keys.push(action.key);
-    editsByResource.set(action.resource, keys);
-  }
-  for (const keys of editsByResource.values()) {
-    for (const left of keys) {
-      for (const right of keys) {
-        if (left === right)
-          continue;
-        if (!reaches(left, right) && !reaches(right, left)) {
-          throw new Error("Las ediciones del mismo archivo deben encadenarse con dependencias.");
-        }
-      }
-    }
-  }
-}
-function normalizeActionKey(value) {
-  if (typeof value !== "string")
-    throw new Error("Clave lógica de acción inválida.");
-  const normalized = value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-");
-  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(normalized)) {
-    throw new Error("Clave lógica de acción inválida.");
-  }
-  return normalized;
-}
-function derivedActionKey(action, resource) {
-  const prefix = action === "subagent" ? "delegate" : action;
-  return `${prefix}-${createHash9("sha256").update(`${action}\x00${resource}`).digest("hex").slice(0, 16)}`;
-}
-function validateLogicalActionGraph(actions) {
-  const keys = actions.map((action) => action.key);
-  if (new Set(keys).size !== keys.length)
-    throw new Error("Las claves lógicas de acción deben ser únicas.");
-  const known = new Set(keys);
-  if (actions.some((action) => (action.dependsOn ?? []).some((dependency) => !known.has(dependency)))) {
-    throw new Error("Una dependencia de acción no existe en el plan.");
-  }
-  const byKey = new Map(actions.map((action) => [action.key, action]));
-  const visiting = new Set;
-  const visited = new Set;
-  const visit2 = (key) => {
-    if (visited.has(key))
-      return;
-    if (visiting.has(key))
-      throw new Error("Ciclo de dependencias entre acciones detectado.");
-    visiting.add(key);
-    for (const dependency of byKey.get(key)?.dependsOn ?? [])
-      visit2(dependency);
-    visiting.delete(key);
-    visited.add(key);
-  };
-  for (const key of keys)
-    visit2(key);
-}
-function normalizeActionIntents(value, actions, project) {
-  if (value === undefined)
-    return compatibilityActionIntents(actions, project);
-  if (!Array.isArray(value) || value.length > 240 || value.some((intent) => !validActionIntentV1(intent))) {
-    throw new Error("ActionIntentV1 inválido o demasiado extenso.");
-  }
-  if (actions.length === 0 !== (value.length === 0)) {
-    throw new Error("Las acciones visibles y los intents firmados deben declarar el mismo alcance vacío/no vacío.");
-  }
-  if (value.some((intent) => intent.project !== project)) {
-    throw new Error("Los intents pertenecen a otro proyecto.");
-  }
-  return structuredClone(value);
-}
-function normalizeActionGraph(value, actions, intents) {
-  if (value !== undefined) {
-    if (!validActionGraph(value, intents))
-      throw new Error("Grafo de acciones firmado inválido.");
-    return structuredClone(value);
-  }
-  if (actions.length === intents.length && actions.every((action) => action.key)) {
-    const actionIDByKey = new Map(actions.map((action, index) => [action.key, intents[index].actionID]));
-    return actions.map((action, index) => ({
-      key: action.key,
-      actionID: intents[index].actionID,
-      dependsOn: (action.dependsOn ?? []).map((key) => actionIDByKey.get(key))
-    }));
-  }
-  return intents.map((intent, index) => ({
-    key: `legacy-${index + 1}-${intent.actionID.slice(0, 12)}`,
-    actionID: intent.actionID,
-    dependsOn: []
-  }));
-}
-function validActionGraph(value, intents) {
-  if (!Array.isArray(value) || value.length !== intents.length)
-    return false;
-  const intentIDs = new Set(intents.map((intent) => intent.actionID));
-  const nodes = [];
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw))
-      return false;
-    const node = raw;
-    if (typeof node.key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(node.key) || typeof node.actionID !== "string" || !intentIDs.has(node.actionID) || !Array.isArray(node.dependsOn) || node.dependsOn.some((dependency) => typeof dependency !== "string" || !intentIDs.has(dependency)))
-      return false;
-    nodes.push({ key: node.key, actionID: node.actionID, dependsOn: node.dependsOn });
-  }
-  if (new Set(nodes.map((node) => node.key)).size !== nodes.length || new Set(nodes.map((node) => node.actionID)).size !== nodes.length)
-    return false;
-  try {
-    validateActionIDGraph(nodes);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function validateActionIDGraph(nodes) {
-  const byID = new Map(nodes.map((node) => [node.actionID, node]));
-  const visiting = new Set;
-  const visited = new Set;
-  const visit2 = (actionID) => {
-    if (visited.has(actionID))
-      return;
-    if (visiting.has(actionID))
-      throw new Error("Ciclo de dependencias entre intents detectado.");
-    visiting.add(actionID);
-    for (const dependency of byID.get(actionID)?.dependsOn ?? []) {
-      if (!byID.has(dependency))
-        throw new Error("Dependencia de intent inexistente.");
-      visit2(dependency);
-    }
-    visiting.delete(actionID);
-    visited.add(actionID);
-  };
-  for (const node of nodes)
-    visit2(node.actionID);
-}
-function actionGraphForPlan(state) {
-  if (state.actionGraph)
-    return structuredClone(state.actionGraph);
-  return state.actionIntents.map((intent, index) => ({
-    key: `legacy-${index + 1}-${intent.actionID.slice(0, 12)}`,
-    actionID: intent.actionID,
-    dependsOn: []
-  }));
-}
-function normalizeSpecReference(specRef, specHash) {
-  if (specRef === undefined && specHash === undefined)
-    return {};
-  if (typeof specRef !== "string" || typeof specHash !== "string") {
-    throw new Error("Referencia SDD no evaluable.");
-  }
-  const normalizedRef = specRef.trim();
-  const segments = normalizedRef.split("/");
-  if (!normalizedRef || normalizedRef.length > 1024 || /[\u0000\r\n]/u.test(normalizedRef) || !normalizedRef.startsWith("SDD/") || !normalizedRef.endsWith(".md") || normalizedRef.includes("\\") || segments.some((segment) => !segment || segment === "." || segment === "..") || !/^[a-f0-9]{64}$/.test(specHash)) {
-    throw new Error("Referencia SDD no evaluable: usa un Markdown relativo bajo SDD/ y su SHA-256.");
-  }
-  return { specRef: normalizedRef, specHash };
-}
-function normalizePlanLevel(value) {
-  if (value === undefined)
-    return 1;
-  if (value === 0 || value === 1 || value === 2)
-    return value;
-  throw new Error("Nivel de plan invalido: usa 0, 1 o 2.");
-}
-function validatePlanLevel(level, mode, steps, presentation, actions, dependencies) {
-  if (level !== 0)
-    return;
-  const editTargets = new Set(actions.filter((item) => item.action === "edit").map((item) => item.resource));
-  if (mode === "advisor")
-    throw new Error("Nivel 0 requiere un modo de ejecucion; asesor solo presenta conceptos.");
-  if (steps.length > 3 || presentation.steps.length > 2 || presentation.impact.length > 1 || presentation.exclusions.length > 3 || presentation.completionCriteria.length > 3) {
-    throw new Error("Nivel 0 exige un plan minimo: hasta tres pasos internos, dos pasos visibles y listas breves.");
-  }
-  if (presentation.risk.level !== "low" || presentation.risk.categories.length > 0) {
-    throw new Error("Nivel 0 solo admite riesgo bajo y ninguna categoria critica.");
-  }
-  if (dependencies.length > 0)
-    throw new Error("Nivel 0 no admite dependencias entre planes.");
-  if (actions.some((item) => item.action === "subagent"))
-    throw new Error("Nivel 0 no usa subagentes.");
-  if (editTargets.size > 1)
-    throw new Error("Nivel 0 solo puede modificar un archivo existente.");
-}
-async function assertDependencyGraph(state, adapter, authority) {
-  const visit2 = async (dependencies, trail) => {
-    for (const dependency of dependencies) {
-      if (dependency.planID === state.planID || trail.has(dependency.planID))
-        throw new Error("Ciclo de dependencias de plan detectado.");
-      const raw = await adapter.loadPlan(dependency.planID);
-      if (!validState(raw, authority) || raw.project !== state.project || raw.revision !== dependency.revision) {
-        throw new Error(`Dependencia de plan no evaluable: ${dependency.planID}.`);
-      }
-      const next = new Set(trail);
-      next.add(dependency.planID);
-      await visit2(raw.plan.dependencies, next);
-    }
-  };
-  await visit2(state.plan.dependencies, new Set([state.planID]));
-}
-async function pendingDependencies(state, adapter, authority) {
-  const pending = [];
-  for (const dependency of state.plan.dependencies) {
-    const raw = await adapter.loadPlan(dependency.planID);
-    if (!validState(raw, authority) || raw.project !== state.project || raw.revision !== dependency.revision || raw.phase !== "completed")
-      pending.push(dependency);
-  }
-  return pending;
-}
-function blockPlan(state, blockedBy, now, authority) {
-  return seal({
-    ...state,
-    phase: "blocked",
-    authorizedAt: state.authorizedAt ?? now,
-    blockedAt: now,
-    blockedBy,
-    updatedAt: now
-  }, authority);
-}
-function assertCurrent(state, digest2, now, authority) {
-  if (!validState(state, authority) || state.version !== 5 || state.digest !== digest2 || !Number.isFinite(now) || state.createdAt > now) {
-    throw new Error("Plan cambiado o no evaluable: vuelve a presentarlo.");
-  }
-}
-function seal(state, authority) {
-  const next = { ...state, proof: "" };
-  return { ...next, proof: authority.sign(statePayload(next)) };
-}
-function statePayload(value) {
-  const { proof: _proof, ...payload } = value;
-  return canonical2(payload);
-}
-function digestPlanV4(scope, plan, planID, revision, presentationInteractionID) {
-  return createHash9("sha256").update(canonical2({ scope, plan, planID, revision, presentationInteractionID })).digest("hex");
-}
-function digestPlanV5(scope, plan, planID, revision, presentationInteractionID, actionIntents, actionIntentSource, spec, actionGraph) {
-  return createHash9("sha256").update(canonical2({
-    contractVersion: PLAN_CONTRACT_VERSION,
-    canonicalizerVersion: ACTION_INTENT_CANONICALIZER,
-    scope,
-    plan,
-    planID,
-    revision,
-    presentationInteractionID,
-    actionIntentSource,
-    actionIntents,
-    ...actionGraph ? { actionGraph } : {},
-    ...spec
-  })).digest("hex");
-}
-function sameRevision(value, expected, authority) {
-  return validState(value, authority) && value.planID === expected.planID && value.version === expected.version && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof;
-}
-function samePlanScope(state, scope) {
-  return state.sessionID === scope.sessionID && state.project === scope.project && state.mode === scope.mode && state.policyRevision === scope.policyRevision;
-}
-function validPlan(value, mode) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const plan = value;
-  const level = plan.level === undefined ? 1 : plan.level;
-  if (level !== 0 && level !== 1 && level !== 2)
-    return false;
-  const structurallyValid = typeof plan.summary === "string" && Array.isArray(plan.steps) && Array.isArray(plan.actions) && Array.isArray(plan.dependencies) && plan.steps.every((step) => typeof step === "string") && validPlanPresentation(plan.presentation, mode, level) && validPlannedActions(plan.actions) && (plan.verification === undefined || validPlanVerification(plan.verification)) && plan.dependencies.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && /^[a-f0-9]{32}$/.test(String(entry.planID)) && /^[a-f0-9]{32}$/.test(String(entry.revision)));
-  if (!structurallyValid)
-    return false;
-  try {
-    validatePlanLevel(level, mode, plan.steps, plan.presentation, plan.actions, plan.dependencies);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function normalizePlanVerification(value) {
-  if (!validPlanVerification(value))
-    throw new Error("Verificación del plan inválida: requiere tests pertinentes y build.");
-  return structuredClone(value);
-}
-function validPlanVerification(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const { cwd, tests, build } = value;
-  if (!Array.isArray(tests) || tests.length === 0 || tests.length > 12 || typeof cwd !== "string" || !cwd.trim() || cwd.length > 4096 || typeof build !== "string" || !build.trim() || build.length > 4096)
-    return false;
-  const commands = new Set;
-  for (const entry of tests) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry))
-      return false;
-    const { command, targets, rationale } = entry;
-    if (typeof command !== "string" || !command.trim() || command.length > 4096 || commands.has(command) || typeof rationale !== "string" || !rationale.trim() || rationale.length > 1000 || !Array.isArray(targets) || targets.length === 0 || targets.length > 50 || targets.some((target) => typeof target !== "string" || !target.trim() || target.length > 4096))
-      return false;
-    commands.add(command);
-  }
-  return !commands.has(build);
-}
-function validPlannedActions(value) {
-  const actions = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry))
-      return false;
-    const action = entry;
-    if (!ACTIONS.has(String(action.action)) || typeof action.resource !== "string")
-      return false;
-    if (action.key !== undefined && (typeof action.key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(action.key)))
-      return false;
-    if (action.dependsOn !== undefined && (!Array.isArray(action.dependsOn) || action.dependsOn.some((dependency) => typeof dependency !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(dependency))))
-      return false;
-    actions.push({
-      action: action.action,
-      resource: action.resource,
-      ...typeof action.key === "string" ? { key: action.key } : {},
-      ...Array.isArray(action.dependsOn) ? { dependsOn: action.dependsOn } : {}
-    });
-  }
-  const legacy = actions.every((action) => action.key === undefined && action.dependsOn === undefined);
-  if (legacy)
-    return true;
-  if (actions.some((action) => action.key === undefined || action.dependsOn === undefined))
-    return false;
-  try {
-    validateLogicalActionGraph(actions);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function validPhase(value) {
-  const phase = value.phase;
-  if (value.mode === "advisor" && phase !== "presented" && phase !== "revoked" && phase !== "superseded")
-    return false;
-  if (phase === "reviewed" && (value.mode !== "assistant" || !validTime(value.reviewedAt)))
-    return false;
-  if (["running", "paused", "blocked", "completed"].includes(phase) && (!validTime(value.authorizedAt) || phase !== "blocked" && !validTime(value.startedAt)))
-    return false;
-  if (phase === "paused" && !validTime(value.pausedAt))
-    return false;
-  if (phase === "blocked" && (!validTime(value.blockedAt) || !Array.isArray(value.blockedBy) || value.blockedBy.length === 0))
-    return false;
-  if (phase === "completed" && !validTime(value.completedAt))
-    return false;
-  if (phase === "revoked" && !validTime(value.revokedAt))
-    return false;
-  if (phase === "superseded" && !validTime(value.supersededAt))
-    return false;
-  return true;
-}
-function validOptionalTimes(value) {
-  return ["reviewedAt", "authorizedAt", "startedAt", "pausedAt", "blockedAt", "completedAt", "revokedAt", "supersededAt"].every((key) => value[key] === undefined || validTime(value[key]));
-}
-function validSpecReference(specRef, specHash) {
-  try {
-    const normalized = normalizeSpecReference(specRef, specHash);
-    return specRef === undefined && specHash === undefined ? normalized.specRef === undefined && normalized.specHash === undefined : normalized.specRef === specRef && normalized.specHash === specHash;
-  } catch {
-    return false;
-  }
-}
-function specReferenceFromState(value) {
-  return typeof value.specRef === "string" && typeof value.specHash === "string" ? { specRef: value.specRef, specHash: value.specHash } : {};
-}
-function isActiveLegacyPlan(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const state = value;
-  return state.version === 4 && typeof state.phase === "string" && !TERMINAL.has(state.phase);
-}
-function validateScope(scope, now) {
-  if (!scope.sessionID || !scope.project || !/^[a-f0-9]{32}$/.test(scope.policyRevision) || !Number.isFinite(now)) {
-    throw new Error("Sesion/proyecto/politica de plan no evaluable.");
-  }
-}
-function validTime(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-function validInteractionID(value) {
-  return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
-}
-function randomID() {
-  return randomBytes4(16).toString("hex");
-}
-function uniqueSorted(items, key) {
-  return [...new Map(items.map((item) => [key(item), { ...item }])).values()].sort((left, right) => compareText2(key(left), key(right)));
-}
-function canonical2(value) {
-  if (Array.isArray(value))
-    return `[${value.map(canonical2).join(",")}]`;
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => compareText2(left, right));
-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical2(item)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-function compareText2(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-function sameStrings2(left, right) {
-  return left.length === right.length && left.every((item, index) => item === right[index]);
-}
-
 // src/cli/core/authorization-decision.ts
+init_planning();
 var AUTHORIZATION_DENIAL_CODES = [
   "NO_ACTIVE_PLAN",
   "PLAN_INVALID",
@@ -12070,6 +12323,8 @@ function record(value) {
 }
 
 // src/plugin/planning.ts
+init_planning();
+init_plan_presentation();
 init_documentation_boundary();
 init_read_only_shell_policy();
 
@@ -12217,10 +12472,12 @@ function isWithin4(value, root) {
 }
 
 // src/plugin/plan-retention.ts
+init_planning();
 import { createHash as createHash11 } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 // src/plugin/plan-recovery.ts
+init_planning();
 import { createHash as createHash10, randomBytes as randomBytes5 } from "node:crypto";
 var PLAN_EXECUTION_SCHEMA = 1;
 var PLAN_EXECUTION_KIND = "malahor.plan-execution";
@@ -12383,7 +12640,7 @@ async function loadPlanRevisionLineage(storage, planID, childRevision, authority
   return structuredClone(raw);
 }
 function validPlanExecutionCheckpoint(value, plan, graph, authority) {
-  if (!isRecord7(value) || value.schema !== PLAN_EXECUTION_SCHEMA || value.kind !== PLAN_EXECUTION_KIND || !isRecord7(value.plan) || value.plan.planID !== plan.planID || value.plan.revision !== plan.revision || value.plan.digest !== plan.digest || value.plan.proofHash !== plan.proofHash || !integer(value.sequence) || value.sequence < 0 || value.graphHash !== hashCanonical(normalizeGraph(graph)) || !isRecord7(value.nodes) || !isRecord7(value.blockers) || !Array.isArray(value.incidents) || !isRecord7(value.reservations) || !finiteNonNegative(value.updatedAt) || typeof value.proof !== "string")
+  if (!isRecord8(value) || value.schema !== PLAN_EXECUTION_SCHEMA || value.kind !== PLAN_EXECUTION_KIND || !isRecord8(value.plan) || value.plan.planID !== plan.planID || value.plan.revision !== plan.revision || value.plan.digest !== plan.digest || value.plan.proofHash !== plan.proofHash || !integer(value.sequence) || value.sequence < 0 || value.graphHash !== hashCanonical(normalizeGraph(graph)) || !isRecord8(value.nodes) || !isRecord8(value.blockers) || !Array.isArray(value.incidents) || !isRecord8(value.reservations) || !finiteNonNegative(value.updatedAt) || typeof value.proof !== "string")
     return false;
   const checkpoint = value;
   if (!authority.verify(checkpointPayload(checkpoint), checkpoint.proof))
@@ -12631,14 +12888,14 @@ async function loadCandidate(storage, parent, authority) {
   return structuredClone(raw);
 }
 function validRevisionCandidate(value, parent, authority) {
-  if (!isRecord7(value) || value.schema !== 1 || value.kind !== "malahor.plan-revision-candidate" || value.planID !== parent.planID || !isRecord7(value.parent) || value.parent.revision !== parent.revision || value.parent.digest !== parent.digest || value.parent.proofHash !== proofHash(parent) || !validState(value.candidate, authority) || value.candidate.version !== 5 || value.candidate.planID !== parent.planID || value.candidate.revision === parent.revision || !validDelta(value.delta) || value.checkpointRef !== planExecutionKey(parent.planID, parent.revision) || !["presented", "reviewed", "stale"].includes(String(value.phase)) || typeof value.proof !== "string")
+  if (!isRecord8(value) || value.schema !== 1 || value.kind !== "malahor.plan-revision-candidate" || value.planID !== parent.planID || !isRecord8(value.parent) || value.parent.revision !== parent.revision || value.parent.digest !== parent.digest || value.parent.proofHash !== proofHash(parent) || !validState(value.candidate, authority) || value.candidate.version !== 5 || value.candidate.planID !== parent.planID || value.candidate.revision === parent.revision || !validDelta(value.delta) || value.checkpointRef !== planExecutionKey(parent.planID, parent.revision) || !["presented", "reviewed", "stale"].includes(String(value.phase)) || typeof value.proof !== "string")
     return false;
   const candidate = value;
   const expectedDelta = revisionDeltaForPlans(parent, candidate.candidate);
   return sameRevisionDelta(candidate.delta, expectedDelta) && ([...expectedDelta.changed, ...expectedDelta.added, ...expectedDelta.removed].length > 0 || expectedDelta.planChanged === true) && authority.verify(candidatePayload(candidate), value.proof);
 }
 function validDelta(value) {
-  if (!isRecord7(value))
+  if (!isRecord8(value))
     return false;
   const groups = [value.preserved, value.changed, value.added, value.removed];
   if (groups.some((group) => !Array.isArray(group) || group.some((actionID) => !validHex(actionID, 64)) || new Set(group).size !== group.length))
@@ -12667,7 +12924,7 @@ async function loadTransition(storage, planID, authority) {
   return structuredClone(raw);
 }
 function validTransition(value, authority) {
-  if (!isRecord7(value) || value.schema !== 1 || value.kind !== "malahor.plan-revision-transition" || !validHex(value.planID, 32) || !validState(value.parent, authority) || value.parent.version !== 5 || !validState(value.child, authority) || value.child.version !== 5 || !validState(value.supersededParent, authority) || value.supersededParent.version !== 5 || value.parent.planID !== value.planID || value.child.planID !== value.planID || value.supersededParent.planID !== value.planID || value.parent.phase !== "running" && value.parent.phase !== "paused" || value.child.phase !== "running" && value.child.phase !== "blocked" || value.supersededParent.phase !== "superseded" || value.supersededParent.revision !== value.parent.revision || !validDelta(value.delta) || !validHex(value.parentCheckpointProof, 64) || !validHex(value.candidateProof, 64) || !finiteNonNegative(value.createdAt) || typeof value.proof !== "string")
+  if (!isRecord8(value) || value.schema !== 1 || value.kind !== "malahor.plan-revision-transition" || !validHex(value.planID, 32) || !validState(value.parent, authority) || value.parent.version !== 5 || !validState(value.child, authority) || value.child.version !== 5 || !validState(value.supersededParent, authority) || value.supersededParent.version !== 5 || value.parent.planID !== value.planID || value.child.planID !== value.planID || value.supersededParent.planID !== value.planID || value.parent.phase !== "running" && value.parent.phase !== "paused" || value.child.phase !== "running" && value.child.phase !== "blocked" || value.supersededParent.phase !== "superseded" || value.supersededParent.revision !== value.parent.revision || !validDelta(value.delta) || !validHex(value.parentCheckpointProof, 64) || !validHex(value.candidateProof, 64) || !finiteNonNegative(value.createdAt) || typeof value.proof !== "string")
     return false;
   const transition = value;
   const child = transition.child;
@@ -12688,7 +12945,7 @@ function sealRevisionLineage(lineage, authority) {
   return { ...unsigned, proof: authority.sign(revisionLineagePayload(unsigned)) };
 }
 function validRevisionLineage(value, planID, childRevision, authority) {
-  if (!isRecord7(value) || value.schema !== 1 || value.kind !== "malahor.plan-revision-lineage" || value.planID !== planID || !validState(value.parentActive, authority) || value.parentActive.version !== 5 || !validState(value.parentSuperseded, authority) || value.parentSuperseded.version !== 5 || !validState(value.child, authority) || value.child.version !== 5 || value.parentActive.planID !== planID || value.parentSuperseded.planID !== planID || value.child.planID !== planID || value.parentActive.revision === childRevision || value.parentSuperseded.revision !== value.parentActive.revision || value.child.revision !== childRevision || value.parentActive.phase !== "running" && value.parentActive.phase !== "paused" || value.parentSuperseded.phase !== "superseded" || value.child.phase !== "running" && value.child.phase !== "blocked" || !validDelta(value.delta) || value.parentCheckpointRef !== planExecutionKey(planID, value.parentActive.revision) || value.childCheckpointRef !== planExecutionKey(planID, childRevision) || !finiteNonNegative(value.activatedAt) || typeof value.proof !== "string")
+  if (!isRecord8(value) || value.schema !== 1 || value.kind !== "malahor.plan-revision-lineage" || value.planID !== planID || !validState(value.parentActive, authority) || value.parentActive.version !== 5 || !validState(value.parentSuperseded, authority) || value.parentSuperseded.version !== 5 || !validState(value.child, authority) || value.child.version !== 5 || value.parentActive.planID !== planID || value.parentSuperseded.planID !== planID || value.child.planID !== planID || value.parentActive.revision === childRevision || value.parentSuperseded.revision !== value.parentActive.revision || value.child.revision !== childRevision || value.parentActive.phase !== "running" && value.parentActive.phase !== "paused" || value.parentSuperseded.phase !== "superseded" || value.child.phase !== "running" && value.child.phase !== "blocked" || !validDelta(value.delta) || value.parentCheckpointRef !== planExecutionKey(planID, value.parentActive.revision) || value.childCheckpointRef !== planExecutionKey(planID, childRevision) || !finiteNonNegative(value.activatedAt) || typeof value.proof !== "string")
     return false;
   const lineage = value;
   return sameRevisionDelta(lineage.delta, revisionDeltaForPlans(lineage.parentActive, lineage.child)) && authority.verify(revisionLineagePayload(lineage), lineage.proof);
@@ -12757,7 +13014,7 @@ async function writeAndVerify(storage, key, value, valid) {
     throw new Error(`La escritura durable no quedó verificable: ${key}. Completa, pausa o revoca el plan antes de reintentar.`);
 }
 function samePlanRevision(value, expected, authority) {
-  return (!authority || validState(value, authority)) && isRecord7(value) && value.version === 5 && value.planID === expected.planID && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof && value.phase === expected.phase;
+  return (!authority || validState(value, authority)) && isRecord8(value) && value.version === 5 && value.planID === expected.planID && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof && value.phase === expected.phase;
 }
 function activePlanKey(sessionID) {
   if (!/^ses[A-Za-z0-9_-]{1,128}$/.test(sessionID))
@@ -13064,17 +13321,17 @@ async function loadOrCreateCheckpoint(storage, key, plan, graph, graphHash, auth
 }
 async function saveCheckpoint(storage, key, checkpoint, expectedPreviousProof, authority) {
   const current = await storage.get(key);
-  if (!isRecord7(current) || current.proof !== expectedPreviousProof || current.sequence !== checkpoint.sequence - 1) {
+  if (!isRecord8(current) || current.proof !== expectedPreviousProof || current.sequence !== checkpoint.sequence - 1) {
     throw new Error("RECOVERY_SEQUENCE_CONFLICT: el checkpoint cambió antes de persistir.");
   }
   await storage.set(key, structuredClone(checkpoint));
   const verified = await storage.get(key);
-  if (!isRecord7(verified) || verified.proof !== checkpoint.proof || verified.sequence !== checkpoint.sequence || !authority.verify(checkpointPayload(verified), verified.proof)) {
+  if (!isRecord8(verified) || verified.proof !== checkpoint.proof || verified.sequence !== checkpoint.sequence || !authority.verify(checkpointPayload(verified), verified.proof)) {
     throw new Error("RECOVERY_CHECKPOINT_UNAVAILABLE: la escritura no quedó verificable.");
   }
 }
 function normalizePlanRef(value) {
-  if (!isRecord7(value))
+  if (!isRecord8(value))
     throw new Error("Referencia de plan no evaluable.");
   assertHex(value.planID, 32, "ID de plan");
   assertHex(value.revision, 32, "revisión");
@@ -13090,7 +13347,7 @@ function normalizeGraph(value) {
     throw new Error("Grafo de acciones vacío o demasiado extenso.");
   }
   const graph = value.map((node) => {
-    if (!isRecord7(node) || typeof node.key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(node.key) || !validHex(node.actionID, 64) || !Array.isArray(node.dependsOn) || node.dependsOn.some((dependency) => !validHex(dependency, 64))) {
+    if (!isRecord8(node) || typeof node.key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(node.key) || !validHex(node.actionID, 64) || !Array.isArray(node.dependsOn) || node.dependsOn.some((dependency) => !validHex(dependency, 64))) {
       throw new Error("Nodo del grafo no evaluable.");
     }
     return { key: node.key, actionID: node.actionID, dependsOn: [...new Set(node.dependsOn)].sort(compareText3) };
@@ -13124,7 +13381,7 @@ function assertAcyclic(graph) {
     visit2(node.actionID);
 }
 function normalizeCorrelation(value, plan) {
-  if (!isRecord7(value) || value.planID !== plan.planID || value.revision !== plan.revision || !safeIdentifier(value.sessionID, 160) || !safeIdentifier(value.messageID, 256) || !safeIdentifier(value.callID, 256) || !validHex(value.actionID, 64) || !safeHashRef(value.policyHash) || !safeHashRef(value.resourceHash))
+  if (!isRecord8(value) || value.planID !== plan.planID || value.revision !== plan.revision || !safeIdentifier(value.sessionID, 160) || !safeIdentifier(value.messageID, 256) || !safeIdentifier(value.callID, 256) || !validHex(value.actionID, 64) || !safeHashRef(value.policyHash) || !safeHashRef(value.resourceHash))
     return;
   return {
     sessionID: value.sessionID,
@@ -13141,13 +13398,13 @@ function validNode(value, graph) {
   return Boolean(value) && value.key === graph.key && value.actionID === graph.actionID && sameStrings3(value.dependsOn, graph.dependsOn) && ["ready", "waiting", "in-flight", "succeeded", "failed", "blocked", "removed"].includes(value.state) && (value.blockerID === undefined || safeIdentifier(value.blockerID, 80)) && (value.attemptOrdinal === undefined || integer(value.attemptOrdinal) && value.attemptOrdinal >= 0) && (value.lastSuccessSequence === undefined || integer(value.lastSuccessSequence) && value.lastSuccessSequence > 0) && (value.verificationInputHash === undefined || validHex(value.verificationInputHash, 64)) && (value.lastFailureSignature === undefined || validHex(value.lastFailureSignature, 64));
 }
 function validBlocker(value) {
-  return isRecord7(value) && safeIdentifier(value.blockerID, 80) && safeLabel(value.code, "") === value.code && ["host-ask", "host-deny", "loop-guard", "technical-failure", "undeclared-action", "critical-control", "dependency"].includes(value.class) && (value.scope === "local" || value.scope === "common") && Array.isArray(value.descendants) && value.descendants.every((item) => validHex(item, 64)) && finiteNonNegative(value.createdAt);
+  return isRecord8(value) && safeIdentifier(value.blockerID, 80) && safeLabel(value.code, "") === value.code && ["host-ask", "host-deny", "loop-guard", "technical-failure", "undeclared-action", "critical-control", "dependency"].includes(value.class) && (value.scope === "local" || value.scope === "common") && Array.isArray(value.descendants) && value.descendants.every((item) => validHex(item, 64)) && finiteNonNegative(value.createdAt);
 }
 function validIncident(value) {
-  return isRecord7(value) && safeLabel(value.code, "") === value.code && (value.actionID === undefined || validHex(value.actionID, 64)) && (value.optional === undefined || typeof value.optional === "boolean") && finiteNonNegative(value.recordedAt);
+  return isRecord8(value) && safeLabel(value.code, "") === value.code && (value.actionID === undefined || validHex(value.actionID, 64)) && (value.optional === undefined || typeof value.optional === "boolean") && finiteNonNegative(value.recordedAt);
 }
 function validReservation(value, plan) {
-  return isRecord7(value) && safeIdentifier(value.reservationID, 80) && normalizeCorrelation(value, plan) !== undefined && finiteNonNegative(value.createdAt);
+  return isRecord8(value) && safeIdentifier(value.reservationID, 80) && normalizeCorrelation(value, plan) !== undefined && finiteNonNegative(value.createdAt);
 }
 function appendIncident(checkpoint, incident) {
   checkpoint.incidents.push(incident);
@@ -13216,7 +13473,7 @@ async function serializeWith(registry, key, operation) {
   }
 }
 function requireStorage(value) {
-  if (!isRecord7(value) || typeof value.get !== "function" || typeof value.set !== "function") {
+  if (!isRecord8(value) || typeof value.get !== "function" || typeof value.set !== "function") {
     throw new Error("Storage de recuperación no disponible.");
   }
   return value;
@@ -13265,7 +13522,7 @@ function integer(value) {
 function compareText3(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -13579,7 +13836,7 @@ async function restoreRemovedRecords(storage, removed) {
         continue;
       await storage.set(candidate.key, candidate.value);
       const verified = await storage.get(candidate.key);
-      if (isRecord8(verified) && verified.proof === candidate.value.proof)
+      if (isRecord9(verified) && verified.proof === candidate.value.proof)
         restored++;
     } catch {}
   }
@@ -13651,7 +13908,7 @@ function createArchiveBundle(state, evidence, authority) {
   return verified;
 }
 function parseArchiveBundle(value, authority) {
-  if (!isRecord8(value) || !validState(value.state, authority) || value.state.version !== 5 || !TERMINAL_PHASES.has(value.state.phase) || !Array.isArray(value.lineage) || value.lineage.length === 0 || value.lineage.length > 128 || !value.lineage.every((entry) => validState(entry, authority) && entry.version === 5) || !validTerminalDelta(value.delta) || !Array.isArray(value.checkpoints) || value.checkpoints.length > 128)
+  if (!isRecord9(value) || !validState(value.state, authority) || value.state.version !== 5 || !TERMINAL_PHASES.has(value.state.phase) || !Array.isArray(value.lineage) || value.lineage.length === 0 || value.lineage.length > 128 || !value.lineage.every((entry) => validState(entry, authority) && entry.version === 5) || !validTerminalDelta(value.delta) || !Array.isArray(value.checkpoints) || value.checkpoints.length > 128)
     return;
   const state = value.state;
   const lineage = value.lineage;
@@ -13661,7 +13918,7 @@ function parseArchiveBundle(value, authority) {
     return;
   const verifiedCheckpoints = [];
   for (const checkpoint of checkpoints) {
-    if (!isRecord8(checkpoint) || !isRecord8(checkpoint.plan))
+    if (!isRecord9(checkpoint) || !isRecord9(checkpoint.plan))
       return;
     const checkpointPlan = checkpoint.plan;
     const active = lineage.find((entry) => (entry.phase === "running" || entry.phase === "blocked" || entry.phase === "paused") && entry.revision === checkpointPlan.revision && createHash11("sha256").update(entry.proof).digest("hex") === checkpointPlan.proofHash);
@@ -13683,7 +13940,7 @@ function parseArchiveBundle(value, authority) {
   };
 }
 function validTerminalDelta(value) {
-  if (!isRecord8(value) || typeof value.parentRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.parentRevision) || typeof value.childRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.childRevision))
+  if (!isRecord9(value) || typeof value.parentRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.parentRevision) || typeof value.childRevision !== "string" || !/^[a-f0-9]{32}$/.test(value.childRevision))
     return false;
   const groups = [value.preserved, value.changed, value.added, value.removed];
   if (groups.some((group) => !Array.isArray(group) || group.some((actionID) => typeof actionID !== "string" || !/^[a-f0-9]{64}$/.test(actionID)) || new Set(group).size !== group.length))
@@ -13703,12 +13960,12 @@ function archivePointer(state, archiveKey) {
   };
 }
 function parsePointer(value, planID) {
-  if (!isRecord8(value) || value.schema !== ARCHIVE_SCHEMA || value.kind !== POINTER_KIND || value.planID !== planID || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.project !== "string" || typeof value.phase !== "string" || !TERMINAL_PHASES.has(value.phase) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.archiveKey !== "string" || value.archiveKey !== planArchiveRevisionKey(planID, value.revision))
+  if (!isRecord9(value) || value.schema !== ARCHIVE_SCHEMA || value.kind !== POINTER_KIND || value.planID !== planID || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.project !== "string" || typeof value.phase !== "string" || !TERMINAL_PHASES.has(value.phase) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.archiveKey !== "string" || value.archiveKey !== planArchiveRevisionKey(planID, value.revision))
     return;
   return value;
 }
 function isArchiveEnvelope(value) {
-  return isRecord8(value) && value.schema === ARCHIVE_SCHEMA && value.kind === ARCHIVE_KIND && value.encoding === "gzip-base64" && typeof value.planID === "string" && /^[a-f0-9]{32}$/.test(value.planID) && typeof value.revision === "string" && /^[a-f0-9]{32}$/.test(value.revision) && typeof value.project === "string" && typeof value.phase === "string" && TERMINAL_PHASES.has(value.phase) && typeof value.digest === "string" && /^[a-f0-9]{64}$/.test(value.digest) && typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256) && typeof value.compressedSha256 === "string" && /^[a-f0-9]{64}$/.test(value.compressedSha256) && typeof value.uncompressedBytes === "number" && Number.isInteger(value.uncompressedBytes) && value.uncompressedBytes > 0 && value.uncompressedBytes <= MAX_ARCHIVE_BYTES && (value.payloadKind === undefined || value.payloadKind === "state" || value.payloadKind === "recovery-bundle") && typeof value.payload === "string" && value.payload.length <= MAX_ARCHIVE_BYTES * 2;
+  return isRecord9(value) && value.schema === ARCHIVE_SCHEMA && value.kind === ARCHIVE_KIND && value.encoding === "gzip-base64" && typeof value.planID === "string" && /^[a-f0-9]{32}$/.test(value.planID) && typeof value.revision === "string" && /^[a-f0-9]{32}$/.test(value.revision) && typeof value.project === "string" && typeof value.phase === "string" && TERMINAL_PHASES.has(value.phase) && typeof value.digest === "string" && /^[a-f0-9]{64}$/.test(value.digest) && typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256) && typeof value.compressedSha256 === "string" && /^[a-f0-9]{64}$/.test(value.compressedSha256) && typeof value.uncompressedBytes === "number" && Number.isInteger(value.uncompressedBytes) && value.uncompressedBytes > 0 && value.uncompressedBytes <= MAX_ARCHIVE_BYTES && (value.payloadKind === undefined || value.payloadKind === "state" || value.payloadKind === "recovery-bundle") && typeof value.payload === "string" && value.payload.length <= MAX_ARCHIVE_BYTES * 2;
 }
 function archiveMatchesState(archive, state) {
   return archive.planID === state.planID && archive.revision === state.revision && archive.project === state.project && archive.phase === state.phase && archive.digest === state.digest;
@@ -13771,7 +14028,7 @@ function assertRevision(value) {
   if (!/^[a-f0-9]{32}$/.test(value))
     throw new Error("Revision de plan no evaluable.");
 }
-function isRecord8(value) {
+function isRecord9(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -13849,7 +14106,7 @@ function record2(state, input, now) {
   }
   const ordinal = (state.ordinals[primary] ?? 0) + 1;
   state.ordinals[primary] = ordinal;
-  const result = isRecord9(input.result) ? input.result : {};
+  const result = isRecord10(input.result) ? input.result : {};
   const resultClass = safeLabel2(result.class, "not-run");
   const decisionCode = safeLabel2(input.decisionCode, "UNKNOWN");
   const canonicalInputHash = safeHashRef2(input.canonicalInputHash, "sha256:unavailable");
@@ -13916,7 +14173,7 @@ function record2(state, input, now) {
   return { decision: "continue", code: "AUTHORIZED", retryAllowed: false, attempt };
 }
 function attemptMetrics(input) {
-  const resourceDigests = isRecord9(input.resourceDigests) ? input.resourceDigests : undefined;
+  const resourceDigests = isRecord10(input.resourceDigests) ? input.resourceDigests : undefined;
   const before = stringList(resourceDigests?.before).map((value) => safeHashRef2(value, "sha256:unavailable"));
   const after = stringList(resourceDigests?.after).map((value) => safeHashRef2(value, "sha256:unavailable"));
   return {
@@ -13927,7 +14184,7 @@ function attemptMetrics(input) {
   };
 }
 function parsePlan(value) {
-  if (!isRecord9(value) || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || value.phase !== "running" || !Array.isArray(value.actionIDs) || value.actionIDs.length === 0 || value.actionIDs.some((actionID) => typeof actionID !== "string" || !/^[a-f0-9]{64}$/.test(actionID))) {
+  if (!isRecord10(value) || typeof value.planID !== "string" || !/^[a-f0-9]{32}$/.test(value.planID) || typeof value.revision !== "string" || !/^[a-f0-9]{32}$/.test(value.revision) || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest) || value.phase !== "running" || !Array.isArray(value.actionIDs) || value.actionIDs.length === 0 || value.actionIDs.some((actionID) => typeof actionID !== "string" || !/^[a-f0-9]{64}$/.test(actionID))) {
     throw new Error("Plan de execution guard no evaluable.");
   }
   return {
@@ -13973,7 +14230,7 @@ async function loadState(storage, key, plan) {
   };
 }
 function validPersisted(value, plan) {
-  if (!isRecord9(value) || value.schema !== 1 || value.kind !== "malahor.execution-attempts" || !isRecord9(value.plan) || value.plan.planID !== plan.planID || value.plan.revision !== plan.revision || value.plan.digest !== plan.digest || value.plan.phase !== "running" && value.plan.phase !== "blocked" || !Array.isArray(value.attempts) || !isRecord9(value.counters) || !isRecord9(value.ordinals) || !Array.isArray(value.declaredActionIDs) || !Array.isArray(value.repairs) || value.failureSignatures !== undefined && !isRecord9(value.failureSignatures) || value.failureResources !== undefined && !isRecord9(value.failureResources))
+  if (!isRecord10(value) || value.schema !== 1 || value.kind !== "malahor.execution-attempts" || !isRecord10(value.plan) || value.plan.planID !== plan.planID || value.plan.revision !== plan.revision || value.plan.digest !== plan.digest || value.plan.phase !== "running" && value.plan.phase !== "blocked" || !Array.isArray(value.attempts) || !isRecord10(value.counters) || !isRecord10(value.ordinals) || !Array.isArray(value.declaredActionIDs) || !Array.isArray(value.repairs) || value.failureSignatures !== undefined && !isRecord10(value.failureSignatures) || value.failureResources !== undefined && !isRecord10(value.failureResources))
     return false;
   return value.declaredActionIDs.every((item) => typeof item === "string" && plan.actionIDs.includes(item));
 }
@@ -14002,7 +14259,7 @@ function attemptActionIDs(input) {
   return ids;
 }
 function parseAdapterRepair(value) {
-  if (!isRecord9(value) || value.equivalent !== true || value.kind !== "git-stage-manifest" || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID) || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID) || typeof value.repairedInputHash !== "string" || value.repairedInputHash.length > 256 || typeof value.manifestHash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.manifestHash) || value.relation !== "equal" && value.relation !== "narrower")
+  if (!isRecord10(value) || value.equivalent !== true || value.kind !== "git-stage-manifest" || typeof value.sourceActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceActionID) || typeof value.repairedActionID !== "string" || !/^[a-f0-9]{64}$/.test(value.repairedActionID) || typeof value.repairedInputHash !== "string" || value.repairedInputHash.length > 256 || typeof value.manifestHash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.manifestHash) || value.relation !== "equal" && value.relation !== "narrower")
     return;
   return {
     equivalent: true,
@@ -14056,9 +14313,9 @@ function finiteNonNegative2(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 function isStorage(value) {
-  return isRecord9(value) && typeof value.get === "function" && typeof value.set === "function";
+  return isRecord10(value) && typeof value.get === "function" && typeof value.set === "function";
 }
-function isRecord9(value) {
+function isRecord10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -15352,7 +15609,7 @@ async function evaluatePlanningTool(input, options, storage, authority = fallbac
     return;
   const actions = toolActions(tool, input.input, resolved.directory);
   const rawState = await loadActivePlanRaw(storage, resolved.scope.sessionID);
-  const args = isRecord10(input.input) ? input.input : {};
+  const args = isRecord11(input.input) ? input.input : {};
   const operationCwd = typeof args.workdir === "string" ? path23.resolve(resolved.directory, args.workdir) : typeof args.cwd === "string" ? path23.resolve(resolved.directory, args.cwd) : resolved.directory;
   const decision = authorizeOperations(rawState, resolved.scope, actions, resolved.directory, projectRoot, operationCwd, authority);
   if (decision.effect === "repair") {
@@ -15492,6 +15749,65 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             required: ["action", "resource"],
             additionalProperties: false
           } },
+          verification: {
+            type: "object",
+            properties: {
+              cwd: { type: "string" },
+              tests: { type: "array", items: {
+                type: "object",
+                properties: {
+                  command: { type: "string" },
+                  targets: { type: "array", items: { type: "string" } },
+                  rationale: { type: "string" }
+                },
+                required: ["command", "targets", "rationale"],
+                additionalProperties: false
+              } },
+              build: { type: "string" }
+            },
+            required: ["cwd", "tests", "build"],
+            additionalProperties: false
+          },
+          preflight: {
+            type: "object",
+            properties: {
+              edits: { type: "array", items: {
+                type: "object",
+                properties: {
+                  key: { type: "string" },
+                  path: { type: "string" },
+                  existence: { type: "string", enum: ["must-exist", "may-create"] },
+                  block: { type: "string" },
+                  consumers: { type: "array", items: { type: "string" } },
+                  tests: { type: "array", items: { type: "string" } },
+                  assertions: { type: "array", items: { type: "string" } }
+                },
+                required: ["key", "path", "existence", "consumers", "tests"],
+                additionalProperties: false
+              } },
+              runtime: { type: "array", items: {
+                type: "object",
+                properties: {
+                  contract: { type: "string" },
+                  evidence: { type: "string" }
+                },
+                required: ["contract", "evidence"],
+                additionalProperties: false
+              } },
+              failures: { type: "array", items: { type: "string" } },
+              evidence: { type: "array", items: {
+                type: "object",
+                properties: {
+                  claim: { type: "string" },
+                  source: { type: "string" }
+                },
+                required: ["claim", "source"],
+                additionalProperties: false
+              } }
+            },
+            required: ["edits"],
+            additionalProperties: false
+          },
           dependencies: { type: "array", items: {
             type: "object",
             properties: { planID: { type: "string" }, revision: { type: "string" } },
@@ -15540,6 +15856,16 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         if (newRepoDoc)
           throw new Error(`La documentacion operativa nueva debe ir al vault externo: ${newRepoDoc.resource}`);
         const normalizedActions = normalizePlannedActions(actions ?? []);
+        const preflightGate = options.planningPreflight;
+        if (preflightGate && normalizedActions.some((item) => item.action === "edit")) {
+          preflightGate.validate({
+            root: projectRoot,
+            directory: resolved.directory,
+            actions: normalizedActions,
+            verification: raw.verification,
+            preflight: raw.preflight
+          });
+        }
         const intentContext = {
           project: resolved.scope.project,
           root: projectRoot,
@@ -15667,7 +15993,7 @@ async function presentPlanningChange(input) {
 }
 async function requestPlanningExecution(input) {
   const { value, resolved, storage, approvals, call, options, authority } = input;
-  if (!isRecord10(value))
+  if (!isRecord11(value))
     throw new Error("Entrada de malahor_run no evaluable.");
   const active = await readPlan(storage, resolved.scope.sessionID, authority);
   if (active?.version === 5 && (active.phase === "running" || active.phase === "paused")) {
@@ -15884,7 +16210,7 @@ async function injectPlanningInstructions(input, options, storage, authority = f
     "<!-- malahor-planning:v1 -->"
   ];
   for (const part of system) {
-    if (!isRecord10(part) || part.type !== "text" || typeof part.text !== "string")
+    if (!isRecord11(part) || part.type !== "text" || typeof part.text !== "string")
       continue;
     const text2 = part.text;
     if (text2.includes(marker)) {
@@ -15902,7 +16228,7 @@ ${instructions}`;
     }
   }
   const last = system.at(-1);
-  if (isRecord10(last) && last.type === "text" && typeof last.text === "string") {
+  if (isRecord11(last) && last.type === "text" && typeof last.text === "string") {
     last.text += `
 
 ${marker}
@@ -16077,8 +16403,8 @@ function repairFromApprovalResources(resources) {
   };
 }
 function repairToolCall(input) {
-  const context = isRecord10(input.context) ? input.context : {};
-  const source = isRecord10(input.source) ? input.source : {};
+  const context = isRecord11(input.context) ? input.context : {};
+  const source = isRecord11(input.source) ? input.source : {};
   const sessionID = text2(input.sessionID || context.sessionID);
   const messageID = text2(input.messageID || context.messageID || source.messageID);
   const id = text2(input.id || input.callID || input.toolCallID || context.id || context.callID || source.id);
@@ -16090,7 +16416,7 @@ function repairInputActionID(input, project, projectRoot, directory) {
     const operations = toolActions(text2(input.tool), input.input, directory);
     if (operations?.length !== 1 || operations[0]?.action !== "shell")
       return;
-    const args = isRecord10(input.input) ? input.input : {};
+    const args = isRecord11(input.input) ? input.input : {};
     const operationCwd = typeof args.workdir === "string" ? path23.resolve(directory, args.workdir) : typeof args.cwd === "string" ? path23.resolve(directory, args.cwd) : directory;
     const intents = canonicalizePlannedAction(operations[0], {
       project,
@@ -16109,7 +16435,7 @@ function sameToolCall(left, right) {
   return left.sessionID === right.sessionID && left.agent === right.agent && left.messageID === right.messageID && left.id === right.id;
 }
 function attributedToolSource(value) {
-  return isRecord10(value) && value.type === "tool" && Boolean(text2(value.messageID)) && Boolean(text2(value.id));
+  return isRecord11(value) && value.type === "tool" && Boolean(text2(value.messageID)) && Boolean(text2(value.id));
 }
 async function requireScope(call, options) {
   const resolved = await resolvePlanningScope(call.sessionID, options);
@@ -16157,7 +16483,7 @@ async function resolvePlanningScope(value, options) {
   }
 }
 function toolActions(tool, value, directory) {
-  const args = isRecord10(value) ? value : {};
+  const args = isRecord11(value) ? value : {};
   if (tool === "shell" || tool === "bash") {
     if ([args.cwd, args.workdir].some((cwd) => cwd !== undefined && typeof cwd !== "string"))
       return;
@@ -16505,12 +16831,12 @@ function recoveryDenial(code) {
   return { effect: "deny", code: supported.has(code) ? code : "PLAN_CHECKPOINT_INVALID" };
 }
 function permissionOperationCwd(input, directory) {
-  const metadata = isRecord10(input.metadata) ? input.metadata : {};
+  const metadata = isRecord11(input.metadata) ? input.metadata : {};
   const raw = metadata.workdir ?? metadata.cwd;
   return typeof raw === "string" ? path23.resolve(directory, raw) : directory;
 }
 function permissionToolCall(input) {
-  const source = isRecord10(input.source) ? input.source : {};
+  const source = isRecord11(input.source) ? input.source : {};
   const sessionID = text2(input.sessionID);
   const messageID = text2(source.messageID);
   const id = text2(source.id || source.callID || source.toolCallID);
@@ -16521,12 +16847,12 @@ function toolCallIdentity(input) {
   return repairToolCall(input);
 }
 function optionalDiagnosticPermission(input) {
-  const metadata = isRecord10(input.metadata) ? input.metadata : {};
+  const metadata = isRecord11(input.metadata) ? input.metadata : {};
   return metadata.optional === true && (metadata.source === "diagnostic" || metadata.kind === "diagnostic");
 }
 function planningResourceHash(input) {
-  const source = isRecord10(input.source) ? input.source : {};
-  const metadata = isRecord10(input.metadata) ? input.metadata : {};
+  const source = isRecord11(input.source) ? input.source : {};
+  const metadata = isRecord11(input.metadata) ? input.metadata : {};
   const payload = input.tool ? { tool: text2(input.tool), input: input.input } : {
     action: text2(input.action),
     resources: Array.isArray(input.resources) ? input.resources : [],
@@ -16548,8 +16874,8 @@ function canonicalPlanningValue(value) {
   return JSON.stringify(value) ?? "null";
 }
 function toolCompletionStatus(input) {
-  const output = isRecord10(input.output) ? input.output : {};
-  const result = isRecord10(input.result) ? input.result : {};
+  const output = isRecord11(input.output) ? input.output : {};
+  const result = isRecord11(input.result) ? input.result : {};
   if (input.error !== undefined && input.error !== null)
     return "failure";
   if (output.error !== undefined || result.error !== undefined || output.success === false || result.success === false)
@@ -16646,7 +16972,7 @@ function readOnlyShellResources(value, projectRoot, workingDirectory) {
 function readOnlyShellTool(tool, value, projectRoot, sessionDirectory) {
   if (tool !== "shell" && tool !== "bash")
     return false;
-  const args = isRecord10(value) ? value : {};
+  const args = isRecord11(value) ? value : {};
   if ([args.cwd, args.workdir].some((cwd2) => cwd2 !== undefined && typeof cwd2 !== "string"))
     return false;
   const cwd = typeof args.cwd === "string" ? path23.resolve(sessionDirectory, args.cwd) : undefined;
@@ -16658,10 +16984,10 @@ function readOnlyShellTool(tool, value, projectRoot, sessionDirectory) {
 }
 function permissionShellCandidate(input, projectRoot) {
   const resources = Array.isArray(input.resources) ? input.resources : [];
-  const metadata = isRecord10(input.metadata) ? input.metadata : {};
+  const metadata = isRecord11(input.metadata) ? input.metadata : {};
   const metadataCommand = text2(metadata.command || metadata.cmd);
   const rawCwd = metadata.workdir ?? metadata.cwd;
-  const source = isRecord10(input.source) ? input.source : {};
+  const source = isRecord11(input.source) ? input.source : {};
   const command = metadataCommand || (resources.length === 1 && typeof resources[0] === "string" ? resources[0].trim() : "");
   const messageID = text2(source.messageID);
   const toolCallID = text2(source.id || source.callID || source.toolCallID);
@@ -16675,7 +17001,7 @@ function permissionShellCandidate(input, projectRoot) {
   };
 }
 function toolShellCandidate(input, sessionDirectory, projectRoot) {
-  const args = isRecord10(input.input) ? input.input : {};
+  const args = isRecord11(input.input) ? input.input : {};
   const command = typeof args.command === "string" ? args.command : "";
   const cwdValuesValid = [args.cwd, args.workdir].every((cwd2) => cwd2 === undefined || typeof cwd2 === "string");
   const cwd = typeof args.cwd === "string" ? path23.resolve(sessionDirectory, args.cwd) : undefined;
@@ -16726,7 +17052,7 @@ function directDiagnosticPermission(resources) {
 function directDiagnosticTool(tool, value, agent) {
   if (tool !== "subagent" && tool !== "task")
     return false;
-  const args = isRecord10(value) ? value : {};
+  const args = isRecord11(value) ? value : {};
   return agent === "malahor" && args.agent === "malahor-diagnostico";
 }
 function permissionAction(action) {
@@ -16778,7 +17104,7 @@ function inside6(target, root) {
 function text2(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord10(value) {
+function isRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function denyDecision(input, decision) {
@@ -16874,6 +17200,7 @@ Para aplicar: /malahor-modo ${plan.target}` : `Modo ${plan.target} ya persistido
 }
 
 // src/plugin/plan-command.ts
+init_planning();
 import { createHash as createHash16 } from "node:crypto";
 var CONTROLS = new Set(["status", "pause", "resume", "revoke", "complete"]);
 var DETAIL_VIEWS = new Set(["detalles", "details"]);
@@ -53133,7 +53460,7 @@ async function runCodeModeWorker(data3 = workerData) {
         maxOutputBytes: CODE_MODE_LIMITS.resultBytes
       }
     }), { signal: abort.signal });
-    if (isRecord12(result4) && result4.ok === false && isRecord12(result4.error) && result4.error.kind === "ToolFailure" && brokerFailure) {
+    if (isRecord13(result4) && result4.ok === false && isRecord13(result4.error) && result4.error.kind === "ToolFailure" && brokerFailure) {
       result4 = workerFailureResult(brokerFailure);
     }
     const sanitized = sanitizeWorkerResult(result4);
@@ -53274,7 +53601,7 @@ function parseStartMessage(value3) {
   return { version: 1, type: "start", executionRef: value3.executionRef, code: value3.code, tools };
 }
 function parseResultMessage(value3, executionRef) {
-  if (!isRecord12(value3) || value3.version !== CODE_MODE_RPC_VERSION || value3.type !== "result" || value3.executionRef !== executionRef || typeof value3.callID !== "string" || !/^call_[0-9]+$/.test(value3.callID) || !Number.isSafeInteger(value3.index) || value3.index < 0 || typeof value3.ok !== "boolean")
+  if (!isRecord13(value3) || value3.version !== CODE_MODE_RPC_VERSION || value3.type !== "result" || value3.executionRef !== executionRef || typeof value3.callID !== "string" || !/^call_[0-9]+$/.test(value3.callID) || !Number.isSafeInteger(value3.index) || value3.index < 0 || typeof value3.ok !== "boolean")
     return;
   if (value3.ok === true) {
     if (!exactRecord2(value3, ["version", "type", "executionRef", "callID", "index", "ok", "value"]))
@@ -53338,7 +53665,7 @@ function fatalBrokerFailure(code) {
 function isFailureCode(value3) {
   return CODE_MODE_FAILURE_CODES.includes(value3);
 }
-function isRecord12(value3) {
+function isRecord13(value3) {
   return typeof value3 === "object" && value3 !== null && !Array.isArray(value3);
 }
 function exactRecord2(value3, keys4, optional3 = false) {
@@ -54553,7 +54880,7 @@ function safeResultRelative(value3, root, requireFile) {
   }
 }
 function sandboxToPublicResult(sandbox3, executionRef, calls, brokerRedacted, brokerTruncated) {
-  if (!isRecord13(sandbox3.result) || typeof sandbox3.result.ok !== "boolean") {
+  if (!isRecord14(sandbox3.result) || typeof sandbox3.result.ok !== "boolean") {
     return failureResult(executionRef, "SANDBOX_FAILURE", calls, true);
   }
   if (sandbox3.result.ok === true) {
@@ -54566,7 +54893,7 @@ function sandboxToPublicResult(sandbox3, executionRef, calls, brokerRedacted, br
       truncated: brokerTruncated || sandbox3.truncated || sandbox3.result.truncated === true
     };
   }
-  const diagnostic = isRecord13(sandbox3.result.error) ? sandbox3.result.error : {};
+  const diagnostic = isRecord14(sandbox3.result.error) ? sandbox3.result.error : {};
   const code = diagnosticFailureCode(typeof diagnostic.kind === "string" ? diagnostic.kind : "");
   return failureResult(executionRef, code, calls, brokerRedacted || sandbox3.redacted, brokerTruncated || sandbox3.truncated === true);
 }
@@ -54629,7 +54956,7 @@ async function probeCodeModeSandbox(source, runSandbox) {
       throw new CodeModeExecutionError("SANDBOX_FAILURE");
     }
   });
-  if (!isRecord13(probe.result) || probe.result.ok !== true || !isRecord13(probe.result.value) || probe.result.value.health !== true || probe.redacted || probe.truncated) {
+  if (!isRecord14(probe.result) || probe.result.ok !== true || !isRecord14(probe.result.value) || probe.result.value.health !== true || probe.redacted || probe.truncated) {
     throw new CodeModeExecutionError("SANDBOX_FAILURE");
   }
 }
@@ -54871,7 +55198,7 @@ function listedToolDefinitions(value3) {
     throw new Error("ctx.tool.list no devolvio un catalogo.");
   const output = new Map;
   for (const item of value3) {
-    if (!isRecord13(item) || typeof item.id !== "string" || !item.id || output.has(item.id)) {
+    if (!isRecord14(item) || typeof item.id !== "string" || !item.id || output.has(item.id)) {
       throw new Error("ctx.tool.list contiene una definicion incompatible.");
     }
     output.set(item.id, item);
@@ -54879,7 +55206,7 @@ function listedToolDefinitions(value3) {
   return output;
 }
 function hostToolDefinition(value3, expected) {
-  if (!isRecord13(value3) || typeof value3.execute !== "function" || typeof value3.description !== "string" || !value3.description.trim() || value3.description.length > 4096) {
+  if (!isRecord14(value3) || typeof value3.execute !== "function" || typeof value3.description !== "string" || !value3.description.trim() || value3.description.length > 4096) {
     return;
   }
   const id2 = typeof value3.id === "string" ? value3.id : undefined;
@@ -54907,7 +55234,7 @@ function hostToolDefinition(value3, expected) {
   };
 }
 function hostToolCompatibilityIssue(value3, expected) {
-  if (!isRecord13(value3))
+  if (!isRecord14(value3))
     return "definition";
   if (typeof value3.execute !== "function")
     return "execute";
@@ -54950,7 +55277,7 @@ function schemaDocumentShape(value3, document, depth = 0) {
     const aliases = new Map;
     return `union[${union5.slice(0, 8).map((item) => {
       const branch = selectSchemaNode(item, document, "object");
-      const properties = branch && isRecord13(branch.properties) ? branch.properties : undefined;
+      const properties = branch && isRecord14(branch.properties) ? branch.properties : undefined;
       const literal3 = properties ? singleStringLiteral(properties.type, document) : undefined;
       let alias = "none";
       if (literal3) {
@@ -54964,7 +55291,7 @@ function schemaDocumentShape(value3, document, depth = 0) {
   return schemaNodeShape(node, document);
 }
 function schemaShape(value3) {
-  if (!isRecord13(value3))
+  if (!isRecord14(value3))
     return typeof value3;
   const union5 = Array.isArray(value3.anyOf) ? value3.anyOf : Array.isArray(value3.oneOf) ? value3.oneOf : undefined;
   if (union5)
@@ -54972,7 +55299,7 @@ function schemaShape(value3) {
   return schemaNodeShape(value3);
 }
 function schemaNodeShape(value3, document) {
-  if (!isRecord13(value3))
+  if (!isRecord14(value3))
     return typeof value3;
   const knownTypes = new Set(["array", "boolean", "integer", "null", "number", "object", "string"]);
   const type = typeof value3.type === "string" && knownTypes.has(value3.type) ? value3.type : "none";
@@ -54980,11 +55307,11 @@ function schemaNodeShape(value3, document) {
     const itemShape = document ? schemaDocumentShape(value3.items, document, 1) : schemaShape(value3.items);
     return `array-${itemShape}`;
   }
-  const properties = isRecord13(value3.properties) ? value3.properties : undefined;
+  const properties = isRecord14(value3.properties) ? value3.properties : undefined;
   const propertyNames = properties ? Object.keys(properties).sort() : [];
   const fields = !properties ? "none" : propertyNames.length <= 16 && propertyNames.every((name) => /^[A-Za-z_][A-Za-z0-9_]{0,31}$/.test(name)) ? propertyNames.join("+") || "empty" : `unsafe-${propertyNames.length}`;
   const typeProperty = properties?.type;
-  const typeNode = document ? dereferenceSchema(typeProperty, document) : isRecord13(typeProperty) ? typeProperty : undefined;
+  const typeNode = document ? dereferenceSchema(typeProperty, document) : isRecord14(typeProperty) ? typeProperty : undefined;
   const rawVariant = typeNode?.const ?? (Array.isArray(typeNode?.enum) && typeNode.enum.length === 1 ? typeNode.enum[0] : undefined);
   const variant = typeof rawVariant === "string" && ["text", "json", "image", "resource", "binary", "error"].includes(rawVariant) ? rawVariant : "none";
   const discriminatorShape = !typeNode ? "missing" : typeNode.const !== undefined ? `const-${typeof typeNode.const}` : Array.isArray(typeNode.enum) ? `enum-${typeNode.enum.length}` : Array.isArray(typeNode.anyOf) ? `anyOf-${typeNode.anyOf.length}` : Array.isArray(typeNode.oneOf) ? `oneOf-${typeNode.oneOf.length}` : typeof typeNode.type === "string" ? `type-${typeNode.type}` : "opaque";
@@ -55016,7 +55343,7 @@ var MAX_HOST_SCHEMA_ITEMS = 2048;
 function compatibleHostInput(tool, value3) {
   const document = normalizeSchemaDocument(value3);
   const root = document && selectSchemaNode(document.root, document, "object");
-  if (!document || !root || !schemaKeysAllowed(root, ["type", "properties", "required", "additionalProperties"]) || root.additionalProperties !== false || !isRecord13(root.properties) || !Array.isArray(root.required)) {
+  if (!document || !root || !schemaKeysAllowed(root, ["type", "properties", "required", "additionalProperties"]) || root.additionalProperties !== false || !isRecord14(root.properties) || !Array.isArray(root.required)) {
     return;
   }
   const expected = tool === "read" ? ["path", "offset", "limit"] : tool === "glob" ? ["pattern", "path", "hidden", "limit"] : ["pattern", "path", "include", "literal", "caseSensitive", "limit"];
@@ -55058,7 +55385,7 @@ function compatibleHostInput(tool, value3) {
 function compatibleHostOptions(tool, value3) {
   if (value3 === undefined)
     return {};
-  if (!isRecord13(value3) || Object.keys(value3).some((key) => !["namespace", "permission", "codemode", "pinned"].includes(key))) {
+  if (!isRecord14(value3) || Object.keys(value3).some((key) => !["namespace", "permission", "codemode", "pinned"].includes(key))) {
     return;
   }
   if (value3.namespace !== undefined || value3.permission !== undefined && value3.permission !== tool)
@@ -55111,7 +55438,7 @@ function compatibleHostOutput(tool, value3) {
   if (tagged)
     return tagged;
   const root = selectSchemaNode(document.root, document, "object");
-  if (!root || !schemaKeysAllowed(root, ["type", "properties", "required", "additionalProperties"]) || root.additionalProperties !== false || !isRecord13(root.properties) || !Array.isArray(root.required)) {
+  if (!root || !schemaKeysAllowed(root, ["type", "properties", "required", "additionalProperties"]) || root.additionalProperties !== false || !isRecord14(root.properties) || !Array.isArray(root.required)) {
     return;
   }
   const properties = root.properties;
@@ -55150,7 +55477,7 @@ function grepEntriesOutputContract(document) {
     return;
   }
   const item = selectSchemaNode(root.items, document, "object");
-  if (!item || !schemaKeysAllowed(item, ["type", "properties", "required", "additionalProperties"]) || item.additionalProperties !== false || !isRecord13(item.properties) || !Array.isArray(item.required)) {
+  if (!item || !schemaKeysAllowed(item, ["type", "properties", "required", "additionalProperties"]) || item.additionalProperties !== false || !isRecord14(item.properties) || !Array.isArray(item.required)) {
     return;
   }
   const properties = item.properties;
@@ -55165,7 +55492,7 @@ function grepEntriesOutputContract(document) {
   if (!submatches || !schemaKeysAllowed(submatches, ["type", "items", "minItems", "maxItems"]) || submatches.items === undefined)
     return;
   const submatch = selectSchemaNode(submatches.items, document, "object");
-  if (!submatch || !schemaKeysAllowed(submatch, ["type", "properties", "required", "additionalProperties"]) || submatch.additionalProperties !== false || !isRecord13(submatch.properties) || !Array.isArray(submatch.required)) {
+  if (!submatch || !schemaKeysAllowed(submatch, ["type", "properties", "required", "additionalProperties"]) || submatch.additionalProperties !== false || !isRecord14(submatch.properties) || !Array.isArray(submatch.required)) {
     return;
   }
   const submatchProperties = submatch.properties;
@@ -55191,7 +55518,7 @@ function grepEntriesOutputContract(document) {
 }
 function fileEntryOutputSchema(value3, document) {
   const entry = selectSchemaNode(value3, document, "object");
-  if (!entry || !schemaKeysAllowed(entry, ["type", "properties", "required", "additionalProperties"]) || entry.additionalProperties !== false || !isRecord13(entry.properties) || !Array.isArray(entry.required)) {
+  if (!entry || !schemaKeysAllowed(entry, ["type", "properties", "required", "additionalProperties"]) || entry.additionalProperties !== false || !isRecord14(entry.properties) || !Array.isArray(entry.required)) {
     return;
   }
   const properties = entry.properties;
@@ -55212,7 +55539,7 @@ function grepEntriesOutputIssue(document) {
   const item = selectSchemaNode(root.items, document, "object");
   if (!item)
     return "grep-item";
-  if (!schemaKeysAllowed(item, ["type", "properties", "required", "additionalProperties"]) || item.additionalProperties !== false || !isRecord13(item.properties) || !Array.isArray(item.required))
+  if (!schemaKeysAllowed(item, ["type", "properties", "required", "additionalProperties"]) || item.additionalProperties !== false || !isRecord14(item.properties) || !Array.isArray(item.required))
     return "grep-item-shape";
   const properties = item.properties;
   const expected = ["entry", "line", "offset", "submatches", "text"];
@@ -55240,7 +55567,7 @@ function grepEntriesOutputIssue(document) {
   const submatch = selectSchemaNode(submatches.items, document, "object");
   if (!submatch)
     return "grep-submatch";
-  if (!schemaKeysAllowed(submatch, ["type", "properties", "required", "additionalProperties"]) || submatch.additionalProperties !== false || !isRecord13(submatch.properties) || !Array.isArray(submatch.required)) {
+  if (!schemaKeysAllowed(submatch, ["type", "properties", "required", "additionalProperties"]) || submatch.additionalProperties !== false || !isRecord14(submatch.properties) || !Array.isArray(submatch.required)) {
     return "grep-submatch-shape";
   }
   const submatchProperties = submatch.properties;
@@ -55260,7 +55587,7 @@ function globEntriesOutputContract(document) {
     return;
   }
   const item = selectSchemaNode(root.items, document, "object");
-  if (!item || !schemaKeysAllowed(item, ["type", "properties", "required", "additionalProperties"]) || item.additionalProperties !== false || !isRecord13(item.properties) || !Array.isArray(item.required)) {
+  if (!item || !schemaKeysAllowed(item, ["type", "properties", "required", "additionalProperties"]) || item.additionalProperties !== false || !isRecord14(item.properties) || !Array.isArray(item.required)) {
     return;
   }
   const properties = item.properties;
@@ -55299,7 +55626,7 @@ function readTextOutputContract(document) {
   const expectedKeys = ["content", "mime", "next", "offset", "truncated", "type"];
   for (const item of union5) {
     const node = selectSchemaNode(item, document, "object");
-    if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord13(node.properties) || !Array.isArray(node.required)) {
+    if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord14(node.properties) || !Array.isArray(node.required)) {
       return;
     }
     const properties = node.properties;
@@ -55349,7 +55676,7 @@ function taggedTextOutputContract(document) {
   const incompatibleTextVariants = new Set;
   for (const item of union5) {
     const node = selectSchemaNode(item, document, "object");
-    if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord13(node.properties) || !Array.isArray(node.required)) {
+    if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord14(node.properties) || !Array.isArray(node.required)) {
       return;
     }
     const properties = node.properties;
@@ -55408,7 +55735,7 @@ function taggedTextOutputIssue(document) {
     if (!schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"])) {
       return `tagged-branch-${index3}-keys`;
     }
-    if (node.additionalProperties !== false || !isRecord13(node.properties) || !Array.isArray(node.required)) {
+    if (node.additionalProperties !== false || !isRecord14(node.properties) || !Array.isArray(node.required)) {
       return `tagged-branch-${index3}-shape`;
     }
     const properties = node.properties;
@@ -55538,7 +55865,7 @@ function outputValueContract(tool, value3, document, field) {
 }
 function textPartItemSchema(value3, document) {
   const node = selectSchemaNode(value3, document, "object");
-  if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord13(node.properties) || !Array.isArray(node.required))
+  if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord14(node.properties) || !Array.isArray(node.required))
     return false;
   const properties = node.properties;
   const required2 = node.required.filter((item) => typeof item === "string");
@@ -55546,7 +55873,7 @@ function textPartItemSchema(value3, document) {
 }
 function grepMatchItemSchema(value3, document) {
   const node = selectSchemaNode(value3, document, "object");
-  if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord13(node.properties) || !Array.isArray(node.required))
+  if (!node || !schemaKeysAllowed(node, ["type", "properties", "required", "additionalProperties"]) || node.additionalProperties !== false || !isRecord14(node.properties) || !Array.isArray(node.required))
     return false;
   const properties = node.properties;
   const required2 = node.required.filter((item) => typeof item === "string");
@@ -55604,7 +55931,7 @@ function normalizeSchemaDocument(value3) {
 }
 function cloneSchemaRecord(value3) {
   const cloned = cloneSchemaValue(value3, 0, { items: 0 });
-  return isRecord13(cloned) ? cloned : undefined;
+  return isRecord14(cloned) ? cloned : undefined;
 }
 function cloneSchemaValue(value3, depth, state) {
   if (depth > MAX_HOST_SCHEMA_DEPTH || state.items > MAX_HOST_SCHEMA_ITEMS)
@@ -55656,7 +55983,7 @@ function selectSchemaNode(value3, document, expected) {
   return node;
 }
 function dereferenceSchema(value3, document, seen = new Set) {
-  if (!isRecord13(value3))
+  if (!isRecord14(value3))
     return;
   if (typeof value3.$ref === "string") {
     const match8 = /^#\/(?:\$defs|definitions)\/([^/]+)$/.exec(value3.$ref);
@@ -55696,7 +56023,7 @@ function integerCompatibleMultiple(value3) {
   return value3 > 0 && value3 <= 1 && Number.isSafeInteger(1 / value3);
 }
 function isPlainRecord(value3) {
-  if (!isRecord13(value3))
+  if (!isRecord14(value3))
     return false;
   const prototype = Object.getPrototypeOf(value3);
   return prototype === Object.prototype || prototype === null;
@@ -55901,12 +56228,12 @@ function boundaryLimits2(maxBytes) {
   };
 }
 function exactRecord3(value3, keys4, optional3 = false) {
-  if (!isRecord13(value3))
+  if (!isRecord14(value3))
     return false;
   const own3 = Object.keys(value3);
   return own3.every((key) => keys4.includes(key)) && (optional3 || keys4.every((key) => Object.hasOwn(value3, key)));
 }
-function isRecord13(value3) {
+function isRecord14(value3) {
   return typeof value3 === "object" && value3 !== null && !Array.isArray(value3);
 }
 function sha2563(value3) {
@@ -56095,10 +56422,10 @@ async function writePending(options, sessionID, canonicalKey, kind, candidates, 
 }
 async function readRecord2(storage, sessionID) {
   const value3 = await storage.get(projectAffinityKey(sessionID));
-  if (!isRecord14(value3) || value3.schema !== 1 || value3.sessionID !== sessionID)
+  if (!isRecord15(value3) || value3.schema !== 1 || value3.sessionID !== sessionID)
     return;
   const canonicalKey = stringValue6(value3.canonicalKey);
-  const pendingValue = isRecord14(value3.pending) ? value3.pending : undefined;
+  const pendingValue = isRecord15(value3.pending) ? value3.pending : undefined;
   const kind = pendingValue?.kind === "ambiguous" || pendingValue?.kind === "conflict" ? pendingValue.kind : undefined;
   const candidates = Array.isArray(pendingValue?.candidates) ? pendingValue.candidates.filter((item) => typeof item === "string") : [];
   return {
@@ -56129,7 +56456,7 @@ Afinidad de proyecto en conflicto. Pregunta UNA sola vez si debe conservarse ${r
 Proyecto ambiguo. Pregunta UNA sola vez cual proyecto usar entre: ${candidates}. La respuesta fijara la afinidad de esta sesion. No pidas claves tecnicas ni ejecutes operaciones protegidas antes de resolverlo.`;
 }
 function promptText2(input) {
-  const prompt = isRecord14(input.prompt) ? input.prompt : undefined;
+  const prompt = isRecord15(input.prompt) ? input.prompt : undefined;
   return [stringValue6(prompt?.text), stringValue6(input.text), stringValue6(input.message)].filter(Boolean).join(`
 `);
 }
@@ -56147,7 +56474,7 @@ function collectPaths(value3, output, depth) {
     value3.forEach((item) => collectPaths(item, output, depth + 1));
     return;
   }
-  if (!isRecord14(value3))
+  if (!isRecord15(value3))
     return;
   for (const [key, item] of Object.entries(value3)) {
     if (["path", "filePath", "file_path", "directory", "cwd", "workdir", "uri"].includes(key) && typeof item === "string") {
@@ -56207,9 +56534,9 @@ function stringValue6(value3) {
   return typeof value3 === "string" && value3.trim() ? value3.trim() : undefined;
 }
 function isTextPart4(value3) {
-  return isRecord14(value3) && value3.type === "text" && typeof value3.text === "string";
+  return isRecord15(value3) && value3.type === "text" && typeof value3.text === "string";
 }
-function isRecord14(value3) {
+function isRecord15(value3) {
   return typeof value3 === "object" && value3 !== null && !Array.isArray(value3);
 }
 
@@ -56233,12 +56560,12 @@ var SESSION_HOOKS = [
   "session.http-response.after"
 ];
 function detectHost(value3) {
-  if (!isRecord15(value3))
+  if (!isRecord17(value3))
     return "unknown";
-  const isV2 = isRecord15(value3.session) && typeof value3.session.hook === "function" || isRecord15(value3.mcp) && typeof value3.mcp.transform === "function" || isRecord15(value3.agent) && typeof value3.agent.transform === "function";
+  const isV2 = isRecord17(value3.session) && typeof value3.session.hook === "function" || isRecord17(value3.mcp) && typeof value3.mcp.transform === "function" || isRecord17(value3.agent) && typeof value3.agent.transform === "function";
   if (isV2)
     return "v2";
-  const isV1 = isRecord15(value3.client) && isRecord15(value3.project) && typeof value3.directory === "string";
+  const isV1 = isRecord17(value3.client) && isRecord17(value3.project) && typeof value3.directory === "string";
   if (isV1)
     return "v1";
   return "unknown";
@@ -56284,7 +56611,7 @@ async function setupV2(context3) {
   };
   const domain = (name) => {
     const value3 = context3[name];
-    if (!isRecord15(value3) || typeof value3.hook !== "function")
+    if (!isRecord17(value3) || typeof value3.hook !== "function")
       return;
     return value3;
   };
@@ -56338,8 +56665,8 @@ async function setupV2(context3) {
     };
     options.resolveParentSession = async (sessionID) => {
       const raw = await session.get?.({ sessionID });
-      const value3 = isRecord15(raw) && isRecord15(raw.data) ? raw.data : raw;
-      return isRecord15(value3) && typeof value3.parentID === "string" && typeof value3.agent === "string" ? { parentID: value3.parentID, agent: value3.agent } : undefined;
+      const value3 = isRecord17(raw) && isRecord17(raw.data) ? raw.data : raw;
+      return isRecord17(value3) && typeof value3.parentID === "string" && typeof value3.agent === "string" ? { parentID: value3.parentID, agent: value3.agent } : undefined;
     };
   }
   const affinityStorage = storage && typeof storage.get === "function" ? storage : undefined;
@@ -56401,7 +56728,7 @@ async function setupV2(context3) {
   if (shell) {
     options.shellRegistered = await registerHook(shell, "create.before", async (input) => {
       const evaluated = await evaluateShellHook(input, options);
-      if (isRecord15(input.env)) {
+      if (isRecord17(input.env)) {
         replaceRecord(input.env, evaluated.env);
       }
       input.timeout = evaluated.timeout;
@@ -56416,7 +56743,7 @@ async function setupV2(context3) {
     criticalGaps.push("shell.create.before");
   capabilities.shell = Boolean(shell);
   capabilities["shell.create.before"] = options.shellRegistered === true;
-  const approvalPort = isRecord15(context3.permission) && typeof context3.permission.assert === "function" ? context3.permission : undefined;
+  const approvalPort = isRecord17(context3.permission) && typeof context3.permission.assert === "function" ? context3.permission : undefined;
   const tool = domain("tool");
   if (tool) {
     const registered = await registerHook(tool, "execute.before", async (input) => {
@@ -56458,6 +56785,10 @@ async function setupV2(context3) {
     const planningTools = typeof tool.transform === "function" ? tool : undefined;
     if (planningTools && approvalPort && planStorage && planningAuthority && (options.resolveSessionProject || options.resolveSessionDirectory) && options.permissionRegistered && registered) {
       try {
+        const { validatePlanningPreflight: validatePlanningPreflight2 } = await Promise.resolve().then(() => (init_planning_preflight(), exports_planning_preflight));
+        options.planningPreflight = {
+          validate: validatePlanningPreflight2
+        };
         const registration = await registerPlanningTools(planningTools, approvalPort, planStorage, options, planningAuthority);
         if (registration && typeof registration.dispose === "function")
           cleanups.push(() => registration.dispose?.());
@@ -56533,7 +56864,7 @@ async function setupV2(context3) {
     criticalGaps.push("tool.hook");
     criticalGaps.push("planning.v5");
   }
-  const modeHost = isRecord15(context3.command) && typeof context3.command.transform === "function" && isRecord15(context3.session) && typeof context3.session.synthetic === "function" && isRecord15(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
+  const modeHost = isRecord17(context3.command) && typeof context3.command.transform === "function" && isRecord17(context3.session) && typeof context3.session.synthetic === "function" && isRecord17(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
   if (modeHost) {
     try {
       const registration = await registerModeCommand(modeHost, options);
@@ -56546,7 +56877,7 @@ async function setupV2(context3) {
   }
   if (!capabilities["mode.command"])
     degraded.push("mode.command");
-  const planCommandHost = isRecord15(context3.command) && typeof context3.command.transform === "function" && isRecord15(context3.session) && typeof context3.session.synthetic === "function" && isRecord15(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
+  const planCommandHost = isRecord17(context3.command) && typeof context3.command.transform === "function" && isRecord17(context3.session) && typeof context3.session.synthetic === "function" && isRecord17(context3.permission) && typeof context3.permission.assert === "function" && (options.resolveSessionProject || options.resolveSessionDirectory) ? context3 : undefined;
   if (planCommandHost && planStorage && planningAuthority) {
     try {
       const registration = await registerPlanCommand(planCommandHost, planStorage, planningAuthority, options);
@@ -56681,7 +57012,7 @@ async function setupV2(context3) {
   }
   const auxiliary = ["mcp", "agent", "command", "skill", "storage"];
   for (const name of auxiliary) {
-    const available = name === "storage" ? context3.storage !== undefined && context3.storage !== null : isRecord15(context3[name]) && (typeof context3[name].transform === "function" || typeof context3[name].hook === "function" || typeof context3[name].subscribe === "function");
+    const available = name === "storage" ? context3.storage !== undefined && context3.storage !== null : isRecord17(context3[name]) && (typeof context3[name].transform === "function" || typeof context3[name].hook === "function" || typeof context3[name].subscribe === "function");
     capabilities[name] = available;
     if (!available)
       degraded.push(name);
@@ -56713,12 +57044,12 @@ async function setupV2(context3) {
 }
 async function setupV1(input) {
   const capabilities = {
-    client: isRecord15(input.client),
-    project: isRecord15(input.project),
+    client: isRecord17(input.client),
+    project: isRecord17(input.project),
     directory: typeof input.directory === "string",
     worktree: typeof input.worktree === "string",
     shell: typeof input.$ === "function",
-    workspace: isRecord15(input.experimental_workspace)
+    workspace: isRecord17(input.experimental_workspace)
   };
   const degraded = Object.entries(capabilities).filter(([, available]) => !available).map(([name]) => name);
   const criticalGaps = [
@@ -56767,7 +57098,7 @@ var plugin_default = plugin;
 async function registerHook(domain, name, callback3, cleanups) {
   try {
     const registration = await domain.hook(name, callback3);
-    if (isRecord15(registration) && typeof registration.dispose === "function") {
+    if (isRecord17(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return true;
@@ -56796,32 +57127,32 @@ function hookNameForEvent(event) {
   return event;
 }
 function locationDirectory(context3) {
-  const location = isRecord15(context3.location) ? context3.location : undefined;
+  const location = isRecord17(context3.location) ? context3.location : undefined;
   if (!location)
     return;
   return typeof location.directory === "string" ? location.directory : undefined;
 }
 function locationCanonical(context3) {
-  const location = isRecord15(context3.location) ? context3.location : undefined;
-  const project = location && isRecord15(location.project) ? location.project : undefined;
+  const location = isRecord17(context3.location) ? context3.location : undefined;
+  const project = location && isRecord17(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : undefined;
 }
 function isWithin5(value3, root) {
-  const relative = path28.relative(path28.resolve(root), path28.resolve(value3));
-  return relative === "" || !relative.startsWith("..") && !path28.isAbsolute(relative);
+  const relative = path29.relative(path29.resolve(root), path29.resolve(value3));
+  return relative === "" || !relative.startsWith("..") && !path29.isAbsolute(relative);
 }
 function transformDomain(value3) {
-  if (!isRecord15(value3) || typeof value3.transform !== "function")
+  if (!isRecord17(value3) || typeof value3.transform !== "function")
     return;
   return value3;
 }
 function storageDomain(value3) {
-  if (!isRecord15(value3) || typeof value3.set !== "function")
+  if (!isRecord17(value3) || typeof value3.set !== "function")
     return;
   return value3;
 }
 function eventDomain(value3) {
-  if (!isRecord15(value3) || typeof value3.subscribe !== "function")
+  if (!isRecord17(value3) || typeof value3.subscribe !== "function")
     return;
   return value3;
 }
@@ -56839,28 +57170,28 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
   const paths = resolvePaths({ ...env, MALAHOR_OPENCODE_DETECT: "0" }, cwd);
   const warnings = [];
   const memoryProject = memoryProjectForLocation(paths, cwd, canonical5);
-  const horielIndex = paths.horielIndex ?? path28.join(paths.malahorHome, "horiel", "index.js");
-  const horielDatabase = paths.horielDb ?? path28.join(paths.malahorHome, "horiel", "horiel.sqlite");
-  const horielSnapshots = paths.horielSnapshots ?? path28.join(paths.malahorHome, "horiel", "snapshots");
-  if (!fs22.existsSync(paths.mnemoIndex)) {
+  const horielIndex = paths.horielIndex ?? path29.join(paths.malahorHome, "horiel", "index.js");
+  const horielDatabase = paths.horielDb ?? path29.join(paths.malahorHome, "horiel", "horiel.sqlite");
+  const horielSnapshots = paths.horielSnapshots ?? path29.join(paths.malahorHome, "horiel", "snapshots");
+  if (!fs23.existsSync(paths.mnemoIndex)) {
     warnings.push("mcp.mnemo-index-missing");
   } else if (!memoryProject) {
     warnings.push("mcp.mnemo-project-unresolved");
   }
-  if (!fs22.existsSync(paths.docsIndex)) {
+  if (!fs23.existsSync(paths.docsIndex)) {
     warnings.push("mcp.docs-index-missing");
   }
   try {
     const registration = await domain.transform((editor) => {
       const existingMnemo = editor.get("mnemo");
-      if (fs22.existsSync(paths.mnemoIndex)) {
+      if (fs23.existsSync(paths.mnemoIndex)) {
         if (!existingMnemo || isMalahorMnemo(existingMnemo, paths)) {
           editor.set("mnemo", {
             ...existingMnemo ?? {},
             type: "local",
             command: ["node", paths.mnemoIndex],
             environment: memoryProject ? {
-              ...isRecord15(existingMnemo?.environment) ? existingMnemo.environment : {},
+              ...isRecord17(existingMnemo?.environment) ? existingMnemo.environment : {},
               MALAHOR_MEMORY_BOUND: "1",
               MALAHOR_MEMORY_PROJECT: memoryProject
             } : {
@@ -56874,7 +57205,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         }
       }
       const existingDocs = editor.get("docs");
-      if (fs22.existsSync(paths.docsIndex)) {
+      if (fs23.existsSync(paths.docsIndex)) {
         if (!existingDocs || isMalahorDocs(existingDocs, paths)) {
           editor.set("docs", {
             ...existingDocs ?? {},
@@ -56888,7 +57219,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         }
       }
       const existingHoriel = editor.get("horiel");
-      if (fs22.existsSync(horielIndex)) {
+      if (fs23.existsSync(horielIndex)) {
         if (!memoryProject) {
           warnings.push("mcp.horiel-project-unresolved");
         } else if (!existingHoriel || isMalahorHoriel(existingHoriel, paths)) {
@@ -56912,7 +57243,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
       }
       let target;
       try {
-        const registered = canonical5 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs22.realpathSync(entry.root) === fs22.realpathSync(canonical5)) : undefined;
+        const registered = canonical5 ? registeredProjectRoots(paths.projectsFile).find((entry) => fs23.realpathSync(entry.root) === fs23.realpathSync(canonical5)) : undefined;
         if (!canonical5 || registered)
           target = codegraphRoot(paths, registered?.canonicalKey);
       } catch {}
@@ -56944,7 +57275,7 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
         });
       }
     });
-    if (isRecord15(registration) && typeof registration.dispose === "function") {
+    if (isRecord17(registration) && typeof registration.dispose === "function") {
       cleanups.push(() => registration.dispose());
     }
     return { ok: true, warnings: unique2(warnings) };
@@ -56954,14 +57285,14 @@ async function registerMcpTransform(domain, cwd, env, cleanups, canonical5) {
   }
 }
 function isManagedCodegraph(config, paths) {
-  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path28.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
+  return config.type === "local" && Array.isArray(config.command) && config.command[0] === "node" && config.command[1] === path29.join(paths.malahorHome, "codegraph", "bin", "mcp-proxy.mjs");
 }
 function memoryProjectForLocation(paths, cwd, canonical5) {
   const roots = registeredProjectRoots(paths.projectsFile).sort((left2, right) => right.root.length - left2.root.length);
   const canonicalValue = canonical5?.trim();
   const byKey = canonicalValue ? roots.find((entry) => entry.canonicalKey === canonicalValue) : undefined;
   const byDirectory = roots.find((entry) => pathInside(cwd, entry.root));
-  const byCanonicalPath = canonicalValue && path28.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
+  const byCanonicalPath = canonicalValue && path29.isAbsolute(canonicalValue) ? roots.find((entry) => pathInside(canonicalValue, entry.root)) : undefined;
   const candidates = new Set([byKey?.canonicalKey, byDirectory?.canonicalKey, byCanonicalPath?.canonicalKey].filter((value3) => Boolean(value3)));
   if (candidates.size > 1)
     return;
@@ -56981,57 +57312,57 @@ function validMemoryProject(value3) {
 }
 function canonicalLocation(value3) {
   try {
-    return fs22.realpathSync(value3);
+    return fs23.realpathSync(value3);
   } catch {
-    return path28.resolve(value3);
+    return path29.resolve(value3);
   }
 }
 function pathInside(value3, root) {
-  const relative = path28.relative(canonicalLocation(root), canonicalLocation(value3));
-  return relative === "" || !relative.startsWith("..") && !path28.isAbsolute(relative);
+  const relative = path29.relative(canonicalLocation(root), canonicalLocation(value3));
+  return relative === "" || !relative.startsWith("..") && !path29.isAbsolute(relative);
 }
 function isMalahorMnemo(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path28.resolve(paths.opencodeDir, item) === path28.resolve(paths.mnemoIndex));
+  return command.some((item) => path29.resolve(paths.opencodeDir, item) === path29.resolve(paths.mnemoIndex));
 }
 function isMalahorDocs(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path28.resolve(paths.opencodeDir, item) === path28.resolve(paths.docsIndex));
+  return command.some((item) => path29.resolve(paths.opencodeDir, item) === path29.resolve(paths.docsIndex));
 }
 function isMalahorHoriel(config, paths) {
   if (config.type !== "local" || !Array.isArray(config.command))
     return false;
-  const index3 = paths.horielIndex ?? path28.join(paths.malahorHome, "horiel", "index.js");
+  const index3 = paths.horielIndex ?? path29.join(paths.malahorHome, "horiel", "index.js");
   const command = config.command.filter((item) => typeof item === "string");
-  return command.some((item) => path28.resolve(paths.opencodeDir, item) === path28.resolve(index3));
+  return command.some((item) => path29.resolve(paths.opencodeDir, item) === path29.resolve(index3));
 }
 function withoutHorielEnablement(value3) {
-  if (!isRecord15(value3))
+  if (!isRecord17(value3))
     return {};
   return Object.fromEntries(Object.entries(value3).filter(([key]) => !/HORIEL.*ENABLED/i.test(key)));
 }
 function sessionLocationDirectory(value3) {
-  const response = isRecord15(value3) && isRecord15(value3.data) ? value3.data : value3;
-  if (!isRecord15(response))
+  const response = isRecord17(value3) && isRecord17(value3.data) ? value3.data : value3;
+  if (!isRecord17(response))
     return;
-  const location = isRecord15(response.location) ? response.location : undefined;
+  const location = isRecord17(response.location) ? response.location : undefined;
   return location && typeof location.directory === "string" ? location.directory : undefined;
 }
 function sessionLocationProject(value3) {
-  const response = isRecord15(value3) && isRecord15(value3.data) ? value3.data : value3;
-  if (!isRecord15(response))
+  const response = isRecord17(value3) && isRecord17(value3.data) ? value3.data : value3;
+  if (!isRecord17(response))
     return;
-  const location = isRecord15(response.location) ? response.location : undefined;
-  const project = location && isRecord15(location.project) ? location.project : undefined;
+  const location = isRecord17(response.location) ? response.location : undefined;
+  const project = location && isRecord17(location.project) ? location.project : undefined;
   return typeof project?.canonical === "string" ? project.canonical : typeof project?.name === "string" ? project.name : typeof project?.id === "string" ? project.id : undefined;
 }
 function recordState(inspection) {
   const directory = resolveMalahorHome();
-  const file = path28.join(directory, "plugin-state.json");
+  const file = path29.join(directory, "plugin-state.json");
   const state = {
     schema: STATE_SCHEMA,
     plugin: PLUGIN_ID,
@@ -57043,15 +57374,15 @@ function recordState(inspection) {
     updatedAt: new Date().toISOString()
   };
   try {
-    fs22.mkdirSync(directory, { recursive: true, mode: 448 });
-    const temporary = path28.join(directory, `.plugin-state.${process.pid}.tmp`);
-    fs22.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
+    fs23.mkdirSync(directory, { recursive: true, mode: 448 });
+    const temporary = path29.join(directory, `.plugin-state.${process.pid}.tmp`);
+    fs23.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
-    fs22.chmodSync(temporary, 384);
-    fs22.renameSync(temporary, file);
+    fs23.chmodSync(temporary, 384);
+    fs23.renameSync(temporary, file);
     return true;
   } catch (error) {
     warn(`no se pudo escribir ${file}: ${error.message}`);
@@ -57061,8 +57392,8 @@ function recordState(inspection) {
 function resolveMalahorHome() {
   const override = process.env.MALAHOR_HOME?.trim();
   if (override)
-    return path28.resolve(override);
-  return path28.join(os2.homedir(), ".malahor");
+    return path29.resolve(override);
+  return path29.join(os2.homedir(), ".malahor");
 }
 function replaceRecord(target, source) {
   for (const key of Object.keys(target))
@@ -57078,7 +57409,7 @@ function warn(message) {
 function unique2(values2) {
   return [...new Set(values2)];
 }
-function isRecord15(value3) {
+function isRecord17(value3) {
   return typeof value3 === "object" && value3 !== null && !Array.isArray(value3);
 }
 export {

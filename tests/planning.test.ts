@@ -2010,6 +2010,58 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     }
   });
 
+  type PreflightFixture = PlanInput & {
+    verification: {
+      cwd: string;
+      tests: Array<{ command: string; targets: string[]; rationale: string }>;
+      build: string;
+    };
+    preflight: {
+      edits: Array<{
+        key: string;
+        path: string;
+        existence: "must-exist" | "may-create";
+        block?: string;
+        consumers: string[];
+        tests: string[];
+      }>;
+    };
+  };
+
+  function preflightFixture(): PreflightFixture {
+    fs.writeFileSync(path.join(repo, "file.ts"), "export const fixture = \"original\";\n", "utf8");
+    fs.mkdirSync(path.join(repo, "tests"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "tests", "planning.test.ts"), "// fixture\n", "utf8");
+    return {
+      ...input(),
+      actions: [{ action: "edit", resource: path.join(repo, "file.ts"), key: "edit-file" }],
+      verification: {
+        cwd: repo,
+        tests: [{
+          command: "bun test tests/planning.test.ts",
+          targets: ["tests/planning.test.ts"],
+          rationale: "Regresión del gate de preflight.",
+        }],
+        build: "bun run build",
+      },
+      preflight: {
+        edits: [{
+          key: "edit-file",
+          path: "file.ts",
+          existence: "must-exist",
+          block: "export const fixture = \"original\";\n",
+          consumers: ["file.ts"],
+          tests: ["tests/planning.test.ts"],
+        }],
+      },
+    };
+  }
+
+  async function enablePreflightGate(): Promise<void> {
+    const { validatePlanningPreflight } = await import("../src/plugin/planning-preflight");
+    options = { ...options, planningPreflight: { validate: validatePlanningPreflight } } as unknown as PluginAdapterOptions;
+  }
+
   test("los schemas de planning mantienen la presentación estricta y hacen opcional el digest de run", async () => {
     const harness = await registeredTools();
     type Schema = {
@@ -2029,6 +2081,7 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     ]));
     expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted([
       "level", "specRef", "specHash", "taskDecisionRef", "summary", "steps", "presentation", "actions", "dependencies",
+      "verification", "preflight",
     ]));
     expect(schema.additionalProperties).toBe(false);
     expect(schema.properties?.level?.enum).toEqual([1, 2]);
@@ -2061,6 +2114,19 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     ]));
     expect(risk.properties?.categories?.uniqueItems).toBe(true);
 
+    const verificationSchema = schema.properties?.verification!;
+    expect(sorted(verificationSchema.required)).toEqual(sorted(["cwd", "tests", "build"]));
+    expect(verificationSchema.additionalProperties).toBe(false);
+    const preflightSchema = schema.properties?.preflight!;
+    expect(preflightSchema.required).toEqual(["edits"]);
+    expect(preflightSchema.additionalProperties).toBe(false);
+    const preflightEdit = preflightSchema.properties?.edits?.items!;
+    expect(sorted(preflightEdit.required)).toEqual(sorted(["key", "path", "existence", "consumers", "tests"]));
+    expect(sorted(Object.keys(preflightEdit.properties ?? {}))).toEqual(sorted([
+      "key", "path", "existence", "block", "consumers", "tests", "assertions",
+    ]));
+    expect(preflightEdit.additionalProperties).toBe(false);
+
     const runSchema = harness.definitions.get("run")?.input as Schema;
     expect(runSchema.type).toBe("object");
     expect(runSchema.required ?? []).toEqual([]);
@@ -2075,6 +2141,116 @@ describe("tools registradas y flujo sin APIs host reales", () => {
       .rejects.toThrow(/SHA-256|versión/i);
     await expect(harness.execute("plan", { ...input(), specRef: "Product/not-sdd.md" }))
       .rejects.toThrow(/SDD|documentación canónica/i);
+  });
+
+  test("el preflight rechaza un plan con ediciones sin bloque verificado", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    const harness = await registeredTools();
+    const valid = preflightFixture();
+    const { preflight: _preflight, ...withoutPreflight } = valid;
+    await expect(harness.execute("plan", withoutPreflight, call(SESSION, "malahor", "msg_preflight_missing")))
+      .rejects.toThrow(/preflight/i);
+    const { verification: _verification, ...withoutVerification } = valid;
+    await expect(harness.execute("plan", withoutVerification, call(SESSION, "malahor", "msg_verification_missing")))
+      .rejects.toThrow(/verification|pruebas/i);
+  });
+
+  test("el preflight exige bloque único, rutas existentes y tests para código", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    const harness = await registeredTools();
+    const valid = preflightFixture();
+    const execute = (value: unknown, id: string) =>
+      harness.execute("plan", value, call(SESSION, "malahor", id));
+
+    fs.writeFileSync(path.join(repo, "file.ts"),
+      "export const fixture = \"original\";\nexport const fixture = \"original\";\n", "utf8");
+    await expect(execute(valid, "msg_preflight_duplicate")).rejects.toThrow(/exactamente una vez|aparece/i);
+
+    fs.writeFileSync(path.join(repo, "file.ts"), "export const fixture = \"original\";\n", "utf8");
+    const absent = structuredClone(valid);
+    absent.preflight.edits[0]!.block = "export const missing = true;\n";
+    await expect(execute(absent, "msg_preflight_absent")).rejects.toThrow(/bloque|aparece/i);
+
+    const consumer = structuredClone(valid);
+    consumer.preflight.edits[0]!.consumers = ["missing.ts"];
+    await expect(execute(consumer, "msg_preflight_consumer")).rejects.toThrow(/consumers|no existe/i);
+
+    const withoutTests = structuredClone(valid);
+    withoutTests.preflight.edits[0]!.tests = [];
+    await expect(execute(withoutTests, "msg_preflight_tests")).rejects.toThrow(/test/i);
+
+    const traversal = structuredClone(valid);
+    traversal.preflight.edits[0]!.path = "../outside.ts";
+    await expect(execute(traversal, "msg_preflight_traversal")).rejects.toThrow(/traversal|ruta/i);
+  });
+
+  test("el preflight acepta may-create y se firma en el plan", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    const harness = await registeredTools();
+    const valid = preflightFixture();
+    const newFile = path.join(repo, "nuevo.ts");
+    fs.rmSync(newFile, { force: true });
+    const create: PreflightFixture = {
+      ...valid,
+      actions: [
+        { action: "edit", resource: newFile, key: "create-file" },
+        { action: "edit", resource: path.join(repo, "file.ts"), key: "edit-file", dependsOn: ["create-file"] },
+      ],
+      preflight: {
+        edits: [
+          {
+            key: "create-file",
+            path: "nuevo.ts",
+            existence: "may-create",
+            consumers: ["file.ts"],
+            tests: ["tests/planning.test.ts"],
+          },
+          {
+            key: "edit-file",
+            path: "file.ts",
+            existence: "must-exist",
+            block: "export const fixture = \"original\";\n",
+            consumers: ["file.ts"],
+            tests: ["tests/planning.test.ts"],
+          },
+        ],
+      },
+    };
+    await harness.execute("plan", create, call(SESSION, "malahor", "msg_preflight_create"));
+    const state = records.get(planKey(SESSION)) as PlanStateV5;
+    expect(validState(state)).toBe(true);
+    expect((state.plan as unknown as { preflight?: { edits: unknown[] } }).preflight?.edits).toHaveLength(2);
+  });
+
+  test("el preflight rechaza may-create existente y consumidores symlink", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    const harness = await registeredTools();
+    const valid = preflightFixture();
+    const existing = structuredClone(valid);
+    existing.preflight.edits[0]!.existence = "may-create";
+    delete existing.preflight.edits[0]!.block;
+    await expect(harness.execute("plan", existing, call(SESSION, "malahor", "msg_preflight_existing")))
+      .rejects.toThrow(/may-create|no exista/i);
+
+    const link = path.join(repo, "link.ts");
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(path.join(repo, "file.ts"), link);
+    const symlink = structuredClone(valid);
+    symlink.preflight.edits[0]!.consumers = ["link.ts"];
+    await expect(harness.execute("plan", symlink, call(SESSION, "malahor", "msg_preflight_symlink")))
+      .rejects.toThrow(/symlink|enlace/i);
+  });
+
+  test("un plan sin ediciones no exige preflight", async () => {
+    configure("ejecutar");
+    await enablePreflightGate();
+    const harness = await registeredTools();
+    await harness.execute("plan", input("shell"), call(SESSION, "malahor", "msg_preflight_shell"));
+    expect(records.has(planKey(SESSION))).toBe(true);
   });
 
   test("malahor_plan guarda estado v5 ligado al turno y rechaza estados v3", async () => {
