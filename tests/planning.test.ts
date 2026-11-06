@@ -3625,6 +3625,42 @@ describe("PLANNING-RECOVERY-01: candidato y transición incremental", () => {
     expect(presented.proof).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  test("el error de escritura durable expone causa y huellas sin volcar contenido", async () => {
+    const fixture = await revisionFixture();
+    const records = new Map<string, unknown>();
+    const candidateKey = `planning/v5/plans/${fixture.parent.planID}/candidate`;
+    const corruptStorage: RevisionStorage = {
+      get: async (key) => {
+        const value = records.get(key);
+        if (key !== candidateKey || !value || typeof value !== "object") return value;
+        return { ...(value as Record<string, unknown>), proof: "f".repeat(64) };
+      },
+      set: async (key, value) => { records.set(key, structuredClone(value)); },
+      remove: async (key) => { records.delete(key); },
+    };
+    records.set(planKey(fixture.parent.sessionID), structuredClone(fixture.parent));
+    records.set(planRecordKey(fixture.parent.planID), structuredClone(fixture.parent));
+    records.set(planRevisionKey(fixture.parent.planID, fixture.parent.revision), structuredClone(fixture.parent));
+    records.set(planExecutionKey(fixture.parent.planID, fixture.parent.revision), structuredClone(fixture.parentCheckpoint));
+    const manager = await fixture.api.createPlanRevisionRecovery({
+      parent: fixture.parent,
+      checkpoint: fixture.parentCheckpoint,
+      storage: corruptStorage,
+      authority: fixture.authority,
+    });
+
+    const failure = await manager.presentCandidate(fixture.candidate)
+      .then(() => undefined)
+      .catch((error: unknown) => error as Error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure?.message).toMatch(/no quedó verificable/i);
+    expect(failure?.message).toMatch(/huella escrita sha256:[a-f0-9]{64}/i);
+    expect(failure?.message).toMatch(/huella leída sha256:[a-f0-9]{64}/i);
+    expect(failure?.message).toMatch(/\(object\)/i);
+    expect(failure?.message).not.toContain(fixture.candidate.plan.summary);
+  });
+
   test("el delta y carry-forward conservan solo actionID/dependencias exactos y nunca ASK o reservas", async () => {
     const fixture = await revisionFixture();
 

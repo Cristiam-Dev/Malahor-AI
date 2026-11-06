@@ -13395,8 +13395,18 @@ async function readExactState(storage, key, authority) {
 async function writeAndVerify(storage, key, value, valid) {
   await storage.set(key, structuredClone(value));
   const persisted = await storage.get(key);
-  if (!valid(persisted))
-    throw new Error(`La escritura durable no quedó verificable: ${key}. Completa, pausa o revoca el plan antes de reintentar.`);
+  if (valid(persisted))
+    return;
+  const fingerprint = (input) => {
+    try {
+      return `sha256:${hashCanonical(input)}`;
+    } catch {
+      return "sha256:no-disponible";
+    }
+  };
+  const shape = persisted === undefined ? "undefined" : Array.isArray(persisted) ? "array" : typeof persisted;
+  const readFingerprint = persisted === undefined ? "sin valor" : fingerprint(persisted);
+  throw new Error(`La escritura durable no quedó verificable: ${key}; la validación de estructura o prueba no coincide; huella escrita ${fingerprint(value)}, huella leída ${readFingerprint} (${shape}). Completa, pausa o revoca el plan antes de reintentar.`);
 }
 function samePlanRevision(value, expected, authority) {
   return (!authority || validState(value, authority)) && isRecord8(value) && value.version === 5 && value.planID === expected.planID && value.revision === expected.revision && value.digest === expected.digest && value.proof === expected.proof && value.phase === expected.phase;
