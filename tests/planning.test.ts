@@ -2187,11 +2187,9 @@ describe("tools registradas y flujo sin APIs host reales", () => {
     };
     const schema = harness.definitions.get("plan")?.input as Schema;
     const sorted = (items: string[] | undefined) => [...(items ?? [])].sort();
-    expect(sorted(schema.required)).toEqual(sorted([
-      "level", "specRef", "specHash", "summary", "steps", "presentation", "actions",
-    ]));
+    expect(sorted(schema.required)).toEqual(["plan"]);
     expect(sorted(Object.keys(schema.properties ?? {}))).toEqual(sorted([
-      "level", "specRef", "specHash", "taskDecisionRef", "summary", "steps", "presentation", "actions", "dependencies",
+      "plan", "level", "specRef", "specHash", "taskDecisionRef", "summary", "steps", "presentation", "actions", "dependencies",
       "verification", "preflight", "architecture",
     ]));
     expect(schema.additionalProperties).toBe(false);
@@ -4230,4 +4228,75 @@ describe("PLANNING-RECOVERY-01: cierre consulta el checkpoint", () => {
       phase: "running",
     });
   });
+});
+
+test("un plan sin ediciones acepta verification y preflight nulos", () => {
+  const planInput = {
+    ...input(),
+    actions: [{ action: "shell", resource: "echo ok", key: "ok" }],
+    verification: null,
+    preflight: null,
+  } as unknown as PlanInput;
+  const presented = proposePlan(
+    scope("executor"),
+    planInput,
+    NOW,
+    "msg_null_fields",
+    "b".repeat(32),
+    DEFAULT_PLANNING_AUTHORITY,
+  );
+  expect(presented.plan.actions).toHaveLength(1);
+});
+
+test("un plan con ediciones sin verification sigue rechazándose", () => {
+  const planInput = {
+    ...input(),
+    actions: [{ action: "edit", resource: path.join(repo, "root.ts"), key: "root" }],
+    verification: null,
+    preflight: {
+      edits: [{
+        key: "root",
+        path: "root.ts",
+        existence: "must-exist",
+        block: "export const root = 1;",
+        consumers: [],
+        tests: [],
+      }],
+    },
+  } as unknown as PlanInput;
+  expect(() => proposePlan(
+    scope("executor"),
+    planInput,
+    NOW,
+    "msg_edit_without_verification",
+    "c".repeat(32),
+    DEFAULT_PLANNING_AUTHORITY,
+  )).toThrow(/verification/i);
+});
+
+test("malahor_plan acepta el payload serializado", async () => {
+  const harness = await registeredTools();
+  const planPayload = {
+    ...input(),
+    actions: [{ action: "shell", resource: "echo ok", key: "ok" }],
+    verification: null,
+    preflight: null,
+    architecture: null,
+  };
+  await harness.execute(
+    "plan",
+    { plan: JSON.stringify(planPayload) },
+    call(SESSION, "malahor", "msg_opaque_payload"),
+  );
+  const presented = records.get(planKey(SESSION)) as PlanStateV5;
+  expect(presented.plan.summary).toBe(planPayload.summary);
+});
+
+test("malahor_plan rechaza un payload que no es JSON", async () => {
+  const harness = await registeredTools();
+  await expect(harness.execute(
+    "plan",
+    { plan: "{" },
+    call(SESSION, "malahor", "msg_opaque_invalid"),
+  )).rejects.toThrow(/JSON/i);
 });

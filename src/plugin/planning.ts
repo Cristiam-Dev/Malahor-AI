@@ -590,6 +590,7 @@ export async function registerPlanningTools(
       description: "Registra un plan de alcance considerable derivado de una especificacion SDD (nivel 1 o 2) y devuelve su Markdown para presentarlo en foreground exactamente una vez. Las acciones puntuales no usan esta tool.",
       input: {
         type: "object", properties: {
+          plan: { type: "string", description: "Plan completo serializado en JSON." },
           level: { type: "integer", enum: [1, 2] },
           specRef: { type: "string", pattern: "^SDD/.+\\.md$" },
           specHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
@@ -638,7 +639,7 @@ export async function registerPlanningTools(
             required: ["action", "resource"], additionalProperties: false,
           } },
           verification: {
-            type: "object", properties: {
+            type: ["object", "null"], properties: {
               cwd: { type: "string" },
               tests: { type: "array", items: {
                 type: "object", properties: {
@@ -653,7 +654,7 @@ export async function registerPlanningTools(
             required: ["cwd", "tests", "build"], additionalProperties: false,
           },
           preflight: {
-            type: "object", properties: {
+            type: ["object", "null"], properties: {
               edits: { type: "array", items: {
                 type: "object", properties: {
                   key: { type: "string" },
@@ -685,7 +686,7 @@ export async function registerPlanningTools(
             required: ["edits"], additionalProperties: false,
           },
           architecture: {
-            type: "object", properties: {
+            type: ["object", "null"], properties: {
               mode: { type: "string", enum: ["respect", "change"] },
               contractRef: { type: "string" },
               contractHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
@@ -722,13 +723,26 @@ export async function registerPlanningTools(
             type: "object", properties: { planID: { type: "string" }, revision: { type: "string" } },
             required: ["planID", "revision"], additionalProperties: false,
           } },
-        }, required: ["level", "specRef", "specHash", "summary", "steps", "presentation", "actions"], additionalProperties: false,
+        }, required: ["plan"], additionalProperties: false,
       },
       options: { namespace: "malahor", codemode: false },
       execute: async (value: unknown, call: ToolCall) => {
         const resolved = await requireScope(call, options);
         if (call.agent !== "malahor") throw new Error("Solo el primario puede presentar el plan.");
-        const raw = value as PlanInput;
+        const record = value as Record<string, unknown>;
+        const payload = typeof record?.plan === "string" ? record.plan : undefined;
+        let parsed: unknown = value;
+        if (payload !== undefined) {
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            throw new Error("El payload del plan no es JSON válido.");
+          }
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("El payload del plan debe ser un objeto.");
+        }
+        const raw = parsed as PlanInput;
         if (raw.level !== 1 && raw.level !== 2) {
           throw new Error("malahor_plan requiere level 1 o 2 y una especificacion SDD versionada.");
         }

@@ -138,3 +138,8 @@ limitación, no como verificación.
 
 La skill no sustituye esos campos: el dossier demuestra que están completos y
 el runtime los valida al presentar el plan.
+
+El plan se envía como payload `plan` (JSON serializado) en un único campo
+requerido. El handler lo deserializa y valida la verificación, el preflight y
+la arquitectura; el esquema del host solo ve un texto y no puede filtrar su
+contenido.

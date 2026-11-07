@@ -4385,8 +4385,8 @@ function normalizePlan(mode, input) {
 }
 function normalizePlanPreflight(value, actions, verification) {
   const editActions = actions.filter((action) => action.action === "edit");
-  if (value === undefined) {
-    return verification === undefined ? {} : { verification: normalizePlanVerification(verification) };
+  if (value === undefined || value === null) {
+    return verification === undefined || verification === null ? {} : { verification: normalizePlanVerification(verification) };
   }
   if (editActions.length === 0)
     throw new Error("El preflight no aplica a un plan sin ediciones.");
@@ -4455,7 +4455,7 @@ function normalizePlanPreflight(value, actions, verification) {
   };
   if (JSON.stringify(preflight).length > 32000)
     throw new Error("El preflight es demasiado grande para una revisión firmada.");
-  if (verification === undefined)
+  if (verification === undefined || verification === null)
     throw new Error("El preflight con ediciones requiere verification con pruebas pertinentes y build.");
   return { preflight, verification: normalizePlanVerification(verification) };
 }
@@ -11044,6 +11044,7 @@ Intervención y reparación
 - Antes de malahor_plan, aplica planificacion-verificada: preflight read-only de archivos, call sites, tests y fixtures, mapa de impacto y slice de hasta 12 acciones. Un plan sin evidencia no se presenta.
 - El plan con ediciones declara architecture con el contrato canónico (contractRef y contractHash), el modo respect o change y los módulos afectados. El runtime rechaza rutas fuera del contrato y dependencias prohibidas; un cambio estructural exige la aprobación específica malahor_plan_architecture.
 - El plan con ediciones declara verification con cwd, pruebas pertinentes y build. El preflight exige bloques únicos, rutas existentes, consumidores y tests. Los gates shell usan el código de salida del host: distinto de cero es fallo.
+- El plan se envía como payload \`plan\` (JSON serializado) en un único campo requerido; el handler lo deserializa y valida verification, preflight y architecture.
 - Ninguna acción edit se planifica sin leer el bloque exacto que se reemplazará, confirmar que es único y copiar el oldString literal del archivo. Si el bloque no coincide o no es único, no presentes el plan.
 - Una acción edit cubre un archivo y se ejecuta una sola vez: agrupa los cambios de ese archivo en una sola edición y no ejecutes ediciones paralelas sobre el mismo recurso. Para otro cambio, presenta una revisión del plan.
 - Antes de una mutación, clasifica la tarea por cierre y consecuencias. El modelo aporta señales; el runtime deriva la ruta. Toda mutación directa exige aprobación nativa exacta y ninguna salida del modelo se convierte en grant.
@@ -16084,6 +16085,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
       input: {
         type: "object",
         properties: {
+          plan: { type: "string", description: "Plan completo serializado en JSON." },
           level: { type: "integer", enum: [1, 2] },
           specRef: { type: "string", pattern: "^SDD/.+\\.md$" },
           specHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
@@ -16145,7 +16147,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             additionalProperties: false
           } },
           verification: {
-            type: "object",
+            type: ["object", "null"],
             properties: {
               cwd: { type: "string" },
               tests: { type: "array", items: {
@@ -16164,7 +16166,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             additionalProperties: false
           },
           preflight: {
-            type: "object",
+            type: ["object", "null"],
             properties: {
               edits: { type: "array", items: {
                 type: "object",
@@ -16204,7 +16206,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             additionalProperties: false
           },
           architecture: {
-            type: "object",
+            type: ["object", "null"],
             properties: {
               mode: { type: "string", enum: ["respect", "change"] },
               contractRef: { type: "string" },
@@ -16252,7 +16254,7 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
             additionalProperties: false
           } }
         },
-        required: ["level", "specRef", "specHash", "summary", "steps", "presentation", "actions"],
+        required: ["plan"],
         additionalProperties: false
       },
       options: { namespace: "malahor", codemode: false },
@@ -16260,7 +16262,20 @@ async function registerPlanningTools(tools, approvals, storage, options, authori
         const resolved = await requireScope(call, options);
         if (call.agent !== "malahor")
           throw new Error("Solo el primario puede presentar el plan.");
-        const raw = value;
+        const record3 = value;
+        const payload = typeof record3?.plan === "string" ? record3.plan : undefined;
+        let parsed = value;
+        if (payload !== undefined) {
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            throw new Error("El payload del plan no es JSON válido.");
+          }
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("El payload del plan debe ser un objeto.");
+        }
+        const raw = parsed;
         if (raw.level !== 1 && raw.level !== 2) {
           throw new Error("malahor_plan requiere level 1 o 2 y una especificacion SDD versionada.");
         }

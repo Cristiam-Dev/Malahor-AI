@@ -532,11 +532,13 @@ function normalizePlan(mode: MalahorMode, input: PlanInput): NormalizedPlanInput
 export function normalizePlanPreflight(
   value: unknown,
   actions: PlannedAction[],
-  verification: PlanVerificationV1 | undefined,
+  verification: PlanVerificationV1 | null | undefined,
 ): { preflight?: PlanPreflightV1; verification?: PlanVerificationV1 } {
   const editActions = actions.filter((action) => action.action === "edit");
-  if (value === undefined) {
-    return verification === undefined ? {} : { verification: normalizePlanVerification(verification) };
+  if (value === undefined || value === null) {
+    return verification === undefined || verification === null
+      ? {}
+      : { verification: normalizePlanVerification(verification) };
   }
   if (editActions.length === 0) throw new Error("El preflight no aplica a un plan sin ediciones.");
   if (editActions.some((action) => action.key === undefined)) {
@@ -594,7 +596,7 @@ export function normalizePlanPreflight(
     ...(evidence.length > 0 ? { evidence } : {}),
   };
   if (JSON.stringify(preflight).length > 32_000) throw new Error("El preflight es demasiado grande para una revisión firmada.");
-  if (verification === undefined) throw new Error("El preflight con ediciones requiere verification con pruebas pertinentes y build.");
+  if (verification === undefined || verification === null) throw new Error("El preflight con ediciones requiere verification con pruebas pertinentes y build.");
   return { preflight, verification: normalizePlanVerification(verification) };
 }
 
