@@ -247,7 +247,12 @@ export function setProjectDocsPath(
   writeProjectsFile(projectsFile, { ...current, [canonicalKey]: nextEntry }, dryRun);
 }
 
-function writeProjectsFile(projectsFile: string, next: ProjectsFile, dryRun: boolean): void {
+export function writeProjectsFile(
+  projectsFile: string,
+  next: ProjectsFile,
+  dryRun: boolean,
+  expectedCurrent?: string | null,
+): void {
   if (dryRun) return;
 
   const dir = path.dirname(projectsFile);
@@ -255,9 +260,28 @@ function writeProjectsFile(projectsFile: string, next: ProjectsFile, dryRun: boo
 
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   secureChmod(dir, 0o700);
-  fs.writeFileSync(tempPath, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  fs.renameSync(tempPath, projectsFile);
-  secureChmod(projectsFile, 0o600);
+  const current = fs.existsSync(projectsFile) ? fs.readFileSync(projectsFile, "utf8") : null;
+  if (expectedCurrent !== undefined && current !== expectedCurrent) {
+    throw new Error("projects.json cambio desde el preview; solicita uno nuevo.");
+  }
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify(next, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    loadProjectsFile(tempPath);
+    const revalidated = fs.existsSync(projectsFile) ? fs.readFileSync(projectsFile, "utf8") : null;
+    if (revalidated !== current) throw new Error("projects.json cambio durante la actualizacion.");
+    fs.renameSync(tempPath, projectsFile);
+    secureChmod(projectsFile, 0o600);
+  } finally {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
 }
 
 function normalizeRoot(root: string): string {

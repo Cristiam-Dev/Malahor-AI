@@ -9,6 +9,7 @@ import { sanitizeMemoryContent } from "../../mnemo/sanitizer";
 import { memoryLocation } from "../../mnemo/storage";
 import { memoryTree } from "../../mnemo/v2-tools";
 import type { HorielMemoryCli, HorielMemoryCliResult } from "../../horiel/cli/memory";
+import { runPortableMemory, type PortableCommandDependencies } from "./portable";
 
 export interface MemoryOptions {
   action: string;
@@ -27,12 +28,19 @@ export interface MemoryOptions {
 
 export interface MemoryCommandDependencies {
   horiel?: HorielMemoryCli;
+  portable?: PortableCommandDependencies;
 }
 
 export function runMemory(
   options: MemoryOptions,
   dependencies: MemoryCommandDependencies = {},
 ): void | Promise<void> {
+  if ((options.action || "help") === "portable") {
+    return runPortableMemory(options, {
+      ...dependencies.portable,
+      horielSelected: Boolean(dependencies.horiel),
+    });
+  }
   if (dependencies.horiel) return printInjectedHoriel(options, dependencies.horiel);
   const config = loadConfig();
   const paths = config.paths;

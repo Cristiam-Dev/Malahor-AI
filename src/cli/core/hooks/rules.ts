@@ -441,6 +441,66 @@ function isExactGitRemoval(context: HookContext, targetPath: string, cached: boo
 }
 
 function destructiveMemoryGuard(context: HookContext): HookViolation[] {
+  if (context.event === "memory.portable.export.apply") {
+    const sourceFingerprint = context.metadata?.sourceFingerprint;
+    const destination = context.metadata?.destination;
+    if (typeof sourceFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(sourceFingerprint)
+      || typeof destination !== "string" || !destination.trim()) {
+      return [{
+        id: "MAL-HOOK-PORTABLE-EXPORT-EVIDENCE",
+        decision: "deny",
+        message: "Export portable sin huella de origen o destino verificables.",
+        fix: "Genera un preview nuevo y vincula la operacion al fingerprint y destino exactos.",
+      }];
+    }
+    return [{
+      id: "MAL-HOOK-PORTABLE-EXPORT-APPROVAL",
+      decision: "ask",
+      blockClass: "approval-required",
+      message: "Exportar toda la memoria requiere aprobacion humana de un solo uso.",
+      fix: "Aprueba solamente el paquete, origen y destino mostrados por el preview.",
+    }];
+  }
+
+  if (context.event === "memory.portable.import.preview") return [];
+  if (context.event === "memory.portable.import.apply") {
+    const previewToken = context.metadata?.previewToken;
+    const packageHash = context.metadata?.packageHash;
+    const destinationFingerprint = context.metadata?.destinationFingerprint;
+    const mappingsFingerprint = context.metadata?.mappingsFingerprint;
+    const expectedConfirmation = context.metadata?.requiresConfirmation;
+    const evidenceValid = typeof previewToken === "string" && /^[a-f0-9]{64}$/.test(previewToken)
+      && typeof packageHash === "string" && /^[a-f0-9]{64}$/.test(packageHash)
+      && typeof destinationFingerprint === "string" && /^[a-f0-9]{64}$/.test(destinationFingerprint)
+      && typeof mappingsFingerprint === "string" && /^[a-f0-9]{64}$/.test(mappingsFingerprint)
+      && typeof expectedConfirmation === "string" && /^IMPORT:[A-F0-9]{16}$/.test(expectedConfirmation)
+      && context.metadata?.backupRequired === true
+      && context.metadata?.revalidated === true;
+    if (!evidenceValid) {
+      return [{
+        id: "MAL-HOOK-PORTABLE-IMPORT-PREVIEW",
+        decision: "deny",
+        message: "Import portable sin preview, mappings, backup o revalidacion verificables.",
+        fix: "Ejecuta un preview nuevo y revalida paquete, destino, mappings y backup antes del apply.",
+      }];
+    }
+    if (context.confirmation !== expectedConfirmation) {
+      return [{
+        id: "MAL-HOOK-PORTABLE-IMPORT-CONFIRM",
+        decision: "deny",
+        message: "La confirmacion no corresponde al paquete y destino del preview portable.",
+        fix: `Usa la confirmacion exacta del preview: ${expectedConfirmation}`,
+      }];
+    }
+    return [{
+      id: "MAL-HOOK-PORTABLE-IMPORT-APPROVAL",
+      decision: "ask",
+      blockClass: "approval-required",
+      message: "Importar y reemplazar memoria requiere aprobacion humana de un solo uso.",
+      fix: "Aprueba solamente el paquete, destino, mappings y fingerprints revalidados.",
+    }];
+  }
+
   const requirePreview = context.security?.destructive?.requirePreview
     ?? context.policy?.memory.destructiveRequiresPreview;
   if (requirePreview === false) return [];
